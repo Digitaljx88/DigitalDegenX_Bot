@@ -10,6 +10,7 @@ import json
 import os
 import subprocess
 import requests
+import scanner as sc
 
 from config import (
     TELEGRAM_TOKEN, SOLANA_RPC, WALLET_PRIVATE_KEY,
@@ -232,14 +233,18 @@ def format_pair(pair: dict) -> str:
 # ─── Keyboards ────────────────────────────────────────────────────────────────
 
 def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
-    mode = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
+    mode      = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
+    scan_lbl  = "🛑 Stop Scan" if sc.is_scanning() else "🔍 Start Scan"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Market",      callback_data="menu:market"),
-         InlineKeyboardButton("🤖 AI Analyze",  callback_data="menu:analyze")],
-        [InlineKeyboardButton("💰 Trade",        callback_data="menu:trade"),
-         InlineKeyboardButton("👜 Portfolio",    callback_data="menu:portfolio")],
-        [InlineKeyboardButton("🔔 Alerts",       callback_data="menu:alerts"),
-         InlineKeyboardButton("🤖 Auto-Sell",    callback_data="menu:autosell")],
+        [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
+         InlineKeyboardButton("🤖 AI Analyze",   callback_data="menu:analyze")],
+        [InlineKeyboardButton("💰 Trade",         callback_data="menu:trade"),
+         InlineKeyboardButton("👜 Portfolio",     callback_data="menu:portfolio")],
+        [InlineKeyboardButton("🔔 Alerts",        callback_data="menu:alerts"),
+         InlineKeyboardButton("🤖 Auto-Sell",     callback_data="menu:autosell")],
+        [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
+         InlineKeyboardButton("📋 Watchlist",     callback_data="scanner:watchlist"),
+         InlineKeyboardButton("🏆 Top Alerts",    callback_data="scanner:topalerts")],
         [InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
     ])
 
@@ -1113,6 +1118,226 @@ async def cmd_autosell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _show_autosell(msg.edit_text, update.effective_user.id)
 
 
+# ─── Scanner commands ──────────────────────────────────────────────────────────
+
+async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    if sc.is_scanning():
+        await update.message.reply_text(
+            "🔍 Scanner is already running.\nUse /stopscan to stop.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 Watchlist",  callback_data="scanner:watchlist"),
+                InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+            ]])
+        )
+        return
+    s = sc.load_state()
+    s["scanning"] = True
+    targets = s.get("scan_targets", [])
+    if uid not in targets:
+        targets.append(uid)
+    s["scan_targets"] = targets
+    sc.save_state(s)
+    await update.message.reply_text(
+        "✅ *Scanner started!*\n\n"
+        "Scanning pump.fun + DexScreener every 5 minutes.\n"
+        "You'll be alerted when Heat Score ≥ 70/100.\n\n"
+        "Use /stopscan to stop.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🛑 Stop Scan",   callback_data="scanner:toggle"),
+            InlineKeyboardButton("📋 Watchlist",   callback_data="scanner:watchlist"),
+        ]])
+    )
+
+
+async def cmd_stopscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    s   = sc.load_state()
+    targets = s.get("scan_targets", [])
+    if uid in targets:
+        targets.remove(uid)
+    s["scan_targets"] = targets
+    if not targets:
+        s["scanning"] = False
+    sc.save_state(s)
+    await update.message.reply_text(
+        "🛑 *Scanner stopped.*",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📋 Menu", callback_data="menu:main")
+        ]])
+    )
+
+
+async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    wl = sc.get_watchlist()
+    if not wl:
+        await update.message.reply_text(
+            "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle")
+            ]])
+        )
+        return
+    items = sorted(wl.values(), key=lambda x: -x.get("score", 0))[:20]
+    lines = ["*📋 Watchlist* — tokens scoring 50–69\n"]
+    for t in items:
+        lines.append(
+            f"⚪ *{t['name']}* (${t['symbol']}) — {t['score']}/100\n"
+            f"   MCap: ${t.get('mcap', 0):,.0f}"
+        )
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+            InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
+        ]])
+    )
+
+
+async def cmd_heatscore(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not context.args:
+        await update.message.reply_text(
+            "Usage: `/heatscore <symbol or CA>`\nExample: `/heatscore BONK`",
+            parse_mode="Markdown"
+        )
+        return
+    msg = await update.message.reply_text("Scoring token...")
+    result = await sc.score_single_token(context.args[0])
+    if not result:
+        await msg.edit_text("Token not found.", reply_markup=back_kb())
+        return
+    await msg.edit_text(
+        sc.format_heat_score_card(result), parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{result['mint']}"),
+            InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{result['mint']}"),
+        ]]),
+        disable_web_page_preview=True
+    )
+
+
+async def cmd_topalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    alerts = sc.get_todays_alerts()
+    if not alerts:
+        await update.message.reply_text(
+            "🏆 *No alerts fired today yet.*\n\nStart the scanner to find hot tokens.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle")
+            ]])
+        )
+        return
+    top = sorted(alerts, key=lambda x: -x.get("score", 0))[:10]
+    lines = ["*🏆 Top Alerts Today*\n"]
+    for i, e in enumerate(top, 1):
+        label = sc.priority_label(e["score"])
+        lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
+    await update.message.reply_text(
+        "\n".join(lines), parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+            InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
+        ]])
+    )
+
+
+async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    action = query.data.split(":")[1]
+    await query.answer()
+
+    if action == "toggle":
+        s = sc.load_state()
+        currently = s.get("scanning", False)
+        targets   = s.get("scan_targets", [])
+        if currently:
+            if uid in targets:
+                targets.remove(uid)
+            s["scan_targets"] = targets
+            if not targets:
+                s["scanning"] = False
+            sc.save_state(s)
+            await query.edit_message_text(
+                "🛑 *Scanner stopped.*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")
+                ]])
+            )
+        else:
+            s["scanning"] = True
+            if uid not in targets:
+                targets.append(uid)
+            s["scan_targets"] = targets
+            sc.save_state(s)
+            await query.edit_message_text(
+                "✅ *Scanner started!*\n\n"
+                "Scanning every 5 minutes.\n"
+                "Alerts fire when Heat Score ≥ 70/100.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🛑 Stop Scan",  callback_data="scanner:toggle"),
+                    InlineKeyboardButton("📋 Watchlist",  callback_data="scanner:watchlist"),
+                ]])
+            )
+
+    elif action == "watchlist":
+        wl = sc.get_watchlist()
+        if not wl:
+            await query.edit_message_text(
+                "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle"),
+                    InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
+                ]])
+            )
+            return
+        items = sorted(wl.values(), key=lambda x: -x.get("score", 0))[:20]
+        lines = ["*📋 Watchlist* — tokens scoring 50–69\n"]
+        for t in items:
+            lines.append(
+                f"⚪ *{t['name']}* (${t['symbol']}) — {t['score']}/100\n"
+                f"   MCap: ${t.get('mcap', 0):,.0f}"
+            )
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+                InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
+            ]])
+        )
+
+    elif action == "topalerts":
+        alerts = sc.get_todays_alerts()
+        if not alerts:
+            await query.edit_message_text(
+                "🏆 *No alerts fired today yet.*",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle"),
+                    InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
+                ]])
+            )
+            return
+        top   = sorted(alerts, key=lambda x: -x.get("score", 0))[:10]
+        lines = ["*🏆 Top Alerts Today*\n"]
+        for i, e in enumerate(top, 1):
+            label = sc.priority_label(e["score"])
+            lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+                InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
+            ]])
+        )
+
+
 # ─── Callbacks ────────────────────────────────────────────────────────────────
 
 async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1577,6 +1802,29 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     else:
+        # Natural language scanner triggers
+        tl = text.lower()
+        if any(p in tl for p in ["start scanning", "watch for hot", "start scan", "begin scan"]):
+            await update.message.reply_text("Starting scanner...")
+            await cmd_scan(update, context)
+            return
+        if any(p in tl for p in ["stop scanning", "stop scan", "pause scan"]):
+            await cmd_stopscan(update, context)
+            return
+        if any(p in tl for p in ["show watchlist", "watchlist", "watch list"]):
+            await cmd_watchlist(update, context)
+            return
+        if any(p in tl for p in ["top alerts today", "top alerts", "best alerts"]):
+            await cmd_topalerts(update, context)
+            return
+        if tl.startswith("heat score ") or tl.startswith("heatscore "):
+            token = text.split(None, 1)[1] if " " in text else ""
+            if token:
+                context._args = [token]
+                context.args  = [token]
+                await cmd_heatscore(update, context)
+                return
+
         # Free-form AI chat
         msg = await update.message.reply_text("Thinking...")
         prompt = (
@@ -1598,18 +1846,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(app):
     await app.bot.set_my_commands([
-        BotCommand("start",     "Open main menu"),
-        BotCommand("menu",      "Open main menu"),
-        BotCommand("price",     "Get token price"),
-        BotCommand("top",       "Top Solana meme coins"),
-        BotCommand("analyze",   "AI analysis of a token"),
-        BotCommand("buy",       "Buy a token"),
-        BotCommand("sell",      "Sell a token"),
-        BotCommand("portfolio", "View your portfolio"),
-        BotCommand("autosell",  "Manage auto-sell targets"),
-        BotCommand("mode",      "Switch paper / live mode"),
-        BotCommand("alert",     "Set a price alert"),
-        BotCommand("alerts",    "View active alerts"),
+        BotCommand("start",      "Launch the bot"),
+        BotCommand("menu",       "Show all options & buttons"),
+        BotCommand("price",      "Look up a token price"),
+        BotCommand("top",        "Top 10 Solana meme coins by volume"),
+        BotCommand("analyze",    "AI-powered token analysis"),
+        BotCommand("buy",        "Buy a token (paper or live)"),
+        BotCommand("sell",       "Sell a token from your portfolio"),
+        BotCommand("portfolio",  "View your holdings & balances"),
+        BotCommand("autosell",   "Configure auto-sell targets per token"),
+        BotCommand("mode",       "Switch between paper and live trading"),
+        BotCommand("alert",      "Set a price alert for a token"),
+        BotCommand("alerts",     "View & manage your active alerts"),
+        BotCommand("scan",       "Start the hot token scanner"),
+        BotCommand("stopscan",   "Stop the token scanner"),
+        BotCommand("watchlist",  "Tokens scoring 50–69 (worth watching)"),
+        BotCommand("heatscore",  "Heat score any token on demand"),
+        BotCommand("topalerts",  "Best scanner alerts from today"),
     ])
 
 
@@ -1624,18 +1877,23 @@ if __name__ == "__main__":
     )
 
     # Slash commands
-    app.add_handler(CommandHandler("start",     start))
-    app.add_handler(CommandHandler("menu",      start))
-    app.add_handler(CommandHandler("price",     cmd_price))
-    app.add_handler(CommandHandler("top",       cmd_top))
-    app.add_handler(CommandHandler("analyze",   cmd_analyze))
-    app.add_handler(CommandHandler("buy",       cmd_buy))
-    app.add_handler(CommandHandler("sell",      cmd_sell))
-    app.add_handler(CommandHandler("portfolio", cmd_portfolio))
-    app.add_handler(CommandHandler("autosell",  cmd_autosell))
-    app.add_handler(CommandHandler("mode",      cmd_mode))
-    app.add_handler(CommandHandler("alert",     cmd_alert))
-    app.add_handler(CommandHandler("alerts",    cmd_alerts))
+    app.add_handler(CommandHandler("start",      start))
+    app.add_handler(CommandHandler("menu",       start))
+    app.add_handler(CommandHandler("price",      cmd_price))
+    app.add_handler(CommandHandler("top",        cmd_top))
+    app.add_handler(CommandHandler("analyze",    cmd_analyze))
+    app.add_handler(CommandHandler("buy",        cmd_buy))
+    app.add_handler(CommandHandler("sell",       cmd_sell))
+    app.add_handler(CommandHandler("portfolio",  cmd_portfolio))
+    app.add_handler(CommandHandler("autosell",   cmd_autosell))
+    app.add_handler(CommandHandler("mode",       cmd_mode))
+    app.add_handler(CommandHandler("alert",      cmd_alert))
+    app.add_handler(CommandHandler("alerts",     cmd_alerts))
+    app.add_handler(CommandHandler("scan",       cmd_scan))
+    app.add_handler(CommandHandler("stopscan",   cmd_stopscan))
+    app.add_handler(CommandHandler("watchlist",  cmd_watchlist))
+    app.add_handler(CommandHandler("heatscore",  cmd_heatscore))
+    app.add_handler(CommandHandler("topalerts",  cmd_topalerts))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
@@ -1651,6 +1909,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(confirm_callback,             pattern=r"^confirm:"))
     app.add_handler(CallbackQueryHandler(quick_callback,               pattern=r"^quick:"))
     app.add_handler(CallbackQueryHandler(cancel_callback,              pattern=r"^cancel$"))
+    app.add_handler(CallbackQueryHandler(scanner_callback,             pattern=r"^scanner:"))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -1658,6 +1917,13 @@ if __name__ == "__main__":
     # Background jobs
     app.job_queue.run_repeating(check_price_alerts, interval=ALERT_CHECK_SECS, first=15)
     app.job_queue.run_repeating(check_auto_sell,    interval=ALERT_CHECK_SECS, first=30)
+
+    async def run_scanner_job(ctx):
+        s        = sc.load_state()
+        chat_ids = s.get("scan_targets", [])
+        await sc.run_scan(ctx.bot, chat_ids)
+
+    app.job_queue.run_repeating(run_scanner_job, interval=300, first=60)
 
     print("@DigitalDegenX_Bot running...")
     app.run_polling()
