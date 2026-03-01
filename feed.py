@@ -93,36 +93,50 @@ def _age_str(pair_created_ms: int) -> str:
     return f"{mins:.0f}m" if mins < 60 else f"{mins/60:.1f}h"
 
 
+def _price_str(p) -> str:
+    try:
+        f = float(p)
+        return f"${f:.8f}" if f < 0.01 else f"${f:.4f}"
+    except Exception:
+        return "N/A"
+
+
 def format_launch_post(token: dict, heat_score: int, priority_label: str) -> str:
-    mint = token.get("mint", "")
+    mint      = token.get("mint", "")
+    price_usd = token.get("price_usd", 0)
+    h1_chg    = token.get("price_h1", 0)
+    chg_str   = f"▲ {h1_chg:.1f}%" if h1_chg >= 0 else f"▼ {abs(h1_chg):.1f}%"
     return (
         f"🆕 *NEW LAUNCH* — {priority_label}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{token.get('name', '?')}* (${token.get('symbol', '?')})\n"
-        f"📍 `{mint}`\n"
         f"🌡️ Heat Score: *{heat_score}/100*\n"
-        f"⏰ Age: {_age_str(token.get('pair_created', 0))}\n"
-        f"💰 MCap: ${token.get('mcap', 0):,.0f}\n"
-        f"📊 Vol 1h: ${token.get('volume_h1', 0):,.0f}\n"
+        f"💵 Price: `{_price_str(price_usd)}` (1h: {chg_str})\n"
+        f"🏦 MCap: `${token.get('mcap', 0):,.0f}`\n"
+        f"📊 Vol 1h: `${token.get('volume_h1', 0):,.0f}`\n"
+        f"👛 Holders: `{token.get('total_holders', 0)}`\n"
+        f"⏰ Age: `{_age_str(token.get('pair_created', 0))}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🔗 [Chart](https://dexscreener.com/solana/{mint})  "
-        f"[Pump](https://pump.fun/{mint})"
+        f"📋 *Mint:*\n`{mint}`"
     )
 
 
 def format_migration_post(token: dict) -> str:
-    mint = token.get("mint", "")
+    mint      = token.get("mint", "")
+    price_usd = token.get("price_usd", 0)
     return (
-        f"🚀 *MIGRATED TO RAYDIUM*\n"
+        f"🚀 *MIGRATED TO RAYDIUM* 🎓\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{token.get('name', '?')}* (${token.get('symbol', '?')})\n"
-        f"📍 `{mint}`\n"
-        f"💰 MCap: ${token.get('mcap', 0):,.0f}\n"
-        f"📊 Vol 1h: ${token.get('volume_h1', 0):,.0f}\n"
+        f"💵 Price: `{_price_str(price_usd)}`\n"
+        f"🏦 MCap: `${token.get('mcap', 0):,.0f}`\n"
+        f"📊 Vol 1h: `${token.get('volume_h1', 0):,.0f}`\n"
+        f"👛 Holders: `{token.get('total_holders', 0)}`\n"
+        f"⏰ Age: `{_age_str(token.get('pair_created', 0))}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"✅ Now tradeable on Raydium via Jupiter\n"
-        f"🔗 [Chart](https://dexscreener.com/solana/{mint})  "
-        f"[Trade](https://jup.ag/swap/SOL-{mint})"
+        f"📋 *Mint:*\n`{mint}`\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"✅ Now tradeable on Raydium via Jupiter"
     )
 
 

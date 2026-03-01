@@ -235,23 +235,40 @@ def _n(v, decimals=0) -> str:
         return str(v)
 
 
+def _pct(v) -> str:
+    try:
+        f = float(v)
+        arrow = "▲" if f >= 0 else "▼"
+        return f"{arrow} {abs(f):.1f}%"
+    except Exception:
+        return "N/A"
+
+
 def format_pair(pair: dict) -> str:
-    name = pair.get("baseToken", {}).get("name", "N/A")
-    sym  = pair.get("baseToken", {}).get("symbol", "N/A")
-    addr = pair.get("baseToken", {}).get("address", "N/A")
-    pr   = pair.get("priceUsd", "N/A")
-    h1   = pair.get("priceChange", {}).get("h1", "N/A")
-    h24  = pair.get("priceChange", {}).get("h24", "N/A")
-    dex  = pair.get("dexId", "N/A")
+    name  = pair.get("baseToken", {}).get("name", "N/A")
+    sym   = pair.get("baseToken", {}).get("symbol", "N/A")
+    addr  = pair.get("baseToken", {}).get("address", "N/A")
+    pr    = pair.get("priceUsd", "N/A")
+    chg   = pair.get("priceChange", {}) or {}
+    vol   = pair.get("volume", {}) or {}
+    dex   = pair.get("dexId", "N/A")
+    pair_addr = pair.get("pairAddress", "")
+    txns  = pair.get("txns", {}) or {}
+    buys  = txns.get("h1", {}).get("buys", 0)
+    sells = txns.get("h1", {}).get("sells", 0)
     return (
-        f"*{name} (${sym})*\n"
-        f"Price: `${pr}`\n"
-        f"1h: `{h1}%` | 24h: `{h24}%`\n"
-        f"Volume 24h: `{_n(pair.get('volume',{}).get('h24'))}`\n"
-        f"Liquidity: `{_n(pair.get('liquidity',{}).get('usd'))}`\n"
-        f"Market Cap: `{_n(pair.get('marketCap'))}`\n"
-        f"DEX: `{dex}`\n"
-        f"CA: `{addr}`"
+        f"*{name}* (${sym})\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"💵 Price: `${pr}`\n"
+        f"📈 5m: `{_pct(chg.get('m5'))}` | 1h: `{_pct(chg.get('h1'))}` | 24h: `{_pct(chg.get('h24'))}`\n"
+        f"📊 Vol 1h: `{_n(vol.get('h1'))}` | 24h: `{_n(vol.get('h24'))}`\n"
+        f"💧 Liquidity: `{_n(pair.get('liquidity',{}).get('usd'))}`\n"
+        f"🏦 MCap: `{_n(pair.get('marketCap'))}`\n"
+        f"🔄 Buys/Sells (1h): `{buys}` / `{sells}`\n"
+        f"🏪 DEX: `{dex}`\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📋 Mint: `{addr}`\n"
+        + (f"🔗 Pair: `{pair_addr}`\n" if pair_addr else "")
     )
 
 
@@ -364,10 +381,13 @@ def confirm_trade_kb(action: str, mint: str, symbol: str) -> InlineKeyboardMarku
 
 def price_card_kb(mint: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 Analyze", callback_data=f"quick:analyze:{mint}"),
-         InlineKeyboardButton("🟢 Buy",     callback_data=f"quick:buy:{mint}"),
-         InlineKeyboardButton("🔔 Alert",   callback_data=f"quick:alert:{mint}")],
-        [InlineKeyboardButton("⬅️ Back",    callback_data="menu:market")],
+        [InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
+         InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
+         InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
+        [InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/solana/{mint}"),
+         InlineKeyboardButton("🪙 Pump.fun",    url=f"https://pump.fun/{mint}"),
+         InlineKeyboardButton("🔫 RugCheck",    url=f"https://rugcheck.xyz/tokens/{mint}")],
+        [InlineKeyboardButton("⬅️ Back",     callback_data="menu:market")],
     ])
 
 

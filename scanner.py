@@ -374,6 +374,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         "name":          token.get("name", ""),
         "symbol":        token.get("symbol", ""),
         "mcap":          token.get("mcap", 0),
+        "price_usd":     token.get("price_usd", 0),
         "volume_h1":     token.get("volume_h1", 0),
         "total_holders": rc.get("totalHolders", 0),
         "pair_created":  token.get("pair_created", 0),
@@ -420,24 +421,30 @@ def format_alert(r: dict) -> str:
 
     def line(key):
         pts, reason = bd[key]
-        return f"- {key.title()}: {pts}pts - {reason}"
+        return f"  • {key.title()}: *{pts}pts* — {reason}"
 
-    flags_str = ", ".join(r["red_flags"]) if r["red_flags"] else "None"
+    flags_str  = ", ".join(r["red_flags"]) if r["red_flags"] else "None"
     risk_emoji = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(r["risk"], "⚪")
+    price_usd  = r.get("price_usd", 0)
+    price_str  = f"${price_usd:.8f}" if price_usd and price_usd < 0.01 else (f"${price_usd:.4f}" if price_usd else "N/A")
 
     return (
         f"{label}\n"
-        f"🚨 HOT TOKEN ALERT 🚨\n"
+        f"🚨 *HOT TOKEN ALERT* 🚨\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 Name: {r['name']} (${r['symbol']})\n"
-        f"📍 Address: `{mint}`\n"
+        f"🪙 *{r['name']}* (${r['symbol']})\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
         f"🌡️ Heat Score: *{r['total']}/100*\n"
-        f"⏰ Age: {age_str(r['pair_created'])}\n"
-        f"💰 Market Cap: ${r['mcap']:,.0f}\n"
-        f"📊 Volume (1h): ${r['volume_h1']:,.0f}\n"
-        f"👛 Unique Wallets: {r['total_holders']}\n"
+        f"💵 Price: `{price_str}`\n"
+        f"🏦 MCap: `${r['mcap']:,.0f}`\n"
+        f"📊 Vol (1h): `${r['volume_h1']:,.0f}`\n"
+        f"👛 Holders: `{r['total_holders']}`\n"
+        f"⏰ Age: `{age_str(r['pair_created'])}`\n"
+        f"🏪 DEX: `{r.get('dex', 'N/A')}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"📈 SIGNALS:\n"
+        f"📋 *Mint:*\n`{mint}`\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Signals:*\n"
         f"{line('volume')}\n"
         f"{line('wallets')}\n"
         f"{line('twitter')}\n"
@@ -447,33 +454,36 @@ def format_alert(r: dict) -> str:
         f"{line('holders')}\n"
         f"{line('age')}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"{risk_emoji} Risk Level: *{r['risk']}*\n"
-        f"⚠️ Red Flags: {flags_str}\n"
-        f"🔗 [Chart](https://dexscreener.com/solana/{mint})\n"
-        f"🔗 [Pump](https://pump.fun/{mint})\n"
-        f"━━━━━━━━━━━━━━━━━━━"
+        f"{risk_emoji} Risk: *{r['risk']}*  |  ⚠️ Flags: {flags_str}"
     )
 
 
 def format_heat_score_card(r: dict) -> str:
     """Shorter card for manual /heatscore lookups."""
-    bd     = r["breakdown"]
-    label  = priority_label(r["total"])
-    lines  = [
+    bd        = r["breakdown"]
+    label     = priority_label(r["total"])
+    mint      = r["mint"]
+    price_usd = r.get("price_usd", 0)
+    price_str = f"${price_usd:.8f}" if price_usd and price_usd < 0.01 else (f"${price_usd:.4f}" if price_usd else "N/A")
+
+    lines = [
         f"🌡️ *Heat Score: {r['total']}/100* — {label}\n",
-        f"*{r['name']} (${r['symbol']})*",
-        f"MCap: ${r['mcap']:,.0f} | Vol 1h: ${r['volume_h1']:,.0f}\n",
-        "*Breakdown:*",
+        f"*{r['name']}* (${r['symbol']})",
+        f"💵 Price: `{price_str}`",
+        f"🏦 MCap: `${r['mcap']:,.0f}` | 📊 Vol 1h: `${r['volume_h1']:,.0f}`",
+        f"👛 Holders: `{r['total_holders']}` | ⏰ Age: `{age_str(r['pair_created'])}`",
+        f"━━━━━━━━━━━━━━━━━━━",
+        f"📋 *Mint:*\n`{mint}`",
+        f"━━━━━━━━━━━━━━━━━━━",
+        f"*Breakdown:*",
     ]
     for cat, (pts, reason) in bd.items():
-        bar = "█" * (pts // 2) + "░" * ((20 - pts) // 2) if pts <= 20 else "█" * 10
-        lines.append(f"`{cat:<10}` {pts:>2}pts  {reason}")
+        lines.append(f"`{cat:<10}` *{pts:>2}pts*  {reason}")
 
     if r["disqualified"]:
         lines.append(f"\n❌ *DISQUALIFIED:* {r['disqualified']}")
     if r["red_flags"]:
         lines.append(f"⚠️ Flags: {', '.join(r['red_flags'])}")
-    lines.append(f"\n🔗 [Chart](https://dexscreener.com/solana/{r['mint']})")
     return "\n".join(lines)
 
 
