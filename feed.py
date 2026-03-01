@@ -187,7 +187,7 @@ async def maybe_post_launch(bot, token: dict, heat_score: int, priority_label: s
         return
 
     _mark_posted("posted_launches", mint)
-    msg = format_launch_post(token, heat_score, priority_label)
+    msg = format_launch_post(token, heat_score, priority_label)[:4000]
     try:
         await bot.send_message(
             chat_id=cfg["launch_channel"],
@@ -215,7 +215,7 @@ async def maybe_post_migration(bot, token: dict):
         return
 
     _mark_posted("posted_migrations", mint)
-    msg = format_migration_post(token)
+    msg = format_migration_post(token)[:4000]
     try:
         await bot.send_message(
             chat_id=cfg["migrate_channel"],

@@ -2359,7 +2359,7 @@ if __name__ == "__main__":
         chat_ids = s.get("scan_targets", [])
         await sc.run_scan(ctx.bot, chat_ids)
 
-    app.job_queue.run_repeating(run_scanner_job, interval=300, first=60)
+    app.job_queue.run_repeating(run_scanner_job, interval=30, first=15)
 
     print("@DigitalDegenX_Bot running...")
     app.run_polling()

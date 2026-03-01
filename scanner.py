@@ -106,66 +106,97 @@ def get_todays_alerts() -> list:
 
 # ─── Data fetching ────────────────────────────────────────────────────────────
 
+def _parse_pairs(pairs: list, tokens: dict):
+    """Merge DexScreener pairs into the tokens dict."""
+    for p in pairs:
+        if p.get("chainId") != "solana":
+            continue
+        mint = p.get("baseToken", {}).get("address", "")
+        if not mint:
+            continue
+        mcap = float(p.get("marketCap") or p.get("fdv") or 0)
+        entry = tokens.setdefault(mint, {"mint": mint})
+        entry.update({
+            "name":         p.get("baseToken", {}).get("name", ""),
+            "symbol":       p.get("baseToken", {}).get("symbol", ""),
+            "mcap":         mcap,
+            "price_usd":    float(p.get("priceUsd") or 0),
+            "volume_h1":    float((p.get("volume") or {}).get("h1", 0)),
+            "volume_h6":    float((p.get("volume") or {}).get("h6", 0)),
+            "volume_h24":   float((p.get("volume") or {}).get("h24", 0)),
+            "volume_m5":    float((p.get("volume") or {}).get("m5", 0)),
+            "txns_m5_buys": int((p.get("txns") or {}).get("m5", {}).get("buys", 0)),
+            "price_h24":    float((p.get("priceChange") or {}).get("h24", 0)),
+            "price_h1":     float((p.get("priceChange") or {}).get("h1", 0)),
+            "liquidity":    float((p.get("liquidity") or {}).get("usd", 0)),
+            "dex":          p.get("dexId", ""),
+            "pair_address": p.get("pairAddress", ""),
+            "pair_created": p.get("pairCreatedAt", 0),
+        })
+
+
 def fetch_new_tokens() -> list[dict]:
     """
-    Fetch candidate tokens from DexScreener new profiles + trending Solana pairs.
-    Returns list of {mint, name, symbol, mcap, volume, pair_created, dex, pair}.
+    Fetch candidate tokens from multiple DexScreener sources.
+    Returns list of scored token dicts.
     """
     tokens: dict[str, dict] = {}
 
-    # Source 1: DexScreener new profiles (pump.fun tokens with social data)
+    # Source 1: DexScreener new token profiles (pump.fun with social data)
     try:
         profiles = requests.get(DEXSCREENER_PROFILES, timeout=10).json()
-        sol_profiles = [p for p in profiles if p.get("chainId") == "solana"]
-        for p in sol_profiles[:30]:
-            mint = p.get("tokenAddress", "")
-            if mint:
-                tokens[mint] = {
-                    "mint":        mint,
-                    "twitter_url": next(
-                        (l["url"] for l in p.get("links", []) if l.get("type") == "twitter"),
-                        None
-                    ),
-                    "description": p.get("description", ""),
-                    "has_icon":    bool(p.get("icon")),
-                }
+        if isinstance(profiles, list):
+            sol_profiles = [p for p in profiles if p.get("chainId") == "solana"]
+            for p in sol_profiles[:50]:
+                mint = p.get("tokenAddress", "")
+                if mint:
+                    entry = tokens.setdefault(mint, {"mint": mint})
+                    entry.update({
+                        "twitter_url": next(
+                            (l["url"] for l in p.get("links", []) if l.get("type") == "twitter"),
+                            None
+                        ),
+                        "description": p.get("description", ""),
+                        "has_icon":    bool(p.get("icon")),
+                    })
     except Exception:
         pass
 
-    # Source 2: DexScreener Solana pairs — get actual market data
+    # Source 2: DexScreener boosted tokens (paid promotions = community attention)
     try:
-        pairs = requests.get(DEXSCREENER_SEARCH + "solana", timeout=10).json().get("pairs") or []
-        sol   = [p for p in pairs if p.get("chainId") == "solana"]
-        for p in sol[:50]:
-            mint = p.get("baseToken", {}).get("address", "")
-            if not mint:
-                continue
-            mcap = float(p.get("marketCap") or p.get("fdv") or 0)
-            if not (MCAP_MIN <= mcap <= MCAP_MAX):
-                continue
-            entry = tokens.setdefault(mint, {"mint": mint})
-            entry.update({
-                "name":         p.get("baseToken", {}).get("name", ""),
-                "symbol":       p.get("baseToken", {}).get("symbol", ""),
-                "mcap":         mcap,
-                "price_usd":    float(p.get("priceUsd") or 0),
-                "volume_h1":    float((p.get("volume") or {}).get("h1", 0)),
-                "volume_h6":    float((p.get("volume") or {}).get("h6", 0)),
-                "volume_h24":   float((p.get("volume") or {}).get("h24", 0)),
-                "volume_m5":    float((p.get("volume") or {}).get("m5", 0)),
-                "txns_m5_buys": int((p.get("txns") or {}).get("m5", {}).get("buys", 0)),
-                "price_h24":    float((p.get("priceChange") or {}).get("h24", 0)),
-                "price_h1":     float((p.get("priceChange") or {}).get("h1", 0)),
-                "liquidity":    float((p.get("liquidity") or {}).get("usd", 0)),
-                "dex":          p.get("dexId", ""),
-                "pair_address": p.get("pairAddress", ""),
-                "pair_created": p.get("pairCreatedAt", 0),
-            })
+        boosts = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=10).json()
+        if isinstance(boosts, list):
+            sol_boosts = [b for b in boosts if b.get("chainId") == "solana"]
+            for b in sol_boosts[:20]:
+                mint = b.get("tokenAddress", "")
+                if mint:
+                    tokens.setdefault(mint, {"mint": mint})
     except Exception:
         pass
 
-    # Filter out entries missing core market data
-    result = [v for v in tokens.values() if v.get("name") and v.get("mcap", 0) >= MCAP_MIN]
+    # Source 3: Multiple DexScreener searches to maximise pump.fun token coverage
+    search_terms = ["pump", "sol meme", "solana meme", "new token", "pepe", "ai agent"]
+    for term in search_terms:
+        try:
+            pairs = requests.get(DEXSCREENER_SEARCH + term, timeout=10).json().get("pairs") or []
+            _parse_pairs(pairs, tokens)
+        except Exception:
+            continue
+
+    # Source 4: Direct token lookup for mints discovered via profiles/boosts
+    profile_mints = [m for m, v in tokens.items() if not v.get("name")]
+    for mint in profile_mints[:20]:
+        try:
+            pairs = requests.get(DEXSCREENER_TOKEN + mint, timeout=10).json().get("pairs") or []
+            _parse_pairs(pairs, tokens)
+        except Exception:
+            continue
+
+    # Filter: must have name + mcap in range
+    result = [
+        v for v in tokens.values()
+        if v.get("name") and MCAP_MIN <= v.get("mcap", 0) <= MCAP_MAX
+    ]
     return result
 
 
@@ -493,8 +524,14 @@ async def run_scan(bot, chat_ids: list[int]):
     """
     Fetch, score, and alert. Called every N seconds by bot job queue.
     chat_ids: list of user IDs to send alerts to.
+    Runs whenever scanning is ON *or* any channel feed is enabled.
     """
-    if not is_scanning():
+    import feed as fd
+    cfg = fd.load_feed_config()
+    feeds_active = cfg.get("launch_enabled") or cfg.get("migrate_enabled")
+
+    scanning_on = is_scanning()
+    if not scanning_on and not feeds_active:
         return
 
     tokens = fetch_new_tokens()
@@ -553,8 +590,8 @@ async def run_scan(bot, chat_ids: list[int]):
         if "raydium" in dex_id.lower():
             await fd.maybe_post_migration(bot, token)
 
-        # Alert threshold
-        if score >= 70 and cooldown_ok(mint):
+        # Alert threshold — only send DMs if user scanning is on
+        if scanning_on and score >= 70 and cooldown_ok(mint):
             mark_alerted(mint)
 
             # Update log entry
@@ -566,7 +603,7 @@ async def run_scan(bot, chat_ids: list[int]):
             with open(DAILY_LOG_FILE, "w") as f:
                 json.dump(log, f, indent=2)
 
-            msg = format_alert(result)
+            msg = format_alert(result)[:4000]   # Telegram 4096 char limit
             from telegram import InlineKeyboardMarkup, InlineKeyboardButton
             kb  = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
