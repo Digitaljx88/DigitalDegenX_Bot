@@ -1,0 +1,12 @@
+# Secrets — never commit real config
+config.py
+
+# Runtime data
+data/
+
+# Python
+venv/
+__pycache__/
+*.pyc
+*.pyo
+.env
