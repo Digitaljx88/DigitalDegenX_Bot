@@ -1982,6 +1982,35 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(query, uid, edit=True)
 
 
+# ─── Forwarded message handler (channel ID finder) ────────────────────────────
+
+async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Detect forwarded channel messages and reply with the channel ID."""
+    msg  = update.message
+    if not msg:
+        return
+    fwd  = msg.forward_origin if hasattr(msg, "forward_origin") else None
+    chat = getattr(fwd, "chat", None) if fwd else None
+    # Older API: forward_from_chat
+    if not chat:
+        chat = getattr(msg, "forward_from_chat", None)
+    if chat:
+        cid  = chat.id
+        name = getattr(chat, "title", str(cid))
+        await msg.reply_text(
+            f"📡 *Channel ID found!*\n\n"
+            f"Channel: *{name}*\n"
+            f"ID: `{cid}`\n\n"
+            f"Copy the ID above and paste it into `/feed` → Set Channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📡 Open Feed Settings", callback_data="feed:menu")
+            ]])
+        )
+        return
+    # Not a channel forward — fall through to normal text handling
+
+
 # ─── Text input state machine ─────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2346,6 +2375,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(scanner_callback,             pattern=r"^scanner:"))
     app.add_handler(CallbackQueryHandler(wallet_callback,              pattern=r"^wallet:"))
     app.add_handler(CallbackQueryHandler(feed_callback,                pattern=r"^feed:"))
+
+    # Forwarded messages (channel ID finder)
+    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
