@@ -20,7 +20,7 @@ DEXSCREENER_TOKEN    = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_REPORT      = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
 ALERT_COOLDOWN_SECS  = 3600   # one alert per token per hour
-MCAP_MIN             = 10_000
+MCAP_MIN             = 1_000
 MCAP_MAX             = 10_000_000
 
 # ── Narrative keywords ────────────────────────────────────────────────────────
@@ -174,8 +174,20 @@ def fetch_new_tokens() -> list[dict]:
     except Exception:
         pass
 
-    # Source 3: Multiple DexScreener searches to maximise pump.fun token coverage
-    search_terms = ["pump", "sol meme", "solana meme", "new token", "pepe", "ai agent"]
+    # Source 3: Newest Solana pairs sorted by creation time
+    try:
+        pairs = requests.get(
+            "https://api.dexscreener.com/latest/dex/pairs/solana",
+            timeout=10
+        ).json().get("pairs") or []
+        # Sort newest first, take top 100
+        pairs.sort(key=lambda p: p.get("pairCreatedAt", 0), reverse=True)
+        _parse_pairs(pairs[:100], tokens)
+    except Exception:
+        pass
+
+    # Source 4: Multiple DexScreener searches to maximise pump.fun token coverage
+    search_terms = ["pump", "sol meme", "solana meme", "new token", "pepe", "ai agent", "doge", "cat", "trump"]
     for term in search_terms:
         try:
             pairs = requests.get(DEXSCREENER_SEARCH + term, timeout=10).json().get("pairs") or []
@@ -183,7 +195,7 @@ def fetch_new_tokens() -> list[dict]:
         except Exception:
             continue
 
-    # Source 4: Direct token lookup for mints discovered via profiles/boosts
+    # Source 5: Direct token lookup for mints discovered via profiles/boosts
     profile_mints = [m for m, v in tokens.items() if not v.get("name")]
     for mint in profile_mints[:20]:
         try:

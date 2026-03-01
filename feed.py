@@ -21,7 +21,7 @@ FEED_STATE_FILE  = os.path.join(DATA_DIR, "feed_state.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 # How long to remember a token to avoid re-posting (24 h)
-DEDUP_TTL = 86_400
+DEDUP_TTL = 7_200   # 2 hours — allows re-posting if token moves again
 
 
 # ── Config helpers ────────────────────────────────────────────────────────────
