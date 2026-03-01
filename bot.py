@@ -6,12 +6,17 @@ Features: menu UI + slash commands, paper/live trading, AI analysis,
 """
 
 import asyncio
+import importlib
 import json
 import os
+import re
 import subprocess
 import requests
 import scanner as sc
+import pumpfun
+import feed as fd
 
+import config as _cfg
 from config import (
     TELEGRAM_TOKEN, SOLANA_RPC, WALLET_PRIVATE_KEY,
     OPENCLAW_CONTAINER, ADMIN_IDS, PAPER_START_SOL, ALERT_CHECK_SECS,
@@ -78,6 +83,26 @@ def reset_portfolio(uid: int):
     p = load_portfolios()
     p[str(uid)] = {"SOL": PAPER_START_SOL}
     save_portfolios(p)
+
+
+# ── Wallet key persistence ─────────────────────────────────────────────────────
+
+def save_wallet_key(new_key: str):
+    """Write WALLET_PRIVATE_KEY to config.py and reload the module."""
+    cfg_path = os.path.join(os.path.dirname(__file__), "config.py")
+    with open(cfg_path) as f:
+        src = f.read()
+    src = re.sub(
+        r'^WALLET_PRIVATE_KEY\s*=\s*.*$',
+        f'WALLET_PRIVATE_KEY = "{new_key}"',
+        src, flags=re.MULTILINE
+    )
+    with open(cfg_path, "w") as f:
+        f.write(src)
+    importlib.reload(_cfg)
+    global WALLET_PRIVATE_KEY
+    WALLET_PRIVATE_KEY = _cfg.WALLET_PRIVATE_KEY
+
 
 # ── Price alerts ──────────────────────────────────────────────────────────────
 
@@ -245,7 +270,9 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
          InlineKeyboardButton("📋 Watchlist",     callback_data="scanner:watchlist"),
          InlineKeyboardButton("🏆 Top Alerts",    callback_data="scanner:topalerts")],
-        [InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
+        [InlineKeyboardButton("👛 Wallet",        callback_data="wallet:menu"),
+         InlineKeyboardButton("📡 Feeds",         callback_data="feed:menu"),
+         InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
     ])
 
 
@@ -772,10 +799,43 @@ async def do_trade_flow(msg, uid: int, context, action: str,
     # ── Live ──────────────────────────────────────────────────────────────────
     if not WALLET_PRIVATE_KEY:
         await msg.edit_text(
-            "⚠️ No wallet configured.\nAdd `WALLET_PRIVATE_KEY` to `config.py`.",
-            parse_mode="Markdown", reply_markup=back_kb()
+            "⚠️ *No wallet configured.*\n\n"
+            "Create or import a wallet first:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("👛 Set Up Wallet", callback_data="wallet:menu")],
+                [InlineKeyboardButton("⬅️ Back",          callback_data="menu:main")],
+            ])
         )
         return
+
+    # Detect pump.fun bonding curve tokens
+    dex_id    = pair.get("dexId", "")
+    is_pump   = pumpfun.is_pumpfun_token(dex_id, token_mint, SOLANA_RPC)
+
+    if action == "buy" and is_pump:
+        # ── pump.fun direct buy ───────────────────────────────────────────────
+        bc = pumpfun.fetch_bonding_curve_data(token_mint, SOLANA_RPC)
+        if bc and not bc["complete"]:
+            tok_est = pumpfun.calculate_buy_tokens(int(amount * 1e9), bc)
+            summary = (
+                f"Spend `{amount} SOL` → ~`{tok_est:,} {symbol}` (raw)\n"
+                f"Route: *pump.fun bonding curve*\n"
+                f"Slippage: 15%"
+            )
+            context.user_data["pending_buy"] = {
+                "via": "pumpfun", "symbol": symbol,
+                "mint": token_mint, "price_usd": price_usd,
+                "sol_amount": amount, "tok_est": tok_est,
+                "decimals": decimals,
+            }
+            await msg.edit_text(
+                f"🔴 *Live Buy Quote* (pump.fun)\n\n{summary}\n\nConfirm?",
+                parse_mode="Markdown",
+                reply_markup=confirm_trade_kb(action, token_mint, symbol),
+            )
+            return
+        # bonding curve complete → fall through to Jupiter
 
     if action == "buy":
         summary = f"Spend `{amount} SOL` → Get ~`{out_amount:,} {symbol}` (raw)"
@@ -783,7 +843,7 @@ async def do_trade_flow(msg, uid: int, context, action: str,
         summary = f"Sell `{int(amount):,} {symbol}` → Get ~`{out_amount/1e9:.4f} SOL`"
 
     context.user_data[f"pending_{action}"] = {
-        "quote": quote, "symbol": symbol,
+        "via": "jupiter", "quote": quote, "symbol": symbol,
         "mint": token_mint, "price_usd": price_usd,
         "raw_out": out_amount, "decimals": decimals,
     }
@@ -1244,6 +1304,229 @@ async def cmd_topalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ─── Wallet commands ──────────────────────────────────────────────────────────
+
+async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await _show_wallet_menu(update.message.reply_text)
+
+
+async def _show_wallet_menu(send_fn):
+    from solders.keypair import Keypair as _KP
+    if WALLET_PRIVATE_KEY:
+        try:
+            kp     = _KP.from_base58_string(WALLET_PRIVATE_KEY)
+            pubkey = str(kp.pubkey())
+            bal    = get_sol_balance(pubkey)
+            text   = (
+                f"*👛 Wallet*\n\n"
+                f"Address: `{pubkey}`\n"
+                f"Balance: `{bal:.4f} SOL`\n\n"
+                f"[Solscan](https://solscan.io/account/{pubkey})  "
+                f"[DexScreener](https://dexscreener.com/solana/{pubkey})"
+            )
+        except Exception:
+            text = "*👛 Wallet*\n\n⚠️ Key stored but invalid — please re-import."
+    else:
+        text = "*👛 Wallet*\n\nNo wallet configured yet."
+
+    await send_fn(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("✨ Create New Wallet", callback_data="wallet:create"),
+             InlineKeyboardButton("📥 Import Wallet",     callback_data="wallet:import")],
+            [InlineKeyboardButton("🔑 Export Key ⚠️",    callback_data="wallet:export")],
+            [InlineKeyboardButton("⬅️ Main Menu",         callback_data="menu:main")],
+        ]),
+        disable_web_page_preview=True,
+    )
+
+
+async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    action = query.data.split(":")[1]
+    await query.answer()
+
+    if action == "menu":
+        await _show_wallet_menu(query.edit_message_text)
+
+    elif action == "create":
+        from solders.keypair import Keypair as _KP
+        kp     = _KP()
+        pubkey = str(kp.pubkey())
+        secret = kp.to_base58_string()
+        set_state(uid, pending_wallet_key=secret)
+        await query.edit_message_text(
+            f"*✨ New Wallet Generated*\n\n"
+            f"📬 Address: `{pubkey}`\n\n"
+            f"🔑 Private Key:\n`{secret}`\n\n"
+            f"⚠️ *SAVE THIS KEY NOW — it cannot be recovered!*\n\n"
+            f"Tap Save to set this as your active wallet.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Save as Active Wallet", callback_data="wallet:save_pending")],
+                [InlineKeyboardButton("❌ Discard",               callback_data="wallet:menu")],
+            ])
+        )
+
+    elif action == "save_pending":
+        new_key = get_state(uid, "pending_wallet_key")
+        clear_state(uid)
+        if not new_key:
+            await query.edit_message_text("No pending wallet found.", reply_markup=back_kb())
+            return
+        save_wallet_key(new_key)
+        from solders.keypair import Keypair as _KP
+        pubkey = str(_KP.from_base58_string(new_key).pubkey())
+        await query.edit_message_text(
+            f"✅ *Wallet saved!*\n\nAddress: `{pubkey}`\n\n"
+            f"Switch to Live mode to start trading.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")
+            ]])
+        )
+
+    elif action == "import":
+        set_state(uid, waiting_for="wallet_import_key")
+        await query.edit_message_text(
+            "*📥 Import Wallet*\n\nPaste your base58 private key:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")
+            ]])
+        )
+
+    elif action == "export":
+        if not WALLET_PRIVATE_KEY:
+            await query.edit_message_text("No wallet stored.", reply_markup=back_kb())
+            return
+        from solders.keypair import Keypair as _KP
+        pubkey = str(_KP.from_base58_string(WALLET_PRIVATE_KEY).pubkey())
+        await query.edit_message_text(
+            f"*🔑 Private Key Export*\n\n"
+            f"Address: `{pubkey}`\n\n"
+            f"Key: `{WALLET_PRIVATE_KEY}`\n\n"
+            f"⚠️ *Never share this key. Delete this message after saving.*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")
+            ]])
+        )
+
+
+# ─── Feed commands + callback ──────────────────────────────────────────────────
+
+async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        fd.feed_status_text(), parse_mode="Markdown",
+        reply_markup=fd.feed_settings_kb()
+    )
+
+
+async def feed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+    await query.answer()
+
+    cfg = fd.load_feed_config()
+
+    if action == "menu" or action == "back":
+        await query.edit_message_text(
+            fd.feed_status_text(), parse_mode="Markdown",
+            reply_markup=fd.feed_settings_kb()
+        )
+
+    elif action == "toggle_launch":
+        cfg["launch_enabled"] = not cfg["launch_enabled"]
+        fd.save_feed_config(cfg)
+        await query.edit_message_text(
+            fd.feed_status_text(), parse_mode="Markdown",
+            reply_markup=fd.feed_settings_kb()
+        )
+
+    elif action == "toggle_migrate":
+        cfg["migrate_enabled"] = not cfg["migrate_enabled"]
+        fd.save_feed_config(cfg)
+        await query.edit_message_text(
+            fd.feed_status_text(), parse_mode="Markdown",
+            reply_markup=fd.feed_settings_kb()
+        )
+
+    elif action == "set_launch_ch":
+        set_state(uid, waiting_for="feed_launch_channel")
+        await query.edit_message_text(
+            "📡 *Set Launch Channel*\n\nSend the channel ID (e.g. `-1001234567890`).\n"
+            "The bot must be an admin of that channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
+            ]])
+        )
+
+    elif action == "set_migrate_ch":
+        set_state(uid, waiting_for="feed_migrate_channel")
+        await query.edit_message_text(
+            "🚀 *Set Migration Channel*\n\nSend the channel ID:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
+            ]])
+        )
+
+    elif action == "set_mcap":
+        set_state(uid, waiting_for="feed_mcap")
+        await query.edit_message_text(
+            f"💰 *Set MCap Range*\n\nCurrent: ${cfg['min_mcap']:,} – ${cfg['max_mcap']:,}\n\n"
+            "Send two numbers separated by a dash.\nExample: `10000-500000`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
+            ]])
+        )
+
+    elif action == "set_heat":
+        set_state(uid, waiting_for="feed_heat")
+        await query.edit_message_text(
+            f"🌡️ *Min Heat Score*\n\nCurrent: {cfg['min_heat_score']}\n\n"
+            "Send a number 0–100 (0 = post everything):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
+            ]])
+        )
+
+    elif action == "set_wallets":
+        set_state(uid, waiting_for="feed_wallets")
+        await query.edit_message_text(
+            f"👛 *Min Unique Wallets*\n\nCurrent: {cfg['min_wallets']}\n\nSend a number:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
+            ]])
+        )
+
+    elif action == "set_narrative":
+        await query.edit_message_text(
+            f"🏷️ *Narrative Filter*\n\nCurrent: {cfg['narrative_filter']}\n\nChoose:",
+            parse_mode="Markdown",
+            reply_markup=fd.narrative_kb()
+        )
+
+    elif action == "narr":
+        narrative = parts[2] if len(parts) > 2 else "All"
+        cfg["narrative_filter"] = narrative
+        fd.save_feed_config(cfg)
+        await query.edit_message_text(
+            fd.feed_status_text(), parse_mode="Markdown",
+            reply_markup=fd.feed_settings_kb()
+        )
+
+
+# ─── Scanner callback ──────────────────────────────────────────────────────────
+
 async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     uid    = query.from_user.id
@@ -1569,29 +1852,53 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     await query.edit_message_text(f"Executing {action}...")
-    loop = asyncio.get_event_loop()
-    sig  = await loop.run_in_executor(None, execute_swap_live, pending["quote"])
+    loop  = asyncio.get_event_loop()
+    via   = pending.get("via", "jupiter")
+
+    if via == "pumpfun" and action == "buy":
+        from solders.keypair import Keypair as _KP
+        kp  = _KP.from_base58_string(WALLET_PRIVATE_KEY)
+        sig = await loop.run_in_executor(
+            None, pumpfun.buy_pumpfun,
+            pending["mint"], pending["sol_amount"], kp, SOLANA_RPC
+        )
+        if sig == "GRADUATED":
+            # Re-route through Jupiter
+            await query.edit_message_text("Token graduated — re-routing via Jupiter...")
+            lamports = int(pending["sol_amount"] * 1e9)
+            quote    = jupiter_quote(SOL_MINT, pending["mint"], lamports)
+            if not quote:
+                await query.edit_message_text("Jupiter quote failed.", reply_markup=back_kb())
+                return
+            sig = await loop.run_in_executor(None, execute_swap_live, quote)
+            pending["raw_out"] = int(quote.get("outAmount", pending.get("tok_est", 0)))
+    else:
+        sig = await loop.run_in_executor(None, execute_swap_live, pending["quote"])
+
     context.user_data.pop(f"pending_{action}", None)
 
+    mint = pending["mint"]
     if "ERROR" in sig or "error" in sig.lower():
         await query.edit_message_text(f"❌ Failed:\n`{sig}`", parse_mode="Markdown",
                                        reply_markup=back_kb())
     else:
-        # Set up auto-sell on successful live buy
+        raw_out = pending.get("raw_out") or pending.get("tok_est", 0)
         if action == "buy":
             setup_auto_sell(
-                uid, pending["mint"], pending["symbol"],
-                pending["price_usd"], pending["raw_out"], pending["decimals"]
+                uid, mint, pending["symbol"],
+                pending["price_usd"], raw_out, pending["decimals"]
             )
         await query.edit_message_text(
             f"✅ *{action.title()} Submitted*\n"
             f"Token: `{pending['symbol']}`\n"
             f"Tx: `{sig}`\n"
-            f"[Solscan](https://solscan.io/tx/{sig})"
+            f"[Solscan](https://solscan.io/tx/{sig})  "
+            f"[DexScreener](https://dexscreener.com/solana/{mint})  "
+            f"[Pump](https://pump.fun/{mint})"
             + ("\n\n🤖 Auto-sell configured: 2x→50%, 4x→50%" if action == "buy" else ""),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("⚙️ Auto-Sell", callback_data=f"as:view:{pending['mint']}")],
+                [InlineKeyboardButton("⚙️ Auto-Sell", callback_data=f"as:view:{mint}")],
                 [InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main")],
             ]) if action == "buy" else back_kb()
         )
@@ -1770,6 +2077,109 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     ]])
                 )
 
+    elif state == "wallet_import_key":
+        clear_state(uid)
+        try:
+            from solders.keypair import Keypair as _KP
+            kp     = _KP.from_base58_string(text)
+            pubkey = str(kp.pubkey())
+        except Exception:
+            await update.message.reply_text(
+                "❌ Invalid private key. Make sure it's a base58-encoded Solana private key.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:import")
+                ]])
+            )
+            return
+        save_wallet_key(text)
+        bal = get_sol_balance(pubkey)
+        await update.message.reply_text(
+            f"✅ *Wallet imported!*\n\n"
+            f"Address: `{pubkey}`\n"
+            f"Balance: `{bal:.4f} SOL`\n\n"
+            f"[Solscan](https://solscan.io/account/{pubkey})",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")
+            ]]),
+            disable_web_page_preview=True,
+        )
+
+    elif state == "feed_launch_channel":
+        clear_state(uid)
+        cfg = fd.load_feed_config()
+        cfg["launch_channel"] = text.strip()
+        fd.save_feed_config(cfg)
+        await update.message.reply_text(
+            f"✅ Launch channel set to `{text.strip()}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+            ]])
+        )
+
+    elif state == "feed_migrate_channel":
+        clear_state(uid)
+        cfg = fd.load_feed_config()
+        cfg["migrate_channel"] = text.strip()
+        fd.save_feed_config(cfg)
+        await update.message.reply_text(
+            f"✅ Migration channel set to `{text.strip()}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+            ]])
+        )
+
+    elif state == "feed_mcap":
+        clear_state(uid)
+        try:
+            parts_mcap = text.replace(",", "").split("-")
+            mn, mx = int(float(parts_mcap[0])), int(float(parts_mcap[1]))
+            cfg = fd.load_feed_config()
+            cfg["min_mcap"], cfg["max_mcap"] = mn, mx
+            fd.save_feed_config(cfg)
+            await update.message.reply_text(
+                f"✅ MCap range set: ${mn:,} – ${mx:,}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Invalid format. Try `10000-500000`.")
+
+    elif state == "feed_heat":
+        clear_state(uid)
+        try:
+            v = int(float(text))
+            cfg = fd.load_feed_config()
+            cfg["min_heat_score"] = max(0, min(100, v))
+            fd.save_feed_config(cfg)
+            await update.message.reply_text(
+                f"✅ Min heat score set to {v}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Enter a number 0–100.")
+
+    elif state == "feed_wallets":
+        clear_state(uid)
+        try:
+            v = int(float(text))
+            cfg = fd.load_feed_config()
+            cfg["min_wallets"] = max(0, v)
+            fd.save_feed_config(cfg)
+            await update.message.reply_text(
+                f"✅ Min wallets set to {v}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Enter a valid number.")
+
     elif state == "custom_target_sell_pct":
         try:
             sell_pct = int(float(text))
@@ -1863,6 +2273,8 @@ async def post_init(app):
         BotCommand("watchlist",  "Tokens scoring 50–69 (worth watching)"),
         BotCommand("heatscore",  "Heat score any token on demand"),
         BotCommand("topalerts",  "Best scanner alerts from today"),
+        BotCommand("wallet",     "Manage your Solana wallet"),
+        BotCommand("feed",       "Configure channel feed settings"),
     ])
 
 
@@ -1894,6 +2306,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("watchlist",  cmd_watchlist))
     app.add_handler(CommandHandler("heatscore",  cmd_heatscore))
     app.add_handler(CommandHandler("topalerts",  cmd_topalerts))
+    app.add_handler(CommandHandler("wallet",     cmd_wallet))
+    app.add_handler(CommandHandler("feed",       cmd_feed))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
@@ -1910,6 +2324,8 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(quick_callback,               pattern=r"^quick:"))
     app.add_handler(CallbackQueryHandler(cancel_callback,              pattern=r"^cancel$"))
     app.add_handler(CallbackQueryHandler(scanner_callback,             pattern=r"^scanner:"))
+    app.add_handler(CallbackQueryHandler(wallet_callback,              pattern=r"^wallet:"))
+    app.add_handler(CallbackQueryHandler(feed_callback,                pattern=r"^feed:"))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

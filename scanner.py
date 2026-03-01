@@ -531,6 +531,18 @@ async def run_scan(bot, chat_ids: list[int]):
             })
             continue
 
+        # Always try launch feed (all scored tokens, feed applies its own filters)
+        import feed as fd
+        label = priority_label(score)
+        token["total_holders"]      = rc.get("totalHolders", 0)
+        token["matched_narrative"]  = result["breakdown"]["narrative"][1]
+        await fd.maybe_post_launch(bot, token, score, label)
+
+        # Migration feed: check if token just graduated to Raydium
+        dex_id = token.get("dex", "")
+        if "raydium" in dex_id.lower():
+            await fd.maybe_post_migration(bot, token)
+
         # Alert threshold
         if score >= 70 and cooldown_ok(mint):
             mark_alerted(mint)
@@ -551,7 +563,8 @@ async def run_scan(bot, chat_ids: list[int]):
                  InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
                  InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
                 [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
-                 InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+                 InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
+                 InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
             ])
             for uid in chat_ids:
                 try:
