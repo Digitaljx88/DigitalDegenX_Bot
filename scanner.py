@@ -542,45 +542,7 @@ async def run_scan(bot, chat_ids: list[int]):
     """
     Fetch, score, and alert. Called every N seconds by bot job queue.
     chat_ids: list of user IDs to send alerts to.
-    Runs whenever scanning is ON *or* any channel feed is enabled.
     """
-    import feed as fd
-    cfg = fd.load_feed_config()
-    feeds_active = cfg.get("launch_enabled") or cfg.get("migrate_enabled")
-
-    if not feeds_active and not chat_ids:
-        return
-
-    # Feed channels: runs independently of user scanner being ON.
-    # Dedup (86400s) prevents repeats. fetch_new_tokens() returns newest first.
-    if feeds_active:
-        import feed as fd
-        feed_tokens = fetch_new_tokens()
-
-        # Launch feed — tokens created in last 4 hours
-        launch_cutoff_ms = (time.time() - 4 * 60 * 60) * 1000
-        if cfg.get("launch_enabled"):
-            for token in feed_tokens:
-                mint = token.get("mint", "")
-                if not mint:
-                    continue
-                if (token.get("pair_created", 0) or 0) < launch_cutoff_ms:
-                    continue
-                token["total_holders"]     = 0
-                token["matched_narrative"] = ""
-                await fd.maybe_post_launch(bot, token, 0, "🆕")
-
-        # Migration feed — full 24h window, every Raydium token, most recent first
-        if cfg.get("migrate_enabled"):
-            for token in feed_tokens:
-                mint   = token.get("mint", "")
-                dex_id = (token.get("dex", "") or "").lower()
-                if not mint:
-                    continue
-                if "raydium" in dex_id:
-                    await fd.maybe_post_migration(bot, token)
-
-    # DM alerts: always-on pipeline — fires for all subscribed users
     if not chat_ids:
         return
 

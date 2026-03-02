@@ -17,7 +17,7 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 import scanner as sc
 import pumpfun
-import feed as fd
+import pumpfeed as pf
 
 import config as _cfg
 from config import (
@@ -350,6 +350,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     mode      = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
     targets   = sc.load_state().get("scan_targets", [])
     scan_lbl  = "🔕 Pause Alerts" if uid in targets else "🔔 Resume Alerts"
+    pf_lbl    = "🟢 Pump Live: ON" if pf.is_subscribed(uid) else "🔴 Pump Live: OFF"
+    pg_lbl    = "🟢 Pump Grad: ON" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad: OFF"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
          InlineKeyboardButton("🤖 AI Analyze",   callback_data="menu:analyze")],
@@ -360,8 +362,11 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
          InlineKeyboardButton("📋 Watchlist",     callback_data="scanner:watchlist"),
          InlineKeyboardButton("🏆 Top Alerts",    callback_data="scanner:topalerts")],
+        [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:toggle"),
+         InlineKeyboardButton("⚙️ Live Settings", callback_data="pumplive:menu")],
+        [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:toggle"),
+         InlineKeyboardButton("⚙️ Grad Settings", callback_data="pumpgrad:menu")],
         [InlineKeyboardButton("👛 Wallet",        callback_data="wallet:menu"),
-         InlineKeyboardButton("📡 Feeds",         callback_data="feed:menu"),
          InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
     ])
 
@@ -1564,121 +1569,400 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-# ─── Feed commands + callback ──────────────────────────────────────────────────
+# ─── Pump Live feed ────────────────────────────────────────────────────────────
 
-async def cmd_feed(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def cmd_pumplive(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
     await update.message.reply_text(
-        fd.feed_status_text(), parse_mode="Markdown",
-        reply_markup=fd.feed_settings_kb()
+        pf.filter_status_text(uid),
+        parse_mode="Markdown",
+        reply_markup=pf.filter_kb(uid),
     )
 
 
-async def feed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def pumplive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     uid    = query.from_user.id
-    parts  = query.data.split(":")
-    action = parts[1]
+    action = query.data.split(":")[1]
     await query.answer()
 
-    cfg = fd.load_feed_config()
+    async def _refresh():
+        try:
+            await query.edit_message_text(
+                pf.filter_status_text(uid),
+                parse_mode="Markdown",
+                reply_markup=pf.filter_kb(uid),
+            )
+        except Exception:
+            pass
 
-    if action == "menu" or action == "back":
-        await query.edit_message_text(
-            fd.feed_status_text(), parse_mode="Markdown",
-            reply_markup=fd.feed_settings_kb()
-        )
+    if action == "toggle":
+        if pf.is_subscribed(uid):
+            pf.unsubscribe(uid)
+        else:
+            pf.subscribe(uid)
+        await _refresh()
 
-    elif action == "toggle_launch":
-        cfg["launch_enabled"] = not cfg["launch_enabled"]
-        fd.save_feed_config(cfg)
-        await query.edit_message_text(
-            fd.feed_status_text(), parse_mode="Markdown",
-            reply_markup=fd.feed_settings_kb()
-        )
+    elif action == "reset":
+        pf.reset_filters(uid)
+        await _refresh()
 
-    elif action == "toggle_migrate":
-        cfg["migrate_enabled"] = not cfg["migrate_enabled"]
-        fd.save_feed_config(cfg)
-        await query.edit_message_text(
-            fd.feed_status_text(), parse_mode="Markdown",
-            reply_markup=fd.feed_settings_kb()
-        )
+    elif action == "toggle_social":
+        f = pf.get_filters(uid)
+        f["require_social"] = not f["require_social"]
+        pf.set_filters(uid, f)
+        await _refresh()
 
-    elif action == "toggle_post_all":
-        cfg["post_all"] = not cfg.get("post_all", False)
-        fd.save_feed_config(cfg)
-        await query.edit_message_text(
-            fd.feed_status_text(), parse_mode="Markdown",
-            reply_markup=fd.feed_settings_kb()
-        )
-
-    elif action == "set_launch_ch":
-        set_state(uid, waiting_for="feed_launch_channel")
-        await query.edit_message_text(
-            "📡 *Set Launch Channel*\n\nSend the channel ID (e.g. `-1001234567890`).\n"
-            "The bot must be an admin of that channel.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
-            ]])
-        )
-
-    elif action == "set_migrate_ch":
-        set_state(uid, waiting_for="feed_migrate_channel")
-        await query.edit_message_text(
-            "🚀 *Set Migration Channel*\n\nSend the channel ID:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
-            ]])
-        )
+    elif action == "toggle_desc":
+        f = pf.get_filters(uid)
+        f["require_description"] = not f["require_description"]
+        pf.set_filters(uid, f)
+        await _refresh()
 
     elif action == "set_mcap":
-        set_state(uid, waiting_for="feed_mcap")
+        set_state(uid, waiting_for="pf_mcap")
         await query.edit_message_text(
-            f"💰 *Set MCap Range*\n\nCurrent: ${cfg['min_mcap']:,} – ${cfg['max_mcap']:,}\n\n"
-            "Send two numbers separated by a dash.\nExample: `10000-500000`",
+            "💰 *MCap Filter (SOL)*\n\n"
+            "Enter a range as `min-max`, e.g. `5-200`\n"
+            "Use `0` for no limit. Example: `0-500` means any mcap under 500 SOL.\n\n"
+            "_Current: " + pf._sol_range_str(
+                pf.get_filters(uid)["min_mcap_sol"],
+                pf.get_filters(uid)["max_mcap_sol"]
+            ) + "_",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
-            ]])
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
         )
 
-    elif action == "set_heat":
-        set_state(uid, waiting_for="feed_heat")
+    elif action == "set_vol":
+        set_state(uid, waiting_for="pf_vol")
+        f = pf.get_filters(uid)
         await query.edit_message_text(
-            f"🌡️ *Min Heat Score*\n\nCurrent: {cfg['min_heat_score']}\n\n"
-            "Send a number 0–100 (0 = post everything):",
+            "📈 *SOL Volume Filter*\n\n"
+            "Filter by real SOL raised in the bonding curve.\n"
+            "Enter min SOL, e.g. `0.5` — or a range `0.5-10`.\n"
+            "Use `0` or `0-0` to clear.\n\n"
+            "_Current: " + pf._sol_range_str(
+                f.get("min_vol_sol", 0), f.get("max_vol_sol", 0)
+            ) + "_",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
-            ]])
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
         )
 
-    elif action == "set_wallets":
-        set_state(uid, waiting_for="feed_wallets")
+    elif action == "set_devbuy":
+        set_state(uid, waiting_for="pf_devbuy")
         await query.edit_message_text(
-            f"👛 *Min Unique Wallets*\n\nCurrent: {cfg['min_wallets']}\n\nSend a number:",
+            "🛒 *Dev Buy Filter (SOL)*\n\n"
+            "Filter by how much SOL the dev spent on their initial buy.\n"
+            "Enter min SOL, e.g. `0.5` — or a range `0.5-5`.\n"
+            "Use `0` or `0-0` to clear.\n\n"
+            "_Current: " + pf._sol_range_str(
+                pf.get_filters(uid)["min_dev_sol"],
+                pf.get_filters(uid)["max_dev_sol"]
+            ) + "_",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="feed:back")
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
+        )
+
+    elif action == "set_age":
+        current = pf.get_filters(uid).get("max_token_age_mins") or 0
+        cur_str = f"{current:.0f} minutes" if current else "disabled"
+        set_state(uid, waiting_for="pf_age")
+        await query.edit_message_text(
+            "🕐 *Token Age Filter*\n\n"
+            "Only notify for tokens created within X minutes of now.\n"
+            "Useful for catching very fresh launches only.\n\n"
+            "Enter max age in minutes, e.g. `5` for tokens under 5 mins old.\n"
+            "Send `0` to disable.\n\n"
+            f"_Current: {cur_str}_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
+        )
+
+    elif action == "set_keywords":
+        current = ", ".join(pf.get_filters(uid)["keywords"]) or "none"
+        set_state(uid, waiting_for="pf_keywords")
+        await query.edit_message_text(
+            "🏷️ *Keyword Filter*\n\n"
+            "Only show tokens whose name, symbol, or description contains at least one keyword.\n\n"
+            "Enter keywords separated by commas, e.g. `ai, agent, gpt, robot`\n"
+            "Send `clear` to remove all keywords.\n\n"
+            f"_Current: {current}_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
+        )
+
+    elif action == "set_blocked":
+        current = ", ".join(pf.get_filters(uid)["blocked_words"]) or "none"
+        set_state(uid, waiting_for="pf_blocked")
+        await query.edit_message_text(
+            "🚫 *Blocked Words*\n\n"
+            "Hide tokens whose name, symbol, or description contains any of these words.\n\n"
+            "Enter words separated by commas, e.g. `elon, trump, shib, inu`\n"
+            "Send `clear` to remove all blocked words.\n\n"
+            f"_Current: {current}_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
+        )
+
+    elif action == "set_tracked":
+        current = "\n".join(pf.get_filters(uid)["tracked_wallets"]) or "none"
+        set_state(uid, waiting_for="pf_tracked_wallets")
+        await query.edit_message_text(
+            "👛 *Tracked Wallets*\n\n"
+            "Always notify when these dev wallets launch a token (bypasses all other filters).\n\n"
+            "Enter wallet addresses separated by commas or one per line.\n"
+            "Send `clear` to remove all.\n\n"
+            f"_Current:_\n`{current}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
+        )
+
+    elif action == "set_block_wallet":
+        current = "\n".join(pf.get_filters(uid)["blocked_wallets"]) or "none"
+        set_state(uid, waiting_for="pf_blocked_wallets")
+        await query.edit_message_text(
+            "🚫 *Blocked Wallets*\n\n"
+            "Never notify when these dev wallets launch a token.\n\n"
+            "Enter wallet addresses separated by commas or one per line.\n"
+            "Send `clear` to remove all.\n\n"
+            f"_Current:_\n`{current}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
+        )
+
+    elif action == "menu":
+        clear_state(uid)
+        await _refresh()
+
+
+async def cmd_pumpgrad(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await update.message.reply_text(
+        pf.grad_filter_status_text(uid),
+        parse_mode="Markdown",
+        reply_markup=pf.grad_filter_kb(uid),
+    )
+
+
+async def pumpgrad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    action = query.data.split(":")[1]
+    await query.answer()
+
+    async def _refresh():
+        try:
+            await query.edit_message_text(
+                pf.grad_filter_status_text(uid),
+                parse_mode="Markdown",
+                reply_markup=pf.grad_filter_kb(uid),
+            )
+        except Exception:
+            pass
+
+    if action == "toggle":
+        if pf.is_grad_subscribed(uid):
+            pf.unsubscribe_grad(uid)
+        else:
+            pf.subscribe_grad(uid)
+        await _refresh()
+
+    elif action == "reset":
+        pf.reset_grad_filters(uid)
+        await _refresh()
+
+    elif action == "toggle_social":
+        f = pf.get_grad_filters(uid)
+        f["require_social"] = not f["require_social"]
+        pf.set_grad_filters(uid, f)
+        await _refresh()
+
+    elif action == "toggle_desc":
+        f = pf.get_grad_filters(uid)
+        f["require_description"] = not f["require_description"]
+        pf.set_grad_filters(uid, f)
+        await _refresh()
+
+    elif action == "set_mcap":
+        set_state(uid, waiting_for="pg_mcap")
+        await query.edit_message_text(
+            "💰 *MCap Filter (SOL)*\n\n"
+            "Enter a range as `min-max`, e.g. `50-500`\n"
+            "Use `0` for no limit. Example: `30-0` means any mcap above 30 SOL.\n\n"
+            "_Current: " + pf._sol_range_str(
+                pf.get_grad_filters(uid)["min_mcap_sol"],
+                pf.get_grad_filters(uid)["max_mcap_sol"]
+            ) + "_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:menu"),
+            ]]),
+        )
+
+    elif action == "set_devbuy":
+        set_state(uid, waiting_for="pg_devbuy")
+        await query.edit_message_text(
+            "🛒 *Dev Buy Filter (SOL)*\n\n"
+            "Enter a range as `min-max`, e.g. `0.5-5`\n"
+            "Use `0` for no limit.\n\n"
+            "_Current: " + pf._sol_range_str(
+                pf.get_grad_filters(uid)["min_dev_sol"],
+                pf.get_grad_filters(uid)["max_dev_sol"]
+            ) + "_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:menu"),
+            ]]),
+        )
+
+    elif action == "set_keywords":
+        set_state(uid, waiting_for="pg_keywords")
+        await query.edit_message_text(
+            "🏷️ *Keyword Filter*\n\n"
+            "Enter keywords separated by commas. Only tokens matching at least one will alert.\n"
+            "Send `clear` to remove all keywords.\n\n"
+            "_Example: `ai, agent, robot`_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:menu"),
+            ]]),
+        )
+
+    elif action == "set_blocked":
+        set_state(uid, waiting_for="pg_blocked")
+        await query.edit_message_text(
+            "🚫 *Blocked Words*\n\n"
+            "Tokens containing any of these words will be skipped.\n"
+            "Send `clear` to remove all blocked words.\n\n"
+            "_Example: `scam, test, rug`_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:menu"),
+            ]]),
+        )
+
+    elif action == "set_tracked":
+        set_state(uid, waiting_for="pg_tracked_wallets")
+        await query.edit_message_text(
+            "👛 *Track Dev Wallets*\n\n"
+            "Enter wallet addresses separated by commas. Tokens from these devs always alert, bypassing all filters.\n"
+            "Send `clear` to remove all.\n\n"
+            "_Paste one or more Solana addresses_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:menu"),
+            ]]),
+        )
+
+    elif action == "set_block_wallet":
+        set_state(uid, waiting_for="pg_blocked_wallets")
+        await query.edit_message_text(
+            "🚫 *Block Dev Wallets*\n\n"
+            "Tokens from these dev wallets will never alert.\n"
+            "Send `clear` to remove all.\n\n"
+            "_Paste one or more Solana addresses_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:menu"),
+            ]]),
+        )
+
+    elif action == "menu":
+        clear_state(uid)
+        await _refresh()
+
+
+async def pf_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle quick-buy buttons on pump.fun launch notifications."""
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":", 3)   # pf : buy : 0.1 : <mint>
+    sol    = float(parts[2])
+    mint   = parts[3]
+    await query.answer()
+
+    mode = get_mode(uid)
+    loop = asyncio.get_event_loop()
+
+    # Try DexScreener for price data; pump.fun tokens may not be listed yet
+    pair     = await loop.run_in_executor(None, fetch_sol_pair, mint)
+    sym      = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
+    price    = float(pair.get("priceUsd", 0) or 0) if pair else 0
+    mcap     = float(pair.get("marketCap", 0) or 0) if pair else 0
+    decimals = int(pair.get("baseToken", {}).get("decimals", 6) or 6) if pair else 6
+
+    if mode == "paper":
+        portfolio = get_portfolio(uid)
+        if portfolio.get("SOL", 0) < sol:
+            await query.edit_message_text(
+                f"❌ Not enough paper SOL. Balance: `{portfolio.get('SOL', 0):.4f}`",
+                parse_mode="Markdown",
+                reply_markup=pf.notification_kb(mint),
+            )
+            return
+        # Estimate tokens from price (may be 0 if not listed yet)
+        tok_est = int((sol / price) * (10 ** decimals)) if price > 0 else 0
+        portfolio["SOL"]  = portfolio.get("SOL", 0) - sol
+        portfolio[mint]   = portfolio.get(mint, 0) + tok_est
+        update_portfolio(uid, portfolio)
+        log_trade(uid, "paper", "buy", mint, sym, sol_amount=sol,
+                  token_amount=tok_est, price_usd=price, mcap=mcap)
+        if price > 0:
+            setup_auto_sell(uid, mint, sym, price, tok_est, decimals)
+        await query.edit_message_text(
+            f"📄 *Paper Buy — ${sym}*\n"
+            f"Spent: `{sol} SOL`\n"
+            f"Got: `{tok_est/(10**decimals):,.4f}` tokens\n"
+            + (f"Price: `${price:.8f}`\n" if price else "⚠️ Not yet listed on DexScreener\n")
+            + f"SOL left: `{portfolio['SOL']:.4f}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
             ]])
         )
-
-    elif action == "set_narrative":
+    else:
+        # Live — use pump.fun bonding curve directly, skip Jupiter quote
+        bc  = await loop.run_in_executor(None, pumpfun.fetch_bonding_curve_data, mint, SOLANA_RPC)
+        via = "pumpfun" if bc and not bc.get("complete") else "jupiter"
+        tok_est = int((sol / price) * (10 ** decimals)) if price > 0 else 0
+        context.user_data["pending_buy"] = {
+            "mint":       mint,
+            "symbol":     sym,
+            "sol_amount": sol,
+            "price_usd":  price,
+            "mcap":       mcap,
+            "decimals":   decimals,
+            "via":        via,
+            "tok_est":    tok_est,
+            "quote":      None,
+        }
         await query.edit_message_text(
-            f"🏷️ *Narrative Filter*\n\nCurrent: {cfg['narrative_filter']}\n\nChoose:",
+            f"🟢 *Confirm Buy — ${sym}*\n\n"
+            f"Amount: `{sol} SOL`\n"
+            + (f"Price: `${price:.8f}`\n" if price else "⚠️ Price not on DexScreener yet\n")
+            + f"Est. tokens: `{tok_est/(10**decimals):,.4f}`\n"
+            f"Route: {'pump.fun bonding curve' if via == 'pumpfun' else 'Jupiter'}",
             parse_mode="Markdown",
-            reply_markup=fd.narrative_kb()
-        )
-
-    elif action == "narr":
-        narrative = parts[2] if len(parts) > 2 else "All"
-        cfg["narrative_filter"] = narrative
-        fd.save_feed_config(cfg)
-        await query.edit_message_text(
-            fd.feed_status_text(), parse_mode="Markdown",
-            reply_markup=fd.feed_settings_kb()
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("✅ Confirm", callback_data="confirm:buy"),
+                InlineKeyboardButton("❌ Cancel",  callback_data="cancel"),
+            ]])
         )
 
 
@@ -2302,35 +2586,6 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await show_main_menu(query, uid, edit=True)
 
 
-# ─── Forwarded message handler (channel ID finder) ────────────────────────────
-
-async def handle_forwarded(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Detect forwarded channel messages and reply with the channel ID."""
-    msg  = update.message
-    if not msg:
-        return
-    fwd  = msg.forward_origin if hasattr(msg, "forward_origin") else None
-    chat = getattr(fwd, "chat", None) if fwd else None
-    # Older API: forward_from_chat
-    if not chat:
-        chat = getattr(msg, "forward_from_chat", None)
-    if chat:
-        cid  = chat.id
-        name = getattr(chat, "title", str(cid))
-        await msg.reply_text(
-            f"📡 *Channel ID found!*\n\n"
-            f"Channel: *{name}*\n"
-            f"ID: `{cid}`\n\n"
-            f"Copy the ID above and paste it into `/feed` → Set Channel.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📡 Open Feed Settings", callback_data="feed:menu")
-            ]])
-        )
-        return
-    # Not a channel forward — fall through to normal text handling
-
-
 # ─── Text input state machine ─────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2474,80 +2729,285 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             disable_web_page_preview=True,
         )
 
-    elif state == "feed_launch_channel":
+    elif state == "pf_mcap":
         clear_state(uid)
-        cfg = fd.load_feed_config()
-        cfg["launch_channel"] = text.strip()
-        fd.save_feed_config(cfg)
+        try:
+            parts_in = text.replace(",", "").split("-")
+            mn = float(parts_in[0])
+            mx = float(parts_in[1]) if len(parts_in) > 1 else 0.0
+            f  = pf.get_filters(uid)
+            f["min_mcap_sol"], f["max_mcap_sol"] = mn, mx
+            pf.set_filters(uid, f)
+            await update.message.reply_text(
+                f"✅ MCap filter set: `{pf._sol_range_str(mn, mx)}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Invalid format. Try `5-200` or `0-500`.")
+
+    elif state == "pf_vol":
+        clear_state(uid)
+        try:
+            parts_in = text.replace(",", "").split("-")
+            mn = float(parts_in[0])
+            mx = float(parts_in[1]) if len(parts_in) > 1 else 0.0
+            f  = pf.get_filters(uid)
+            f["min_vol_sol"], f["max_vol_sol"] = mn, mx
+            pf.set_filters(uid, f)
+            await update.message.reply_text(
+                f"✅ SOL Volume filter set: `{pf._sol_range_str(mn, mx)}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Invalid format. Try `0.5` or `0.5-10`.")
+
+    elif state == "pf_devbuy":
+        clear_state(uid)
+        try:
+            parts_in = text.replace(",", "").split("-")
+            mn = float(parts_in[0])
+            mx = float(parts_in[1]) if len(parts_in) > 1 else 0.0
+            f  = pf.get_filters(uid)
+            f["min_dev_sol"], f["max_dev_sol"] = mn, mx
+            pf.set_filters(uid, f)
+            await update.message.reply_text(
+                f"✅ Dev buy filter set: `{pf._sol_range_str(mn, mx)}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Invalid format. Try `0.5` or `0.5-5`.")
+
+    elif state == "pf_age":
+        clear_state(uid)
+        try:
+            v = float(text.strip())
+            f = pf.get_filters(uid)
+            f["max_token_age_mins"] = max(0.0, v)
+            pf.set_filters(uid, f)
+            msg = f"✅ Token age filter set: `≤{v:.0f} minutes`" if v > 0 else "✅ Token age filter disabled."
+            await update.message.reply_text(
+                msg, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Enter a number of minutes, e.g. `5`.")
+
+    elif state == "pf_keywords":
+        clear_state(uid)
+        f = pf.get_filters(uid)
+        if text.strip().lower() == "clear":
+            f["keywords"] = []
+            await update.message.reply_text("✅ Keywords cleared.")
+        else:
+            kws = [k.strip() for k in text.replace("\n", ",").split(",") if k.strip()]
+            f["keywords"] = kws
+            await update.message.reply_text(
+                f"✅ Keywords set: `{', '.join(kws)}`",
+                parse_mode="Markdown",
+            )
+        pf.set_filters(uid, f)
         await update.message.reply_text(
-            f"✅ Launch channel set to `{text.strip()}`",
-            parse_mode="Markdown",
+            "Back to settings:",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+                InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
             ]])
         )
 
-    elif state == "feed_migrate_channel":
+    elif state == "pf_blocked":
         clear_state(uid)
-        cfg = fd.load_feed_config()
-        cfg["migrate_channel"] = text.strip()
-        fd.save_feed_config(cfg)
+        f = pf.get_filters(uid)
+        if text.strip().lower() == "clear":
+            f["blocked_words"] = []
+            await update.message.reply_text("✅ Blocked words cleared.")
+        else:
+            bws = [k.strip() for k in text.replace("\n", ",").split(",") if k.strip()]
+            f["blocked_words"] = bws
+            await update.message.reply_text(
+                f"✅ Blocked words set: `{', '.join(bws)}`",
+                parse_mode="Markdown",
+            )
+        pf.set_filters(uid, f)
         await update.message.reply_text(
-            f"✅ Migration channel set to `{text.strip()}`",
-            parse_mode="Markdown",
+            "Back to settings:",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+                InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
             ]])
         )
 
-    elif state == "feed_mcap":
+    elif state == "pf_tracked_wallets":
         clear_state(uid)
-        try:
-            parts_mcap = text.replace(",", "").split("-")
-            mn, mx = int(float(parts_mcap[0])), int(float(parts_mcap[1]))
-            cfg = fd.load_feed_config()
-            cfg["min_mcap"], cfg["max_mcap"] = mn, mx
-            fd.save_feed_config(cfg)
+        f = pf.get_filters(uid)
+        if text.strip().lower() == "clear":
+            f["tracked_wallets"] = []
+            await update.message.reply_text("✅ Tracked wallets cleared.")
+        else:
+            wallets = [w.strip() for w in text.replace("\n", ",").split(",") if w.strip()]
+            f["tracked_wallets"] = wallets
             await update.message.reply_text(
-                f"✅ MCap range set: ${mn:,} – ${mx:,}",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
-                ]])
+                f"✅ Tracking {len(wallets)} wallet(s).",
+                parse_mode="Markdown",
             )
-        except Exception:
-            await update.message.reply_text("Invalid format. Try `10000-500000`.")
+        pf.set_filters(uid, f)
+        await update.message.reply_text(
+            "Back to settings:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
+            ]])
+        )
 
-    elif state == "feed_heat":
+    elif state == "pf_blocked_wallets":
         clear_state(uid)
-        try:
-            v = int(float(text))
-            cfg = fd.load_feed_config()
-            cfg["min_heat_score"] = max(0, min(100, v))
-            fd.save_feed_config(cfg)
+        f = pf.get_filters(uid)
+        if text.strip().lower() == "clear":
+            f["blocked_wallets"] = []
+            await update.message.reply_text("✅ Blocked wallets cleared.")
+        else:
+            wallets = [w.strip() for w in text.replace("\n", ",").split(",") if w.strip()]
+            f["blocked_wallets"] = wallets
             await update.message.reply_text(
-                f"✅ Min heat score set to {v}",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
-                ]])
+                f"✅ Blocking {len(wallets)} wallet(s).",
+                parse_mode="Markdown",
             )
-        except Exception:
-            await update.message.reply_text("Enter a number 0–100.")
+        pf.set_filters(uid, f)
+        await update.message.reply_text(
+            "Back to settings:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
+            ]])
+        )
 
-    elif state == "feed_wallets":
+    elif state == "pg_mcap":
         clear_state(uid)
         try:
-            v = int(float(text))
-            cfg = fd.load_feed_config()
-            cfg["min_wallets"] = max(0, v)
-            fd.save_feed_config(cfg)
+            parts_in = text.replace(",", "").split("-")
+            mn = float(parts_in[0])
+            mx = float(parts_in[1]) if len(parts_in) > 1 else 0.0
+            f  = pf.get_grad_filters(uid)
+            f["min_mcap_sol"], f["max_mcap_sol"] = mn, mx
+            pf.set_grad_filters(uid, f)
             await update.message.reply_text(
-                f"✅ Min wallets set to {v}",
+                f"✅ MCap filter set: `{pf._sol_range_str(mn, mx)}`",
+                parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📡 Feed Settings", callback_data="feed:menu")
+                    InlineKeyboardButton("🎓 Pump Grad Settings", callback_data="pumpgrad:menu")
                 ]])
             )
         except Exception:
-            await update.message.reply_text("Enter a valid number.")
+            await update.message.reply_text("Invalid format. Try `50-500` or `30-0`.")
+
+    elif state == "pg_devbuy":
+        clear_state(uid)
+        try:
+            parts_in = text.replace(",", "").split("-")
+            mn = float(parts_in[0])
+            mx = float(parts_in[1]) if len(parts_in) > 1 else 0.0
+            f  = pf.get_grad_filters(uid)
+            f["min_dev_sol"], f["max_dev_sol"] = mn, mx
+            pf.set_grad_filters(uid, f)
+            await update.message.reply_text(
+                f"✅ Dev buy filter set: `{pf._sol_range_str(mn, mx)}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🎓 Pump Grad Settings", callback_data="pumpgrad:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Invalid format. Try `0.5` or `0.5-5`.")
+
+    elif state == "pg_keywords":
+        clear_state(uid)
+        f = pf.get_grad_filters(uid)
+        if text.strip().lower() == "clear":
+            f["keywords"] = []
+            await update.message.reply_text("✅ Keywords cleared.")
+        else:
+            kws = [k.strip() for k in text.replace("\n", ",").split(",") if k.strip()]
+            f["keywords"] = kws
+            await update.message.reply_text(
+                f"✅ Keywords set: `{', '.join(kws)}`",
+                parse_mode="Markdown",
+            )
+        pf.set_grad_filters(uid, f)
+        await update.message.reply_text(
+            "Back to settings:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎓 Pump Grad Settings", callback_data="pumpgrad:menu")
+            ]])
+        )
+
+    elif state == "pg_blocked":
+        clear_state(uid)
+        f = pf.get_grad_filters(uid)
+        if text.strip().lower() == "clear":
+            f["blocked_words"] = []
+            await update.message.reply_text("✅ Blocked words cleared.")
+        else:
+            bws = [k.strip() for k in text.replace("\n", ",").split(",") if k.strip()]
+            f["blocked_words"] = bws
+            await update.message.reply_text(
+                f"✅ Blocked words set: `{', '.join(bws)}`",
+                parse_mode="Markdown",
+            )
+        pf.set_grad_filters(uid, f)
+        await update.message.reply_text(
+            "Back to settings:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎓 Pump Grad Settings", callback_data="pumpgrad:menu")
+            ]])
+        )
+
+    elif state == "pg_tracked_wallets":
+        clear_state(uid)
+        f = pf.get_grad_filters(uid)
+        if text.strip().lower() == "clear":
+            f["tracked_wallets"] = []
+            await update.message.reply_text("✅ Tracked wallets cleared.")
+        else:
+            wallets = [w.strip() for w in text.replace("\n", ",").split(",") if w.strip()]
+            f["tracked_wallets"] = wallets
+            await update.message.reply_text(
+                f"✅ Tracking {len(wallets)} wallet(s).",
+                parse_mode="Markdown",
+            )
+        pf.set_grad_filters(uid, f)
+        await update.message.reply_text(
+            "Back to settings:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎓 Pump Grad Settings", callback_data="pumpgrad:menu")
+            ]])
+        )
+
+    elif state == "pg_blocked_wallets":
+        clear_state(uid)
+        f = pf.get_grad_filters(uid)
+        if text.strip().lower() == "clear":
+            f["blocked_wallets"] = []
+            await update.message.reply_text("✅ Blocked wallets cleared.")
+        else:
+            wallets = [w.strip() for w in text.replace("\n", ",").split(",") if w.strip()]
+            f["blocked_wallets"] = wallets
+            await update.message.reply_text(
+                f"✅ Blocking {len(wallets)} wallet(s).",
+                parse_mode="Markdown",
+            )
+        pf.set_grad_filters(uid, f)
+        await update.message.reply_text(
+            "Back to settings:",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎓 Pump Grad Settings", callback_data="pumpgrad:menu")
+            ]])
+        )
 
     elif state == "custom_target_sell_pct":
         try:
@@ -2743,21 +3203,12 @@ async def analytics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # ─── Bot command list ─────────────────────────────────────────────────────────
 
-# Module-level holder so the watcher task isn't garbage-collected
-_helius_watcher = None
-
 
 async def post_init(app):
-    global _helius_watcher
-    # Start Helius real-time WebSocket watcher if API key is configured
-    if HELIUS_API_KEY:
-        try:
-            import helius_ws
-            _helius_watcher = helius_ws.HeliusWatcher(HELIUS_API_KEY, app.bot, fd)
-            _helius_watcher.start()
-            print("[Helius] Real-time WebSocket watcher started")
-        except Exception as e:
-            print(f"[Helius] Failed to start watcher: {e}")
+    # Start pump.fun live feed WebSocket listener as background task
+    asyncio.create_task(pf.run_pumpfeed(app.bot))
+    # Poll pump.fun API for graduated tokens → pumpgrad DM notifications
+    asyncio.create_task(pf.run_gradwatch(app.bot))
 
     await app.bot.set_my_commands([
         BotCommand("start",      "Launch the bot"),
@@ -2779,7 +3230,8 @@ async def post_init(app):
         BotCommand("topalerts",  "Best scanner alerts from today"),
         BotCommand("analytics",  "Trade stats, scanner performance & log"),
         BotCommand("wallet",     "Manage your Solana wallet"),
-        BotCommand("feed",       "Configure channel feed settings"),
+        BotCommand("pumplive",   "Toggle live pump.fun launch notifications"),
+        BotCommand("pumpgrad",   "Alerts when pump.fun tokens hit 100% bonding curve"),
     ])
 
 
@@ -2812,7 +3264,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("heatscore",  cmd_heatscore))
     app.add_handler(CommandHandler("topalerts",  cmd_topalerts))
     app.add_handler(CommandHandler("wallet",     cmd_wallet))
-    app.add_handler(CommandHandler("feed",       cmd_feed))
+    app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
+    app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
 
     # Button callbacks
@@ -2834,11 +3287,10 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(cancel_callback,              pattern=r"^cancel$"))
     app.add_handler(CallbackQueryHandler(scanner_callback,             pattern=r"^scanner:"))
     app.add_handler(CallbackQueryHandler(wallet_callback,              pattern=r"^wallet:"))
-    app.add_handler(CallbackQueryHandler(feed_callback,                pattern=r"^feed:"))
+    app.add_handler(CallbackQueryHandler(pumplive_callback,            pattern=r"^pumplive:"))
+    app.add_handler(CallbackQueryHandler(pumpgrad_callback,            pattern=r"^pumpgrad:"))
+    app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
     app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
-
-    # Forwarded messages (channel ID finder)
-    app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

@@ -3,6 +3,7 @@ config.py
 
 # Runtime data
 data/
+logs/
 
 # Python
 venv/
