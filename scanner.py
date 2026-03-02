@@ -41,7 +41,7 @@ def load_state() -> dict:
         with open(SCANNER_STATE_FILE) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"scanning": False, "watchlist": {}, "alerted": {}, "scan_targets": []}
+        return {"scanning": True, "watchlist": {}, "alerted": {}, "scan_targets": []}
 
 
 def save_state(s: dict):
@@ -548,8 +548,7 @@ async def run_scan(bot, chat_ids: list[int]):
     cfg = fd.load_feed_config()
     feeds_active = cfg.get("launch_enabled") or cfg.get("migrate_enabled")
 
-    scanning_on = is_scanning()
-    if not scanning_on and not feeds_active:
+    if not feeds_active and not chat_ids:
         return
 
     # Feed channels: runs independently of user scanner being ON.
@@ -581,8 +580,8 @@ async def run_scan(bot, chat_ids: list[int]):
                 if "raydium" in dex_id:
                     await fd.maybe_post_migration(bot, token)
 
-    # DM alerts: full scoring pipeline, only runs when user has scanner ON
-    if not scanning_on:
+    # DM alerts: always-on pipeline — fires for all subscribed users
+    if not chat_ids:
         return
 
     tokens = fetch_new_tokens()
@@ -602,6 +601,8 @@ async def run_scan(bot, chat_ids: list[int]):
         result = calculate_heat_score(token, rc)
 
         # Log every scored token
+        narr_reason = result["breakdown"]["narrative"][1]
+        matched_narrative = next((n for n in NARRATIVES if n in narr_reason), "Other")
         append_log({
             "date":      datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "timestamp": time.time(),
@@ -609,6 +610,7 @@ async def run_scan(bot, chat_ids: list[int]):
             "name":      result["name"],
             "symbol":    result["symbol"],
             "score":     result["total"],
+            "narrative": matched_narrative,
             "alerted":   False,
             "dq":        result.get("disqualified"),
         })

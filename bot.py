@@ -11,7 +11,10 @@ import json
 import os
 import re
 import subprocess
+import time
 import requests
+from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 import scanner as sc
 import pumpfun
 import feed as fd
@@ -42,6 +45,7 @@ DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 PORTFOLIO_FILE     = os.path.join(DATA_DIR, "portfolios.json")
 ALERTS_FILE        = os.path.join(DATA_DIR, "alerts.json")
 AUTO_SELL_FILE     = os.path.join(DATA_DIR, "auto_sell.json")
+TRADE_LOG_FILE     = os.path.join(DATA_DIR, "trade_log.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -178,6 +182,71 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
     return config
 
 
+# ── Trade log ─────────────────────────────────────────────────────────────────
+
+def load_trade_log() -> list:
+    d = _load(TRADE_LOG_FILE)
+    return d.get("trades", []) if isinstance(d, dict) else []
+
+def save_trade_log(trades: list):
+    _save(TRADE_LOG_FILE, {"trades": trades})
+
+def _detect_narrative(name: str, symbol: str, desc: str = "") -> str:
+    """Inline keyword match — mirrors scanner.py NARRATIVES dict."""
+    NARRATIVES = {
+        "AI":        ["ai", "agent", "gpt", "robot", "artificial", "neural", "llm", "ml", "agi"],
+        "Political": ["trump", "maga", "biden", "elon", "political", "president", "vote", "patriot"],
+        "Animal":    ["dog", "cat", "pepe", "frog", "shib", "inu", "doge", "wolf", "bear", "bull",
+                      "penguin", "monkey", "ape", "hamster", "fish", "bird"],
+        "Gaming":    ["game", "play", "nft", "pixel", "arcade", "quest", "rpg", "guild", "warrior"],
+        "RWA":       ["gold", "oil", "real", "estate", "asset", "commodity", "bond", "rwa"],
+    }
+    haystack = f"{name} {symbol} {desc}".lower()
+    for label, keywords in NARRATIVES.items():
+        if any(k in haystack for k in keywords):
+            return label
+    return "Other"
+
+def _get_buy_price(uid: int, mint: str) -> float | None:
+    return load_auto_sell().get(str(uid), {}).get(mint, {}).get("buy_price_usd")
+
+def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
+              name: str = "", narrative: str = None, heat_score: int = None,
+              sol_amount: float = None, sol_received: float = None,
+              token_amount: int = 0, price_usd: float = 0.0,
+              buy_price_usd: float = None, mcap: float = 0.0,
+              pnl_pct: float = None, tx_sig: str = None):
+    if narrative is None:
+        narrative = _detect_narrative(name, symbol)
+    if action == "sell" and buy_price_usd and price_usd and pnl_pct is None:
+        pnl_pct = (price_usd - buy_price_usd) / buy_price_usd * 100
+    record = {
+        "ts":           time.time(),
+        "date":         datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+        "uid":          uid,
+        "mode":         mode,
+        "action":       action,
+        "mint":         mint,
+        "symbol":       symbol,
+        "name":         name,
+        "narrative":    narrative,
+        "heat_score":   heat_score,
+        "sol_amount":   sol_amount,
+        "sol_received": sol_received,
+        "token_amount": token_amount,
+        "price_usd":    price_usd,
+        "buy_price_usd": buy_price_usd,
+        "mcap":         mcap,
+        "pnl_pct":      pnl_pct,
+        "tx_sig":       tx_sig,
+    }
+    trades = load_trade_log()
+    trades.append(record)
+    if len(trades) > 10_000:
+        trades = trades[-10_000:]
+    save_trade_log(trades)
+
+
 # ─── In-memory state ──────────────────────────────────────────────────────────
 
 user_modes: dict[int, str]  = {}
@@ -279,7 +348,8 @@ def format_pair(pair: dict) -> str:
 
 def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     mode      = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
-    scan_lbl  = "🛑 Stop Scan" if sc.is_scanning() else "🔍 Start Scan"
+    targets   = sc.load_state().get("scan_targets", [])
+    scan_lbl  = "🔕 Pause Alerts" if uid in targets else "🔔 Resume Alerts"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
          InlineKeyboardButton("🤖 AI Analyze",   callback_data="menu:analyze")],
@@ -512,7 +582,8 @@ def get_token_accounts(pubkey: str) -> list[dict]:
 # ─── Auto-sell execution ──────────────────────────────────────────────────────
 
 async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
-                             sell_pct: int, reason: str, mode: str):
+                             sell_pct: int, reason: str, mode: str,
+                             price_usd: float = 0.0, mcap: float = 0.0):
     """Sell `sell_pct`% of the current position for this user/token."""
     portfolio = get_portfolio(uid)
     raw_held  = portfolio.get(mint, 0)
@@ -531,6 +602,10 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
         if portfolio[mint] <= 0:
             portfolio.pop(mint, None)
         update_portfolio(uid, portfolio)
+        log_trade(uid, mode, "sell", mint, symbol,
+                  sol_received=sol_received, token_amount=sell_amount,
+                  price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
+                  mcap=mcap)
         await bot.send_message(
             chat_id=uid,
             text=(
@@ -559,6 +634,10 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                 parse_mode="Markdown",
             )
         else:
+            log_trade(uid, mode, "sell", mint, symbol,
+                      sol_received=sol_received, token_amount=sell_amount,
+                      price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
+                      mcap=mcap, tx_sig=sig)
             await bot.send_message(
                 chat_id=uid,
                 text=(
@@ -654,7 +733,8 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                     changed = True
                     await execute_auto_sell(
                         context.bot, uid, mint, symbol,
-                        target["sell_pct"], target["label"], mode
+                        target["sell_pct"], target["label"], mode,
+                        price_usd=price, mcap=mcap or 0
                     )
 
             # ── Custom targets ────────────────────────────────────────────────
@@ -687,7 +767,8 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                             pass
                     else:
                         await execute_auto_sell(
-                            context.bot, uid, mint, symbol, sell_pct, reason, mode
+                            context.bot, uid, mint, symbol, sell_pct, reason, mode,
+                            price_usd=price, mcap=mcap or 0
                         )
 
             # ── Market cap milestone alerts ───────────────────────────────────
@@ -758,7 +839,9 @@ async def do_trade_flow(msg, uid: int, context, action: str,
 
     token_mint  = pair["baseToken"]["address"]
     symbol      = pair["baseToken"]["symbol"]
+    name        = pair["baseToken"].get("name", "")
     price_usd   = float(pair.get("priceUsd", 0) or 0)
+    mcap        = float(pair.get("marketCap", 0) or 0)
     decimals    = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
 
     if action == "buy":
@@ -787,6 +870,9 @@ async def do_trade_flow(msg, uid: int, context, action: str,
             portfolio["SOL"]     = portfolio.get("SOL", 0) - amount
             portfolio[token_mint] = portfolio.get(token_mint, 0) + out_amount
             update_portfolio(uid, portfolio)
+            log_trade(uid, "paper", "buy", token_mint, symbol, name=name,
+                      sol_amount=amount, token_amount=out_amount,
+                      price_usd=price_usd, mcap=mcap)
             # Set up auto-sell monitoring
             setup_auto_sell(uid, token_mint, symbol, price_usd, out_amount, decimals)
             await msg.edit_text(
@@ -820,6 +906,10 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                 portfolio.pop(token_mint, None)
                 remove_auto_sell(uid, token_mint)
             update_portfolio(uid, portfolio)
+            log_trade(uid, "paper", "sell", token_mint, symbol, name=name,
+                      sol_received=sol_received, token_amount=int(amount),
+                      price_usd=price_usd, buy_price_usd=_get_buy_price(uid, token_mint),
+                      mcap=mcap)
             await msg.edit_text(
                 f"📄 *Paper Sell Done*\n"
                 f"Sold: `{int(amount):,} {symbol}` (raw)\n"
@@ -1127,8 +1217,17 @@ async def do_analyze(send_fn, query: str):
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    clear_state(update.effective_user.id)
-    await show_main_menu(update.message, update.effective_user.id)
+    uid = update.effective_user.id
+    clear_state(uid)
+    # Auto-subscribe to live alerts
+    s = sc.load_state()
+    s["scanning"] = True
+    targets = s.get("scan_targets", [])
+    if uid not in targets:
+        targets.append(uid)
+    s["scan_targets"] = targets
+    sc.save_state(s)
+    await show_main_menu(update.message, uid)
 
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1239,15 +1338,6 @@ async def cmd_autosell(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    if sc.is_scanning():
-        await update.message.reply_text(
-            "🔍 Scanner is already running.\nUse /stopscan to stop.",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 Watchlist",  callback_data="scanner:watchlist"),
-                InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
-            ]])
-        )
-        return
     s = sc.load_state()
     s["scanning"] = True
     targets = s.get("scan_targets", [])
@@ -1256,14 +1346,15 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s["scan_targets"] = targets
     sc.save_state(s)
     await update.message.reply_text(
-        "✅ *Scanner started!*\n\n"
+        "🟢 *Live Scanner Active!*\n\n"
         "Scanning pump.fun + DexScreener every 15 seconds.\n"
-        "You'll be alerted when Heat Score ≥ 70/100.\n\n"
-        "Use /stopscan to stop.",
+        "You'll be alerted instantly when Heat Score ≥ 55/100.\n\n"
+        "Use /stopscan to pause your alerts.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🛑 Stop Scan",   callback_data="scanner:toggle"),
-            InlineKeyboardButton("📋 Watchlist",   callback_data="scanner:watchlist"),
+            InlineKeyboardButton("🔕 Pause Alerts", callback_data="scanner:toggle"),
+            InlineKeyboardButton("📋 Watchlist",    callback_data="scanner:watchlist"),
+            InlineKeyboardButton("🏆 Top Alerts",   callback_data="scanner:topalerts"),
         ]])
     )
 
@@ -1275,14 +1366,13 @@ async def cmd_stopscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if uid in targets:
         targets.remove(uid)
     s["scan_targets"] = targets
-    if not targets:
-        s["scanning"] = False
     sc.save_state(s)
     await update.message.reply_text(
-        "🛑 *Scanner stopped.*",
+        "⏸ *Alerts paused for you.*\n\nThe scanner keeps running in the background.\nUse /scan to resume your alerts.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 Menu", callback_data="menu:main")
+            InlineKeyboardButton("🔔 Resume Alerts", callback_data="scanner:toggle"),
+            InlineKeyboardButton("📋 Menu",          callback_data="menu:main"),
         ]])
     )
 
@@ -1291,10 +1381,11 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wl = sc.get_watchlist()
     if not wl:
         await update.message.reply_text(
-            "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here.",
+            "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here automatically as the scanner runs.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle")
+                InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+                InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
             ]])
         )
         return
@@ -1340,10 +1431,11 @@ async def cmd_topalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts = sc.get_todays_alerts()
     if not alerts:
         await update.message.reply_text(
-            "🏆 *No alerts fired today yet.*\n\nStart the scanner to find hot tokens.",
+            "🏆 *No alerts fired today yet.*\n\nThe scanner is live — alerts will appear here as hot tokens are found.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle")
+                InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+                InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
             ]])
         )
         return
@@ -1599,37 +1691,35 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if action == "toggle":
-        s = sc.load_state()
-        currently = s.get("scanning", False)
-        targets   = s.get("scan_targets", [])
-        if currently:
-            if uid in targets:
-                targets.remove(uid)
+        s       = sc.load_state()
+        s["scanning"] = True
+        targets = s.get("scan_targets", [])
+        if uid in targets:
+            # Pause alerts for this user
+            targets.remove(uid)
             s["scan_targets"] = targets
-            if not targets:
-                s["scanning"] = False
             sc.save_state(s)
             await query.edit_message_text(
-                "🛑 *Scanner stopped.*",
+                "⏸ *Alerts paused for you.*\n\nScanner keeps running in the background.\nTap Resume to get alerts again.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")
+                    InlineKeyboardButton("🔔 Resume Alerts", callback_data="scanner:toggle"),
+                    InlineKeyboardButton("⬅️ Menu",          callback_data="menu:main"),
                 ]])
             )
         else:
-            s["scanning"] = True
-            if uid not in targets:
-                targets.append(uid)
+            # Resume alerts for this user
+            targets.append(uid)
             s["scan_targets"] = targets
             sc.save_state(s)
             await query.edit_message_text(
-                "✅ *Scanner started!*\n\n"
+                "🟢 *Live alerts resumed!*\n\n"
                 "Scanning every 15 seconds.\n"
-                "Alerts fire when Heat Score ≥ 70/100.",
+                "Alerts fire when Heat Score ≥ 55/100.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🛑 Stop Scan",  callback_data="scanner:toggle"),
-                    InlineKeyboardButton("📋 Watchlist",  callback_data="scanner:watchlist"),
+                    InlineKeyboardButton("🔕 Pause Alerts", callback_data="scanner:toggle"),
+                    InlineKeyboardButton("📋 Watchlist",    callback_data="scanner:watchlist"),
                 ]])
             )
 
@@ -1637,10 +1727,10 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wl = sc.get_watchlist()
         if not wl:
             await query.edit_message_text(
-                "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here.",
+                "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here automatically.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle"),
+                    InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
                     InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
                 ]])
             )
@@ -1664,11 +1754,11 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alerts = sc.get_todays_alerts()
         if not alerts:
             await query.edit_message_text(
-                "🏆 *No alerts fired today yet.*",
+                "🏆 *No alerts fired today yet.*\n\nThe scanner is live — alerts will appear here as tokens are found.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔍 Start Scan", callback_data="scanner:toggle"),
-                    InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
+                    InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+                    InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
                 ]])
             )
             return
@@ -2124,6 +2214,20 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 uid, mint, pending["symbol"],
                 pending["price_usd"], raw_out, pending["decimals"]
             )
+            log_trade(uid, "live", "buy", mint, pending["symbol"],
+                      sol_amount=pending.get("sol_amount") or pending.get("amount"),
+                      token_amount=raw_out,
+                      price_usd=pending.get("price_usd", 0),
+                      mcap=pending.get("mcap", 0),
+                      tx_sig=sig)
+        else:
+            log_trade(uid, "live", "sell", mint, pending["symbol"],
+                      sol_received=int(pending.get("raw_out", 0)) / 1e9,
+                      token_amount=pending.get("sell_amount", 0),
+                      price_usd=pending.get("price_usd", 0),
+                      buy_price_usd=pending.get("buy_price_usd"),
+                      mcap=pending.get("mcap", 0),
+                      tx_sig=sig)
         await query.edit_message_text(
             f"✅ *{action.title()} Submitted*\n"
             f"Token: `{pending['symbol']}`\n"
@@ -2479,11 +2583,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         # Natural language scanner triggers
         tl = text.lower()
-        if any(p in tl for p in ["start scanning", "watch for hot", "start scan", "begin scan"]):
-            await update.message.reply_text("Starting scanner...")
+        if any(p in tl for p in ["start scanning", "watch for hot", "start scan", "begin scan", "resume alerts", "resume scan"]):
             await cmd_scan(update, context)
             return
-        if any(p in tl for p in ["stop scanning", "stop scan", "pause scan"]):
+        if any(p in tl for p in ["stop scanning", "stop scan", "pause scan", "pause alerts"]):
             await cmd_stopscan(update, context)
             return
         if any(p in tl for p in ["show watchlist", "watchlist", "watch list"]):
@@ -2517,6 +2620,127 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ─── Analytics ────────────────────────────────────────────────────────────────
+
+def _build_analytics(uid: int, days: int = None) -> tuple:
+    trades = load_trade_log()
+    now    = time.time()
+    cutoff = now - days * 86400 if days else 0
+    trades = [t for t in trades if t.get("uid") == uid and t.get("ts", 0) >= cutoff]
+
+    buys  = [t for t in trades if t.get("action") == "buy"]
+    sells = [t for t in trades if t.get("action") == "sell"]
+
+    closed = [t for t in sells if t.get("pnl_pct") is not None]
+    wins   = [t for t in closed if t["pnl_pct"] > 0]
+    losses = [t for t in closed if t["pnl_pct"] <= 0]
+    win_rate = len(wins) / len(closed) * 100 if closed else 0
+    avg_pnl  = sum(t["pnl_pct"] for t in closed) / len(closed) if closed else 0
+    best  = max(closed, key=lambda x: x["pnl_pct"], default=None)
+    worst = min(closed, key=lambda x: x["pnl_pct"], default=None)
+
+    sol_spent    = sum(t.get("sol_amount", 0) or 0 for t in buys)
+    sol_received = sum(t.get("sol_received", 0) or 0 for t in sells)
+    net_sol = sol_received - sol_spent
+
+    nar_wins   = defaultdict(int)
+    nar_losses = defaultdict(int)
+    nar_pnl    = defaultdict(list)
+    for t in closed:
+        n = t.get("narrative", "Other")
+        if t["pnl_pct"] > 0:
+            nar_wins[n] += 1
+        else:
+            nar_losses[n] += 1
+        nar_pnl[n].append(t["pnl_pct"])
+    all_narratives = set(list(nar_wins) + list(nar_losses))
+    nar_rows = []
+    for n in sorted(all_narratives,
+                    key=lambda x: -(nar_wins[x] / (nar_wins[x] + nar_losses[x])
+                                    if (nar_wins[x] + nar_losses[x]) else 0)):
+        total = nar_wins[n] + nar_losses[n]
+        wr    = nar_wins[n] / total * 100
+        avg   = sum(nar_pnl[n]) / len(nar_pnl[n])
+        nar_rows.append(f"• {n}: {total} trades · {wr:.0f}% WR · avg {avg:+.0f}%")
+
+    # Scanner stats
+    scanner_log = sc.load_log()
+    if days:
+        date_filter = (datetime.now(timezone.utc) - timedelta(days=days)).strftime("%Y-%m-%d")
+    else:
+        date_filter = "1970-01-01"
+    s_entries    = [e for e in scanner_log if e.get("date", "") >= date_filter]
+    s_total      = len(s_entries)
+    s_alerted    = sum(1 for e in s_entries if e.get("alerted"))
+    s_watchlisted = sum(1 for e in s_entries if 30 <= (e.get("score") or 0) < 55)
+    avg_score    = sum(e.get("score", 0) for e in s_entries) / s_total if s_total else 0
+
+    dq_counts: dict[str, int] = {}
+    for e in s_entries:
+        dq = e.get("dq")
+        if dq:
+            key = dq.split("—")[0].strip() if "—" in dq else dq[:30]
+            dq_counts[key] = dq_counts.get(key, 0) + 1
+    top_dq = sorted(dq_counts, key=lambda x: -dq_counts[x])
+
+    nar_alert_counts: dict[str, int] = defaultdict(int)
+    for e in s_entries:
+        if e.get("alerted") and e.get("narrative"):
+            nar_alert_counts[e["narrative"]] += 1
+
+    label = f"{days}d" if days else "All Time"
+    lines = [f"📊 *Analytics — {label}*\n"]
+
+    lines.append("*💰 Trade Performance*")
+    lines.append(f"Trades: {len(buys)} buys · {len(sells)} sells")
+    if closed:
+        lines.append(f"Win Rate: {win_rate:.0f}% ({len(wins)}W / {len(losses)}L)")
+        lines.append(f"Avg P&L: {avg_pnl:+.0f}%")
+        if best:  lines.append(f"Best:  {best['symbol']} {best['pnl_pct']:+.0f}%")
+        if worst: lines.append(f"Worst: {worst['symbol']} {worst['pnl_pct']:+.0f}%")
+    lines.append(f"SOL In: {sol_spent:.3f} · Out: {sol_received:.3f} · Net: {net_sol:+.3f}")
+
+    if nar_rows:
+        lines.append("\n*🔥 Narrative Performance*")
+        lines.extend(nar_rows[:5])
+
+    lines.append(f"\n*📡 Scanner ({label})*")
+    lines.append(f"Scanned: {s_total:,} · Alerted: {s_alerted} · Watchlisted: {s_watchlisted}")
+    lines.append(f"Avg Score: {avg_score:.1f}")
+    if top_dq:
+        lines.append(f"Top DQ: {top_dq[0]} ({dq_counts[top_dq[0]]}x)")
+    if nar_alert_counts:
+        top_nar = sorted(nar_alert_counts, key=lambda x: -nar_alert_counts[x])
+        lines.append("Trending: " + " · ".join(
+            f"{n}({nar_alert_counts[n]})" for n in top_nar[:3]
+        ))
+
+    text = "\n".join(lines)
+    kb   = InlineKeyboardMarkup([[
+        InlineKeyboardButton("All", callback_data="analytics:all"),
+        InlineKeyboardButton("7d",  callback_data="analytics:7d"),
+        InlineKeyboardButton("30d", callback_data="analytics:30d"),
+        InlineKeyboardButton("🔄",  callback_data="analytics:all"),
+    ]])
+    return text, kb
+
+
+async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    text, kb = _build_analytics(uid, days=None)
+    await update.message.reply_text(text, reply_markup=kb, parse_mode="Markdown")
+
+
+async def analytics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid   = query.from_user.id
+    parts = query.data.split(":")
+    days  = {"7d": 7, "30d": 30, "all": None}.get(parts[1] if len(parts) > 1 else "all")
+    text, kb = _build_analytics(uid, days)
+    await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
+
+
 # ─── Bot command list ─────────────────────────────────────────────────────────
 
 # Module-level holder so the watcher task isn't garbage-collected
@@ -2548,11 +2772,12 @@ async def post_init(app):
         BotCommand("mode",       "Switch between paper and live trading"),
         BotCommand("alert",      "Set a price alert for a token"),
         BotCommand("alerts",     "View & manage your active alerts"),
-        BotCommand("scan",       "Start the hot token scanner"),
-        BotCommand("stopscan",   "Stop the token scanner"),
+        BotCommand("scan",       "Resume live token alerts (always-on scanner)"),
+        BotCommand("stopscan",   "Pause your live token alerts"),
         BotCommand("watchlist",  "Tokens scoring 50–69 (worth watching)"),
         BotCommand("heatscore",  "Heat score any token on demand"),
         BotCommand("topalerts",  "Best scanner alerts from today"),
+        BotCommand("analytics",  "Trade stats, scanner performance & log"),
         BotCommand("wallet",     "Manage your Solana wallet"),
         BotCommand("feed",       "Configure channel feed settings"),
     ])
@@ -2588,6 +2813,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("topalerts",  cmd_topalerts))
     app.add_handler(CommandHandler("wallet",     cmd_wallet))
     app.add_handler(CommandHandler("feed",       cmd_feed))
+    app.add_handler(CommandHandler("analytics",  cmd_analytics))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
@@ -2609,6 +2835,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(scanner_callback,             pattern=r"^scanner:"))
     app.add_handler(CallbackQueryHandler(wallet_callback,              pattern=r"^wallet:"))
     app.add_handler(CallbackQueryHandler(feed_callback,                pattern=r"^feed:"))
+    app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
 
     # Forwarded messages (channel ID finder)
     app.add_handler(MessageHandler(filters.FORWARDED & ~filters.COMMAND, handle_forwarded))
