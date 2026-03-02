@@ -106,13 +106,20 @@ def get_todays_alerts() -> list:
 
 # ─── Data fetching ────────────────────────────────────────────────────────────
 
+MAX_TOKEN_AGE_HOURS  = 24    # ignore tokens older than this
+
 def _parse_pairs(pairs: list, tokens: dict):
-    """Merge DexScreener pairs into the tokens dict."""
+    """Merge DexScreener pairs into the tokens dict. Skip old tokens."""
+    cutoff_ms = (time.time() - MAX_TOKEN_AGE_HOURS * 3600) * 1000
     for p in pairs:
         if p.get("chainId") != "solana":
             continue
         mint = p.get("baseToken", {}).get("address", "")
         if not mint:
+            continue
+        # Skip tokens older than MAX_TOKEN_AGE_HOURS
+        pair_created = p.get("pairCreatedAt", 0) or 0
+        if pair_created and pair_created < cutoff_ms:
             continue
         mcap = float(p.get("marketCap") or p.get("fdv") or 0)
         entry = tokens.setdefault(mint, {"mint": mint})
@@ -131,18 +138,31 @@ def _parse_pairs(pairs: list, tokens: dict):
             "liquidity":    float((p.get("liquidity") or {}).get("usd", 0)),
             "dex":          p.get("dexId", ""),
             "pair_address": p.get("pairAddress", ""),
-            "pair_created": p.get("pairCreatedAt", 0),
+            "pair_created": pair_created,
         })
 
 
 def fetch_new_tokens() -> list[dict]:
     """
-    Fetch candidate tokens from multiple DexScreener sources.
-    Returns list of scored token dicts.
+    Fetch recent Solana tokens (last 24h only), sorted newest first.
     """
     tokens: dict[str, dict] = {}
+    cutoff_ms = (time.time() - MAX_TOKEN_AGE_HOURS * 3600) * 1000
 
-    # Source 1: DexScreener new token profiles (pump.fun with social data)
+    # Source 1: Newest Solana pairs sorted by creation time (primary source)
+    try:
+        pairs = requests.get(
+            "https://api.dexscreener.com/latest/dex/pairs/solana",
+            timeout=10
+        ).json().get("pairs") or []
+        # Sort newest first, only keep tokens created in last 24h
+        pairs = [p for p in pairs if (p.get("pairCreatedAt") or 0) >= cutoff_ms]
+        pairs.sort(key=lambda p: p.get("pairCreatedAt", 0), reverse=True)
+        _parse_pairs(pairs[:150], tokens)
+    except Exception:
+        pass
+
+    # Source 2: DexScreener new token profiles (pump.fun with social data)
     try:
         profiles = requests.get(DEXSCREENER_PROFILES, timeout=10).json()
         if isinstance(profiles, list):
@@ -162,7 +182,7 @@ def fetch_new_tokens() -> list[dict]:
     except Exception:
         pass
 
-    # Source 2: DexScreener boosted tokens (paid promotions = community attention)
+    # Source 3: DexScreener boosted tokens
     try:
         boosts = requests.get("https://api.dexscreener.com/token-boosts/latest/v1", timeout=10).json()
         if isinstance(boosts, list):
@@ -174,41 +194,25 @@ def fetch_new_tokens() -> list[dict]:
     except Exception:
         pass
 
-    # Source 3: Newest Solana pairs sorted by creation time
-    try:
-        pairs = requests.get(
-            "https://api.dexscreener.com/latest/dex/pairs/solana",
-            timeout=10
-        ).json().get("pairs") or []
-        # Sort newest first, take top 100
-        pairs.sort(key=lambda p: p.get("pairCreatedAt", 0), reverse=True)
-        _parse_pairs(pairs[:100], tokens)
-    except Exception:
-        pass
-
-    # Source 4: Multiple DexScreener searches to maximise pump.fun token coverage
-    search_terms = ["pump", "sol meme", "solana meme", "new token", "pepe", "ai agent", "doge", "cat", "trump"]
-    for term in search_terms:
-        try:
-            pairs = requests.get(DEXSCREENER_SEARCH + term, timeout=10).json().get("pairs") or []
-            _parse_pairs(pairs, tokens)
-        except Exception:
-            continue
-
-    # Source 5: Direct token lookup for mints discovered via profiles/boosts
+    # Source 4: Direct lookup for profile/boost mints missing market data
     profile_mints = [m for m, v in tokens.items() if not v.get("name")]
-    for mint in profile_mints[:20]:
+    for mint in profile_mints[:25]:
         try:
             pairs = requests.get(DEXSCREENER_TOKEN + mint, timeout=10).json().get("pairs") or []
             _parse_pairs(pairs, tokens)
         except Exception:
             continue
 
-    # Filter: must have name + mcap in range
+    # Filter: must have name + mcap in range + created within 24h
     result = [
         v for v in tokens.values()
-        if v.get("name") and MCAP_MIN <= v.get("mcap", 0) <= MCAP_MAX
+        if v.get("name")
+        and MCAP_MIN <= v.get("mcap", 0) <= MCAP_MAX
+        and (v.get("pair_created", 0) or 0) >= cutoff_ms
     ]
+
+    # Sort newest first
+    result.sort(key=lambda t: t.get("pair_created", 0), reverse=True)
     return result
 
 
@@ -243,12 +247,14 @@ def score_volume(token: dict) -> tuple[int, str]:
 def score_wallets(rc: dict) -> tuple[int, str]:
     """15 pts — unique wallet count from RugCheck."""
     holders = rc.get("totalHolders", 0) or 0
-    if holders >= 500:
-        return 15, f"{holders} unique wallets (500+)"
     if holders >= 200:
-        return 10, f"{holders} unique wallets (200-500)"
+        return 15, f"{holders} unique wallets (200+)"
     if holders >= 100:
-        return 5, f"{holders} unique wallets (100-200)"
+        return 10, f"{holders} unique wallets (100-200)"
+    if holders >= 50:
+        return 7, f"{holders} unique wallets (50-100)"
+    if holders >= 20:
+        return 3, f"{holders} unique wallets (20-50)"
     return 0, f"Only {holders} wallets"
 
 
@@ -299,7 +305,7 @@ def score_narrative(token: dict) -> tuple[int, str]:
 def score_migration(token: dict, rc: dict) -> tuple[int, str]:
     """10 pts — Raydium migration status."""
     dex          = (token.get("dex") or "").lower()
-    markets      = (rc.get("markets") or "")
+    markets      = (rc.get("markets") or [])
     pair_created = token.get("pair_created", 0) or 0
     now_ms       = time.time() * 1000
     age_mins     = (now_ms - pair_created) / 60_000 if pair_created else 9999
@@ -324,15 +330,15 @@ def score_dev_wallet(rc: dict) -> tuple[int, str, bool]:
             dev_pct = float(h.get("pct", 0))
             break
 
-    if dev_pct > 50:
+    if dev_pct > 80:
         return 0, f"Dev holds {dev_pct:.1f}% — DISQUALIFIED", True
     if dev_pct == 0:
         return 10, "Dev holds 0% (sold or never held)", False
-    if dev_pct < 10:
-        return 5, f"Dev holds {dev_pct:.1f}% (<10%)", False
     if dev_pct < 20:
-        return 0, f"Dev holds {dev_pct:.1f}% (>10%)", False
-    return 0, f"Dev holds {dev_pct:.1f}% (>20%)", False
+        return 7, f"Dev holds {dev_pct:.1f}% (<20%)", False
+    if dev_pct < 50:
+        return 3, f"Dev holds {dev_pct:.1f}% (20-50%)", False
+    return 0, f"Dev holds {dev_pct:.1f}% (>50%)", False
 
 
 def score_top_holders(rc: dict) -> tuple[int, str, bool]:
@@ -344,30 +350,32 @@ def score_top_holders(rc: dict) -> tuple[int, str, bool]:
     top10_pct  = sum(float(h.get("pct", 0)) for h in holders[:10])
     max_single = max((float(h.get("pct", 0)) for h in holders), default=0)
 
-    if max_single > 20:
+    if max_single > 50:
         return 0, f"Single wallet holds {max_single:.1f}% — DISQUALIFIED", True
     if top10_pct < 30:
-        return 10, f"Top 10 hold {top10_pct:.1f}% (<30% — healthy)"  , False
+        return 10, f"Top 10 hold {top10_pct:.1f}% (<30% — healthy)", False
     if top10_pct < 50:
-        return 5, f"Top 10 hold {top10_pct:.1f}% (30-50%)", False
-    return 0, f"Top 10 hold {top10_pct:.1f}% (>50% — concentrated)", False
+        return 7, f"Top 10 hold {top10_pct:.1f}% (30-50%)", False
+    if top10_pct < 70:
+        return 3, f"Top 10 hold {top10_pct:.1f}% (50-70%)", False
+    return 0, f"Top 10 hold {top10_pct:.1f}% (>70% — concentrated)", False
 
 
 def score_age(token: dict) -> tuple[int, str]:
     """5 pts — token age sweet spot."""
     pair_created = token.get("pair_created", 0) or 0
     if not pair_created:
-        return 0, "Age unknown"
+        return 2, "Age unknown"
     now_ms   = time.time() * 1000
     age_mins = (now_ms - pair_created) / 60_000
     age_hrs  = age_mins / 60
 
-    if age_mins < 30:
-        return 2, f"{age_mins:.0f} mins old (too early)"
     if age_hrs <= 4:
-        return 5, f"{age_mins:.0f} mins old (sweet spot)"
+        return 5, f"{age_mins:.0f} mins old (fresh)"
+    if age_hrs <= 12:
+        return 3, f"{age_hrs:.1f} hrs old (recent)"
     if age_hrs <= 24:
-        return 2, f"{age_hrs:.1f} hrs old (aging)"
+        return 1, f"{age_hrs:.1f} hrs old (aging)"
     return 0, f"{age_hrs:.0f} hrs old (too old)"
 
 
@@ -393,8 +401,6 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         disqualified = hold_reason
     elif rc.get("rugged"):
         disqualified = "Flagged as rugged by RugCheck"
-    elif rc.get("mintAuthority"):
-        disqualified = "Mint authority not renounced"
 
     total = vol_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
 
@@ -546,8 +552,40 @@ async def run_scan(bot, chat_ids: list[int]):
     if not scanning_on and not feeds_active:
         return
 
+    # Feed channels: runs independently of user scanner being ON.
+    # Dedup (86400s) prevents repeats. fetch_new_tokens() returns newest first.
+    if feeds_active:
+        import feed as fd
+        feed_tokens = fetch_new_tokens()
+
+        # Launch feed — tokens created in last 4 hours
+        launch_cutoff_ms = (time.time() - 4 * 60 * 60) * 1000
+        if cfg.get("launch_enabled"):
+            for token in feed_tokens:
+                mint = token.get("mint", "")
+                if not mint:
+                    continue
+                if (token.get("pair_created", 0) or 0) < launch_cutoff_ms:
+                    continue
+                token["total_holders"]     = 0
+                token["matched_narrative"] = ""
+                await fd.maybe_post_launch(bot, token, 0, "🆕")
+
+        # Migration feed — full 24h window, every Raydium token, most recent first
+        if cfg.get("migrate_enabled"):
+            for token in feed_tokens:
+                mint   = token.get("mint", "")
+                dex_id = (token.get("dex", "") or "").lower()
+                if not mint:
+                    continue
+                if "raydium" in dex_id:
+                    await fd.maybe_post_migration(bot, token)
+
+    # DM alerts: full scoring pipeline, only runs when user has scanner ON
+    if not scanning_on:
+        return
+
     tokens = fetch_new_tokens()
-    state  = load_state()
 
     for token in tokens:
         mint = token.get("mint", "")
@@ -559,7 +597,7 @@ async def run_scan(bot, chat_ids: list[int]):
         if not (MCAP_MIN <= mcap <= MCAP_MAX):
             continue
 
-        # Fetch RugCheck for tokens with basic market data
+        # Fetch RugCheck and score
         rc     = fetch_rugcheck(mint)
         result = calculate_heat_score(token, rc)
 
@@ -577,33 +615,19 @@ async def run_scan(bot, chat_ids: list[int]):
 
         score = result["total"]
 
-        # Instant disqualify
         if result["disqualified"]:
             continue
 
-        # Watchlist (50-69)
-        if 50 <= score < 70:
+        # Watchlist (30-54)
+        if 30 <= score < 55:
             add_to_watchlist(mint, {
                 "name": result["name"], "symbol": result["symbol"],
                 "score": score, "mcap": mcap, "mint": mint,
                 "ts": time.time(),
             })
-            continue
-
-        # Always try launch feed (all scored tokens, feed applies its own filters)
-        import feed as fd
-        label = priority_label(score)
-        token["total_holders"]      = rc.get("totalHolders", 0)
-        token["matched_narrative"]  = result["breakdown"]["narrative"][1]
-        await fd.maybe_post_launch(bot, token, score, label)
-
-        # Migration feed: check if token just graduated to Raydium
-        dex_id = token.get("dex", "")
-        if "raydium" in dex_id.lower():
-            await fd.maybe_post_migration(bot, token)
 
         # Alert threshold — only send DMs if user scanning is on
-        if scanning_on and score >= 70 and cooldown_ok(mint):
+        if score >= 55 and cooldown_ok(mint):
             mark_alerted(mint)
 
             # Update log entry
@@ -634,6 +658,7 @@ async def run_scan(bot, chat_ids: list[int]):
                     )
                 except Exception:
                     pass
+
 
 
 async def score_single_token(mint_or_symbol: str) -> dict | None:

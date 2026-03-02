@@ -2,13 +2,22 @@
 
 ### Scanning Logic
 When user says "start scanning" or "watch for hot tokens":
-1. Fetch latest 50 tokens from pump.fun
-2. Filter out tokens under $10k mcap and over $10M mcap
-3. For each token score it using ALERTS.md heat formula
-4. Instantly disqualify if dev sold >50% OR single wallet >20%
-5. Run RugCheck on any token scoring 50+
-6. Alert user immediately if score >= 70
-7. Log all scores to memory/ for pattern learning
+1. Fetch tokens from pump.fun sorted by created_timestamp DESC (newest first)
+2. Filter out any token older than 4 hours — skip immediately, do not score
+3. Filter out tokens under $10k mcap and over $10M mcap
+4. Skip any token address already seen this session (cache seen addresses)
+5. For each remaining token score it using ALERTS.md heat formula
+6. Instantly disqualify if dev sold >50% OR single wallet >20%
+7. Run RugCheck on any token scoring 50+
+8. Alert user immediately if score >= 70
+9. Log all scores to memory/ for pattern learning
+
+### Token Freshness Rules
+- Always sort fetched tokens by created_timestamp DESC before processing
+- Before scoring any token: check age — if over 4 hours, skip it
+- Maintain a seen_tokens cache (set of mint addresses) per session
+- Never process the same mint address twice in the same session
+- Reset seen_tokens cache only when scanner is fully stopped and restarted
 
 ### Alert Priority Levels
 🔴 ULTRA HOT (90-100): Alert immediately, tag as priority

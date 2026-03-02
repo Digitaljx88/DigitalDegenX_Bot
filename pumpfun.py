@@ -294,7 +294,7 @@ def sell_pumpfun(mint: str, token_amount: int, keypair: Keypair,
         # Estimate SOL out (constant product reverse)
         vtr = bc["virtual_token_reserves"]
         vsr = bc["virtual_sol_reserves"]
-        sol_out_raw = int(vsr - int(vtr * vsr / (vtr + token_amount)))
+        sol_out_raw = int((vsr - int(vtr * vsr / (vtr + token_amount))) * 0.99)  # 1% pump.fun fee
         min_sol_out = int(sol_out_raw * (1 - slippage))
 
         bc_pda       = bc["bonding_curve"]

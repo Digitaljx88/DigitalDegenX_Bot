@@ -1,7 +1,8 @@
 ## 🚨 Alert System Data Sources
 
 ### Primary Sources (check every scan)
-- Pump.fun new tokens: https://frontend-api.pump.fun/coins?sortBy=last_trade_timestamp&limit=50
+- Pump.fun newest created: https://frontend-api.pump.fun/coins?sortBy=created_timestamp&order=DESC&limit=50
+- Pump.fun most active right now: https://frontend-api.pump.fun/coins?sortBy=last_reply&order=DESC&limit=50
 - DexScreener Solana trending: https://api.dexscreener.com/latest/dex/search?q=solana
 - Raydium new pools: https://api.raydium.io/v2/main/pairs
 

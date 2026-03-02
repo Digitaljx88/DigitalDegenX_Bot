@@ -20,8 +20,8 @@ FEED_CONFIG_FILE = os.path.join(DATA_DIR, "feed_config.json")
 FEED_STATE_FILE  = os.path.join(DATA_DIR, "feed_state.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# How long to remember a token to avoid re-posting (24 h)
-DEDUP_TTL = 7_200   # 2 hours — allows re-posting if token moves again
+# How long to remember a token to avoid re-posting (24 h, matches fetch window)
+DEDUP_TTL = 86_400  # 24 hours
 
 
 # ── Config helpers ────────────────────────────────────────────────────────────
@@ -31,6 +31,7 @@ DEFAULT_CONFIG = {
     "migrate_channel":   "",      # Telegram channel ID for migrations
     "launch_enabled":    False,
     "migrate_enabled":   False,
+    "post_all":          False,   # True = bypass all filters, post every token
     "min_mcap":          10_000,
     "max_mcap":          500_000,
     "min_heat_score":    0,       # 0 = post all; 50+ = filtered
@@ -172,19 +173,20 @@ async def maybe_post_launch(bot, token: dict, heat_score: int, priority_label: s
     if _already_posted("posted_launches", mint):
         return
 
-    # Apply filters
-    mcap    = token.get("mcap", 0)
-    wallets = token.get("total_holders", 0)
-    narr    = token.get("matched_narrative", "")
+    # Apply filters (skipped when post_all is enabled)
+    if not cfg.get("post_all", False):
+        mcap    = token.get("mcap", 0)
+        wallets = token.get("total_holders", 0)
+        narr    = token.get("matched_narrative", "")
 
-    if not (cfg["min_mcap"] <= mcap <= cfg["max_mcap"]):
-        return
-    if heat_score < cfg["min_heat_score"]:
-        return
-    if wallets < cfg["min_wallets"]:
-        return
-    if cfg["narrative_filter"] != "All" and cfg["narrative_filter"] not in narr:
-        return
+        if not (cfg["min_mcap"] <= mcap <= cfg["max_mcap"]):
+            return
+        if heat_score < cfg["min_heat_score"]:
+            return
+        if wallets < cfg["min_wallets"]:
+            return
+        if cfg["narrative_filter"] != "All" and cfg["narrative_filter"] not in narr:
+            return
 
     _mark_posted("posted_launches", mint)
     msg = format_launch_post(token, heat_score, priority_label)[:4000]
@@ -238,14 +240,18 @@ def feed_status_text() -> str:
     launch_on  = "✅ ON" if cfg["launch_enabled"]  else "⏸️ OFF"
     migrate_on = "✅ ON" if cfg["migrate_enabled"] else "⏸️ OFF"
 
+    post_all   = cfg.get("post_all", False)
+    filter_str = "🚫 *Filters: OFF* (posting ALL tokens)" if post_all else (
+        f"MCap: ${cfg['min_mcap']:,} – ${cfg['max_mcap']:,}\n"
+        f"Min Heat Score: {cfg['min_heat_score']}\n"
+        f"Min Wallets: {cfg['min_wallets']}\n"
+        f"Narrative: {cfg['narrative_filter']}"
+    )
     return (
         f"*📡 Channel Feeds*\n\n"
         f"*New Launches:* {launch_on}\n"
         f"Channel: `{launch_ch}`\n"
-        f"MCap: ${cfg['min_mcap']:,} – ${cfg['max_mcap']:,}\n"
-        f"Min Heat Score: {cfg['min_heat_score']}\n"
-        f"Min Wallets: {cfg['min_wallets']}\n"
-        f"Narrative: {cfg['narrative_filter']}\n\n"
+        f"{filter_str}\n\n"
         f"*Raydium Migrations:* {migrate_on}\n"
         f"Channel: `{migrate_ch}`"
     )
@@ -255,9 +261,11 @@ def feed_settings_kb() -> InlineKeyboardMarkup:
     cfg = load_feed_config()
     launch_toggle  = "⏸️ Pause Launches"  if cfg["launch_enabled"]  else "▶️ Enable Launches"
     migrate_toggle = "⏸️ Pause Migrations" if cfg["migrate_enabled"] else "▶️ Enable Migrations"
+    post_all_toggle = "✅ Post All: ON  → turn OFF" if cfg.get("post_all") else "🚫 Post All: OFF → turn ON"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📡 Set Launch Channel",    callback_data="feed:set_launch_ch"),
          InlineKeyboardButton("🚀 Set Migration Channel", callback_data="feed:set_migrate_ch")],
+        [InlineKeyboardButton(post_all_toggle,            callback_data="feed:toggle_post_all")],
         [InlineKeyboardButton("💰 MCap Range",            callback_data="feed:set_mcap"),
          InlineKeyboardButton("🌡️ Min Heat Score",        callback_data="feed:set_heat")],
         [InlineKeyboardButton("👛 Min Wallets",           callback_data="feed:set_wallets"),

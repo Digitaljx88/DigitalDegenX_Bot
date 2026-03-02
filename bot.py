@@ -20,6 +20,7 @@ import config as _cfg
 from config import (
     TELEGRAM_TOKEN, SOLANA_RPC, WALLET_PRIVATE_KEY,
     OPENCLAW_CONTAINER, ADMIN_IDS, PAPER_START_SOL, ALERT_CHECK_SECS,
+    HELIUS_API_KEY,
 )
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
@@ -226,13 +227,15 @@ def fetch_token_price(mint: str) -> tuple[float | None, float | None]:
 
 
 def _n(v, decimals=0) -> str:
+    if v is None:
+        return "N/A"
     try:
         f = float(v)
         if decimals:
             return f"${f:,.{decimals}f}"
         return f"${f:,.0f}"
     except Exception:
-        return str(v)
+        return "N/A"
 
 
 def _pct(v) -> str:
@@ -672,9 +675,20 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                     ct["triggered"] = True
                     changed = True
                     sell_pct = ct.get("sell_pct", 50)
-                    await execute_auto_sell(
-                        context.bot, uid, mint, symbol, sell_pct, reason, mode
-                    )
+                    if sell_pct == 0:
+                        # Alert-only target — notify without selling
+                        try:
+                            await context.bot.send_message(
+                                uid,
+                                f"🎯 *Custom Target Hit* (alert only)\n\n`${symbol}` — {reason}",
+                                parse_mode="Markdown",
+                            )
+                        except Exception:
+                            pass
+                    else:
+                        await execute_auto_sell(
+                            context.bot, uid, mint, symbol, sell_pct, reason, mode
+                        )
 
             # ── Market cap milestone alerts ───────────────────────────────────
             if mcap and mcap > 0:
@@ -696,7 +710,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                                 parse_mode="Markdown",
                                 reply_markup=InlineKeyboardMarkup([[
                                     InlineKeyboardButton("📊 View", callback_data=f"quick:analyze:{mint}"),
-                                    InlineKeyboardButton("🔴 Sell", callback_data=f"quick:buy:{mint}"),
+                                    InlineKeyboardButton("🔴 Sell", callback_data=f"quick:sell:{mint}"),
                                 ]])
                             )
                         except Exception:
@@ -915,6 +929,23 @@ async def _show_top(send_fn):
         await send_fn(f"Error: {e}")
 
 
+def _pct_kb(mint: str, back: str = "menu:portfolio") -> InlineKeyboardMarkup:
+    """Inline keyboard with 10/25/50/100% sell + buy buttons for a token."""
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("— SELL —", callback_data="noop")],
+        [InlineKeyboardButton("10%",  callback_data=f"qp:sell:{mint}:10"),
+         InlineKeyboardButton("25%",  callback_data=f"qp:sell:{mint}:25"),
+         InlineKeyboardButton("50%",  callback_data=f"qp:sell:{mint}:50"),
+         InlineKeyboardButton("100%", callback_data=f"qp:sell:{mint}:100")],
+        [InlineKeyboardButton("— BUY —", callback_data="noop")],
+        [InlineKeyboardButton("10%",  callback_data=f"qp:buy:{mint}:10"),
+         InlineKeyboardButton("25%",  callback_data=f"qp:buy:{mint}:25"),
+         InlineKeyboardButton("50%",  callback_data=f"qp:buy:{mint}:50"),
+         InlineKeyboardButton("100%", callback_data=f"qp:buy:{mint}:100")],
+        [InlineKeyboardButton("⬅️ Portfolio", callback_data=back)],
+    ])
+
+
 async def _show_portfolio(send_fn, uid: int):
     mode = get_mode(uid)
     as_configs = load_auto_sell().get(str(uid), {})
@@ -933,26 +964,30 @@ async def _show_portfolio(send_fn, uid: int):
             f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`\n\n"
             f"SOL: `{sol_bal:.4f}`\n"
         ]
+        token_rows = []
         if accounts:
-            lines.append("*Positions:*")
-            for acc in accounts[:15]:
-                pair  = fetch_sol_pair(acc["mint"])
-                sym   = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
-                price = float(pair.get("priceUsd", 0) or 0) if pair else 0
-                val   = price * acc["ui_amount"]
-                cfg   = as_configs.get(acc["mint"])
-                as_tag = " 🤖" if cfg and cfg.get("enabled") else ""
+            lines.append("*Positions — tap ⚡ to trade:*")
+            for acc in accounts[:10]:
+                pair   = fetch_sol_pair(acc["mint"])
+                sym    = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
+                price  = float(pair.get("priceUsd", 0) or 0) if pair else 0
+                val    = price * acc["ui_amount"]
+                as_tag = " 🤖" if as_configs.get(acc["mint"], {}).get("enabled") else ""
                 lines.append(f"`{sym}`{as_tag}: {acc['ui_amount']:,.4f} ≈ `${val:,.4f}`")
+                token_rows.append(InlineKeyboardButton(f"⚡ {sym}", callback_data=f"qt:{acc['mint']}"))
         else:
             lines.append("No token positions found.")
-        await send_fn(
-            "\n".join(lines), parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Refresh",    callback_data="portfolio:refresh"),
-                 InlineKeyboardButton("🤖 Auto-Sell",  callback_data="menu:autosell")],
-                [InlineKeyboardButton("⬅️ Main Menu",  callback_data="menu:main")],
-            ])
-        )
+
+        # Group token buttons 3 per row
+        kb = [token_rows[i:i+3] for i in range(0, len(token_rows), 3)]
+        kb += [
+            [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
+             InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
+            [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
+             InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
+            [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
+        ]
+        await send_fn("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
 
     # Paper portfolio
@@ -961,46 +996,48 @@ async def _show_portfolio(send_fn, uid: int):
     positions = {k: v for k, v in portfolio.items() if k != "SOL" and v > 0}
     lines     = [f"📄 *Paper Portfolio*\n\nSOL: `{sol_bal:.4f}`\n"]
     total_usd = 0.0
+    token_rows = []
 
     if positions:
-        lines.append("*Positions:*")
+        lines.append("*Positions — tap ⚡ to trade:*")
         for mint, raw_amt in positions.items():
-            pair  = fetch_sol_pair(mint)
-            cfg   = as_configs.get(mint)
+            pair = fetch_sol_pair(mint)
+            cfg  = as_configs.get(mint)
             if pair:
-                sym      = pair.get("baseToken", {}).get("symbol", mint[:8])
-                price    = float(pair.get("priceUsd", 0) or 0)
-                dec      = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
-                ui       = raw_amt / (10 ** dec)
-                val      = price * ui
+                sym       = pair.get("baseToken", {}).get("symbol", mint[:8])
+                price     = float(pair.get("priceUsd", 0) or 0)
+                dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
+                ui        = raw_amt / (10 ** dec)
+                val       = price * ui
                 total_usd += val
                 buy_price = cfg.get("buy_price_usd", 0) if cfg else 0
                 gain_pct  = ((price - buy_price) / buy_price * 100) if buy_price else 0
                 gain_str  = f" (+{gain_pct:.0f}% 🔥)" if gain_pct >= 100 else f" ({gain_pct:+.0f}%)" if buy_price else ""
                 as_tag    = " 🤖" if cfg and cfg.get("enabled") else ""
                 lines.append(f"`{sym}`{as_tag}: {ui:,.4f} ≈ `${val:,.4f}`{gain_str}")
-
-                # Show auto-sell status
                 if cfg and cfg.get("enabled"):
                     pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
                     if pending:
                         lines.append(f"  ↳ Next target: {pending[0]}")
+                token_rows.append(InlineKeyboardButton(f"⚡ {sym}", callback_data=f"qt:{mint}"))
             else:
                 lines.append(f"`{mint[:8]}...`: {raw_amt:,} raw")
+                token_rows.append(InlineKeyboardButton(f"⚡ {mint[:6]}", callback_data=f"qt:{mint}"))
         if total_usd:
             lines.append(f"\n*Est. Value:* `${total_usd:,.4f}`")
     else:
         lines.append("No positions yet.")
 
-    await send_fn(
-        "\n".join(lines), parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
-             InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
-            [InlineKeyboardButton("🗑️ Reset",     callback_data="settings:reset_paper"),
-             InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main")],
-        ])
-    )
+    kb = [token_rows[i:i+3] for i in range(0, len(token_rows), 3)]
+    kb += [
+        [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
+         InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
+        [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
+         InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
+        [InlineKeyboardButton("🗑️ Reset",     callback_data="settings:reset_paper"),
+         InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main")],
+    ]
+    await send_fn("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 
 async def _show_autosell(send_fn, uid: int):
@@ -1073,7 +1110,7 @@ async def do_analyze(send_fn, query: str):
         f"Cover: trend, momentum, liquidity risk, buy/avoid recommendation. "
         f"Plain text, under 200 words.\n\n{market_txt}"
     )
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     ai   = await loop.run_in_executor(None, ask_ai, prompt)
     sym  = pair["baseToken"]["symbol"]
     mint = pair["baseToken"]["address"]
@@ -1220,7 +1257,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     sc.save_state(s)
     await update.message.reply_text(
         "✅ *Scanner started!*\n\n"
-        "Scanning pump.fun + DexScreener every 5 minutes.\n"
+        "Scanning pump.fun + DexScreener every 15 seconds.\n"
         "You'll be alerted when Heat Score ≥ 70/100.\n\n"
         "Use /stopscan to stop.",
         parse_mode="Markdown",
@@ -1261,7 +1298,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
         return
-    items = sorted(wl.values(), key=lambda x: -x.get("score", 0))[:20]
+    items = sorted(wl.values(), key=lambda x: -x.get("ts", 0))[:20]
     lines = ["*📋 Watchlist* — tokens scoring 50–69\n"]
     for t in items:
         lines.append(
@@ -1310,8 +1347,8 @@ async def cmd_topalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
         return
-    top = sorted(alerts, key=lambda x: -x.get("score", 0))[:10]
-    lines = ["*🏆 Top Alerts Today*\n"]
+    top = sorted(alerts, key=lambda x: -x.get("timestamp", 0))[:10]
+    lines = ["*🏆 Recent Alerts Today*\n"]
     for i, e in enumerate(top, 1):
         label = sc.priority_label(e["score"])
         lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
@@ -1475,6 +1512,14 @@ async def feed_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=fd.feed_settings_kb()
         )
 
+    elif action == "toggle_post_all":
+        cfg["post_all"] = not cfg.get("post_all", False)
+        fd.save_feed_config(cfg)
+        await query.edit_message_text(
+            fd.feed_status_text(), parse_mode="Markdown",
+            reply_markup=fd.feed_settings_kb()
+        )
+
     elif action == "set_launch_ch":
         set_state(uid, waiting_for="feed_launch_channel")
         await query.edit_message_text(
@@ -1579,7 +1624,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             sc.save_state(s)
             await query.edit_message_text(
                 "✅ *Scanner started!*\n\n"
-                "Scanning every 5 minutes.\n"
+                "Scanning every 15 seconds.\n"
                 "Alerts fire when Heat Score ≥ 70/100.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
@@ -1600,7 +1645,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]])
             )
             return
-        items = sorted(wl.values(), key=lambda x: -x.get("score", 0))[:20]
+        items = sorted(wl.values(), key=lambda x: -x.get("ts", 0))[:20]
         lines = ["*📋 Watchlist* — tokens scoring 50–69\n"]
         for t in items:
             lines.append(
@@ -1627,8 +1672,8 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]])
             )
             return
-        top   = sorted(alerts, key=lambda x: -x.get("score", 0))[:10]
-        lines = ["*🏆 Top Alerts Today*\n"]
+        top   = sorted(alerts, key=lambda x: -x.get("timestamp", 0))[:10]
+        lines = ["*🏆 Recent Alerts Today*\n"]
         for i, e in enumerate(top, 1):
             label = sc.priority_label(e["score"])
             lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
@@ -1719,11 +1764,12 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Add WALLET_PRIVATE_KEY to config.py first!", show_alert=True)
         return
     await query.answer()
+    prev = user_modes.get(uid, "paper")
     user_modes[uid] = chosen
-    if chosen == "paper":
+    if chosen == "paper" and prev != "paper":
         reset_portfolio(uid)
     label = "📄 Paper" if chosen == "paper" else "🔴 Live"
-    note  = "Virtual portfolio reset to 10 SOL." if chosen == "paper" else "⚠️ Real trades active."
+    note  = "Switched to paper trading. Virtual portfolio reset to 10 SOL." if (chosen == "paper" and prev != "paper") else ("📄 Already in paper mode." if chosen == "paper" else "⚠️ Real trades active.")
     await query.edit_message_text(f"✅ Mode: *{label}*\n\n{note}", parse_mode="Markdown",
                                    reply_markup=back_kb())
 
@@ -1857,6 +1903,176 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.answer("Refreshing...")
     await query.edit_message_text("Loading...")
     await _show_portfolio(query.edit_message_text, query.from_user.id)
+
+
+async def qt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick trade view — shows token position + 10/25/50/100% buy+sell buttons."""
+    query = update.callback_query
+    uid   = query.from_user.id
+    mint  = query.data.split(":", 1)[1]
+    await query.answer()
+    mode = get_mode(uid)
+
+    pair = fetch_sol_pair(mint)
+    sym  = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
+    price = float(pair.get("priceUsd", 0) or 0) if pair else 0
+
+    if mode == "live":
+        pubkey   = get_wallet_pubkey()
+        sol_bal  = get_sol_balance(pubkey) if pubkey else 0
+        accounts = get_token_accounts(pubkey) if pubkey else []
+        held_raw = next((a["ui_amount"] for a in accounts if a["mint"] == mint), 0)
+        val      = held_raw * price
+        lines = [
+            f"⚡ *Quick Trade — ${sym}*\n",
+            f"Price: `${price:.8f}`",
+            f"Held: `{held_raw:,.4f}` ≈ `${val:,.4f}`",
+            f"SOL balance: `{sol_bal:.4f}`",
+        ]
+    else:
+        portfolio = get_portfolio(uid)
+        sol_bal   = portfolio.get("SOL", 0)
+        raw_amt   = portfolio.get(mint, 0)
+        dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6) if pair else 6
+        ui        = raw_amt / (10 ** dec)
+        val       = ui * price
+        lines = [
+            f"⚡ *Quick Trade — ${sym}* 📄\n",
+            f"Price: `${price:.8f}`",
+            f"Held: `{ui:,.4f}` ≈ `${val:,.4f}`",
+            f"SOL balance: `{sol_bal:.4f}`",
+        ]
+
+    await query.edit_message_text(
+        "\n".join(lines), parse_mode="Markdown",
+        reply_markup=_pct_kb(mint)
+    )
+
+
+async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Execute a quick percent buy or sell immediately."""
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")   # qp : action : mint : pct
+    action = parts[1]
+    mint   = parts[2]
+    pct    = int(parts[3])
+    await query.answer(f"Executing {action} {pct}%...")
+    mode = get_mode(uid)
+
+    pair = fetch_sol_pair(mint)
+    if not pair:
+        await query.edit_message_text("Could not fetch token data.", reply_markup=_pct_kb(mint))
+        return
+    sym      = pair.get("baseToken", {}).get("symbol", mint[:8])
+    price    = float(pair.get("priceUsd", 0) or 0)
+    dec      = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
+
+    # ── SELL ──────────────────────────────────────────────────────────────────
+    if action == "sell":
+        if mode == "paper":
+            portfolio = get_portfolio(uid)
+            raw_held  = portfolio.get(mint, 0)
+            if raw_held <= 0:
+                await query.edit_message_text(f"No `${sym}` position to sell.", reply_markup=_pct_kb(mint))
+                return
+            sell_raw = max(1, int(raw_held * pct / 100))
+            quote    = jupiter_quote(mint, SOL_MINT, sell_raw)
+            if not quote or "outAmount" not in quote:
+                await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
+                return
+            sol_recv          = int(quote["outAmount"]) / 1e9
+            portfolio[mint]   = raw_held - sell_raw
+            portfolio["SOL"]  = portfolio.get("SOL", 0) + sol_recv
+            if portfolio[mint] <= 0:
+                portfolio.pop(mint, None)
+                remove_auto_sell(uid, mint)
+            update_portfolio(uid, portfolio)
+            await query.edit_message_text(
+                f"📄 *Paper Sell — {pct}%*\n\n"
+                f"Token: `${sym}`\n"
+                f"Sold: `{sell_raw:,}` raw units\n"
+                f"Received: `{sol_recv:.4f} SOL`\n"
+                f"SOL balance: `{portfolio['SOL']:.4f}`",
+                parse_mode="Markdown",
+                reply_markup=_pct_kb(mint)
+            )
+        else:
+            pubkey   = get_wallet_pubkey()
+            accounts = get_token_accounts(pubkey) if pubkey else []
+            held     = next((a for a in accounts if a["mint"] == mint), None)
+            if not held:
+                await query.edit_message_text(f"No `${sym}` in live wallet.", reply_markup=_pct_kb(mint))
+                return
+            raw_held = held["amount"]
+            sell_raw = max(1, int(raw_held * pct / 100))
+            quote    = jupiter_quote(mint, SOL_MINT, sell_raw)
+            if not quote or "outAmount" not in quote:
+                await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
+                return
+            sig = execute_swap_live(quote)
+            sol_recv = int(quote.get("outAmount", 0)) / 1e9
+            await query.edit_message_text(
+                f"🔴 *Live Sell — {pct}%*\n\n"
+                f"Token: `${sym}`\n"
+                f"Sold: `{sell_raw:,}` raw\n"
+                f"Est. received: `{sol_recv:.4f} SOL`\n"
+                f"Tx: `{sig}`",
+                parse_mode="Markdown",
+                reply_markup=_pct_kb(mint)
+            )
+
+    # ── BUY ───────────────────────────────────────────────────────────────────
+    else:
+        if mode == "paper":
+            portfolio = get_portfolio(uid)
+            sol_bal   = portfolio.get("SOL", 0)
+            sol_spend = sol_bal * pct / 100
+            if sol_spend < 0.001:
+                await query.edit_message_text(f"Insufficient SOL balance (`{sol_bal:.4f}`).", reply_markup=_pct_kb(mint))
+                return
+            lamports = int(sol_spend * 1_000_000_000)
+            quote    = jupiter_quote(SOL_MINT, mint, lamports)
+            if not quote or "outAmount" not in quote:
+                await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
+                return
+            out_raw            = int(quote["outAmount"])
+            portfolio["SOL"]   = sol_bal - sol_spend
+            portfolio[mint]    = portfolio.get(mint, 0) + out_raw
+            update_portfolio(uid, portfolio)
+            setup_auto_sell(uid, mint, sym, price, out_raw, dec)
+            await query.edit_message_text(
+                f"📄 *Paper Buy — {pct}% of SOL*\n\n"
+                f"Token: `${sym}`\n"
+                f"Spent: `{sol_spend:.4f} SOL`\n"
+                f"Received: `{out_raw:,}` raw units\n"
+                f"SOL balance: `{portfolio['SOL']:.4f}`",
+                parse_mode="Markdown",
+                reply_markup=_pct_kb(mint)
+            )
+        else:
+            pubkey  = get_wallet_pubkey()
+            sol_bal = get_sol_balance(pubkey) if pubkey else 0
+            sol_spend = sol_bal * pct / 100
+            if sol_spend < 0.001:
+                await query.edit_message_text(f"Insufficient SOL (`{sol_bal:.4f}`).", reply_markup=_pct_kb(mint))
+                return
+            lamports = int(sol_spend * 1_000_000_000)
+            quote    = jupiter_quote(SOL_MINT, mint, lamports)
+            if not quote or "outAmount" not in quote:
+                await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
+                return
+            sig     = execute_swap_live(quote)
+            out_raw = int(quote.get("outAmount", 0))
+            await query.edit_message_text(
+                f"🔴 *Live Buy — {pct}% of SOL*\n\n"
+                f"Token: `${sym}`\n"
+                f"Spent: `{sol_spend:.4f} SOL`\n"
+                f"Received: `{out_raw:,}` raw\n"
+                f"Tx: `{sig}`",
+                parse_mode="Markdown",
+                reply_markup=_pct_kb(mint)
+            )
 
 
 async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2291,7 +2507,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"User said: \"{text}\"\n\n"
             f"Respond helpfully, under 150 words, plain text."
         )
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         ai   = await loop.run_in_executor(None, ask_ai, prompt)
         await msg.edit_text(
             ai,
@@ -2303,7 +2519,22 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Bot command list ─────────────────────────────────────────────────────────
 
+# Module-level holder so the watcher task isn't garbage-collected
+_helius_watcher = None
+
+
 async def post_init(app):
+    global _helius_watcher
+    # Start Helius real-time WebSocket watcher if API key is configured
+    if HELIUS_API_KEY:
+        try:
+            import helius_ws
+            _helius_watcher = helius_ws.HeliusWatcher(HELIUS_API_KEY, app.bot, fd)
+            _helius_watcher.start()
+            print("[Helius] Real-time WebSocket watcher started")
+        except Exception as e:
+            print(f"[Helius] Failed to start watcher: {e}")
+
     await app.bot.set_my_commands([
         BotCommand("start",      "Launch the bot"),
         BotCommand("menu",       "Show all options & buttons"),
@@ -2369,6 +2600,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(autosell_callback,            pattern=r"^as:"))
     app.add_handler(CallbackQueryHandler(custom_target_type_callback,  pattern=r"^ct_type:"))
     app.add_handler(CallbackQueryHandler(portfolio_callback,           pattern=r"^portfolio:"))
+    app.add_handler(CallbackQueryHandler(qt_callback,                  pattern=r"^qt:"))
+    app.add_handler(CallbackQueryHandler(qp_callback,                  pattern=r"^qp:"))
+    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
     app.add_handler(CallbackQueryHandler(confirm_callback,             pattern=r"^confirm:"))
     app.add_handler(CallbackQueryHandler(quick_callback,               pattern=r"^quick:"))
     app.add_handler(CallbackQueryHandler(cancel_callback,              pattern=r"^cancel$"))
@@ -2391,7 +2625,7 @@ if __name__ == "__main__":
         chat_ids = s.get("scan_targets", [])
         await sc.run_scan(ctx.bot, chat_ids)
 
-    app.job_queue.run_repeating(run_scanner_job, interval=30, first=15)
+    app.job_queue.run_repeating(run_scanner_job, interval=15, first=5)
 
     print("@DigitalDegenX_Bot running...")
     app.run_polling()
