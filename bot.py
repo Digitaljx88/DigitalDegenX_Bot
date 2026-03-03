@@ -22,7 +22,7 @@ import pumpfeed as pf
 import config as _cfg
 from config import (
     TELEGRAM_TOKEN, SOLANA_RPC, WALLET_PRIVATE_KEY,
-    OPENCLAW_CONTAINER, ADMIN_IDS, PAPER_START_SOL, ALERT_CHECK_SECS,
+    ADMIN_IDS, PAPER_START_SOL, ALERT_CHECK_SECS,
     HELIUS_API_KEY,
 )
 from telegram import (
@@ -354,9 +354,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     pg_lbl    = "🟢 Pump Grad: ON" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad: OFF"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
-         InlineKeyboardButton("🤖 AI Analyze",   callback_data="menu:analyze")],
-        [InlineKeyboardButton("💰 Trade",         callback_data="menu:trade"),
-         InlineKeyboardButton("👜 Portfolio",     callback_data="menu:portfolio")],
+         InlineKeyboardButton("💰 Trade",        callback_data="menu:trade"),
+         InlineKeyboardButton("👜 Portfolio",    callback_data="menu:portfolio")],
         [InlineKeyboardButton("🔔 Alerts",        callback_data="menu:alerts"),
          InlineKeyboardButton("🤖 Auto-Sell",     callback_data="menu:autosell")],
         [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
@@ -459,39 +458,13 @@ def confirm_trade_kb(action: str, mint: str, symbol: str) -> InlineKeyboardMarku
 
 def price_card_kb(mint: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
-         InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
+        [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
          InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
         [InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/solana/{mint}"),
          InlineKeyboardButton("🪙 Pump.fun",    url=f"https://pump.fun/{mint}"),
          InlineKeyboardButton("🔫 RugCheck",    url=f"https://rugcheck.xyz/tokens/{mint}")],
         [InlineKeyboardButton("⬅️ Back",     callback_data="menu:market")],
     ])
-
-
-# ─── AI ───────────────────────────────────────────────────────────────────────
-
-def ask_ai(prompt: str) -> str:
-    try:
-        result = subprocess.run(
-            ["docker", "exec", OPENCLAW_CONTAINER, "sh", "-c",
-             f"OPENCLAW_STATE_DIR=/data/.openclaw openclaw agent "
-             f"--agent main --session-id meme-bot "
-             f"--message {json.dumps(prompt)} --json"],
-            capture_output=True, text=True, timeout=60,
-        )
-        output = result.stdout.strip()
-        if not output:
-            return result.stderr.strip() or "No AI response."
-        try:
-            data = json.loads(output)
-            return data.get("text") or data.get("content") or data.get("message") or output
-        except json.JSONDecodeError:
-            return output
-    except subprocess.TimeoutExpired:
-        return "AI timed out."
-    except Exception as e:
-        return f"AI error: {e}"
 
 
 # ─── Trading ──────────────────────────────────────────────────────────────────
@@ -687,7 +660,7 @@ async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
                         ),
                         parse_mode="Markdown",
                         reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("📊 View", callback_data=f"quick:analyze:{alert['mint']}")
+                            InlineKeyboardButton("📊 View", callback_data=f"quick:buy:{alert['mint']}")
                         ]])
                     )
                 except Exception:
@@ -795,7 +768,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                                 ),
                                 parse_mode="Markdown",
                                 reply_markup=InlineKeyboardMarkup([[
-                                    InlineKeyboardButton("📊 View", callback_data=f"quick:analyze:{mint}"),
+                                    InlineKeyboardButton("🟢 Buy", callback_data=f"quick:buy:{mint}"),
                                     InlineKeyboardButton("🔴 Sell", callback_data=f"quick:sell:{mint}"),
                                 ]])
                             )
@@ -1194,31 +1167,6 @@ def _format_autosell_config(cfg: dict) -> str:
     return "\n".join(lines)
 
 
-async def do_analyze(send_fn, query: str):
-    pair = fetch_sol_pair(query)
-    if not pair:
-        await send_fn(f"Token `{query}` not found.", parse_mode="Markdown", reply_markup=back_kb())
-        return
-    market_txt = format_pair(pair).replace("*", "").replace("`", "")
-    prompt = (
-        f"You are a Solana meme coin analyst. Briefly analyze this token. "
-        f"Cover: trend, momentum, liquidity risk, buy/avoid recommendation. "
-        f"Plain text, under 200 words.\n\n{market_txt}"
-    )
-    loop = asyncio.get_running_loop()
-    ai   = await loop.run_in_executor(None, ask_ai, prompt)
-    sym  = pair["baseToken"]["symbol"]
-    mint = pair["baseToken"]["address"]
-    await send_fn(
-        f"🤖 *Analysis — ${sym}*\n\n{ai}", parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢 Buy",   callback_data=f"quick:buy:{mint}"),
-             InlineKeyboardButton("🔔 Alert", callback_data=f"quick:alert:{mint}")],
-            [InlineKeyboardButton("⬅️ Menu",  callback_data="menu:main")],
-        ])
-    )
-
-
 # ─── Commands ─────────────────────────────────────────────────────────────────
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1251,14 +1199,6 @@ async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_top(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Fetching...")
     await _show_top(msg.edit_text)
-
-
-async def cmd_analyze(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Usage: `/analyze <symbol or CA>`", parse_mode="Markdown")
-        return
-    msg = await update.message.reply_text("Analyzing...")
-    await do_analyze(msg.edit_text, context.args[0])
 
 
 async def cmd_buy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2074,10 +2014,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "market":
         await query.edit_message_text("*📊 Market*\n\nChoose:", parse_mode="Markdown",
                                        reply_markup=market_kb())
-    elif action == "analyze":
-        set_state(uid, waiting_for="analyze_token")
-        await query.edit_message_text("🤖 *AI Analysis*\n\nSend a token symbol or CA:",
-                                       parse_mode="Markdown", reply_markup=back_kb())
     elif action == "trade":
         mode = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
         await query.edit_message_text(f"*💰 Trade* — {mode}\n\nChoose:",
@@ -2536,10 +2472,7 @@ async def quick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mint   = parts[2]
     await query.answer()
 
-    if action == "analyze":
-        await query.edit_message_text("Analyzing...")
-        await do_analyze(query.edit_message_text, mint)
-    elif action == "buy":
+    if action == "buy":
         set_state(uid, waiting_for="trade_buy_amount", trade_action="buy", trade_token=mint)
         await query.edit_message_text(
             "🟢 *Buy*\n\nHow much SOL to spend?",
@@ -2602,11 +2535,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         await msg.edit_text(format_pair(pair), parse_mode="Markdown",
                              reply_markup=price_card_kb(pair["baseToken"]["address"]))
-
-    elif state == "analyze_token":
-        clear_state(uid)
-        msg = await update.message.reply_text("Analyzing...")
-        await do_analyze(msg.edit_text, text)
 
     elif state in ("trade_buy_token", "trade_sell_token"):
         action = get_state(uid, "trade_action")
@@ -3063,17 +2991,8 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await cmd_heatscore(update, context)
                 return
 
-        # Free-form AI chat
-        msg = await update.message.reply_text("Thinking...")
-        prompt = (
-            f"You are a Solana meme coin trading assistant. "
-            f"User said: \"{text}\"\n\n"
-            f"Respond helpfully, under 150 words, plain text."
-        )
-        loop = asyncio.get_running_loop()
-        ai   = await loop.run_in_executor(None, ask_ai, prompt)
-        await msg.edit_text(
-            ai,
+        await update.message.reply_text(
+            "Unknown command. Use /menu to see all options.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📋 Menu", callback_data="menu:main")
             ]])
@@ -3215,7 +3134,6 @@ async def post_init(app):
         BotCommand("menu",       "Show all options & buttons"),
         BotCommand("price",      "Look up a token price"),
         BotCommand("top",        "Top 10 Solana meme coins by volume"),
-        BotCommand("analyze",    "AI-powered token analysis"),
         BotCommand("buy",        "Buy a token (paper or live)"),
         BotCommand("sell",       "Sell a token from your portfolio"),
         BotCommand("portfolio",  "View your holdings & balances"),
@@ -3250,7 +3168,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("menu",       start))
     app.add_handler(CommandHandler("price",      cmd_price))
     app.add_handler(CommandHandler("top",        cmd_top))
-    app.add_handler(CommandHandler("analyze",    cmd_analyze))
     app.add_handler(CommandHandler("buy",        cmd_buy))
     app.add_handler(CommandHandler("sell",       cmd_sell))
     app.add_handler(CommandHandler("portfolio",  cmd_portfolio))
