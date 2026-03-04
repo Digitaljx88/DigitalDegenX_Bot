@@ -2430,6 +2430,42 @@ async def pumplive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]),
         )
 
+    elif action == "channel_menu":
+        ch = pf.get_pumplive_channel()
+        ch_str = f"`{ch}`" if ch else "not set"
+        await query.edit_message_text(
+            f"📣 *Pump Live — Alert Channel*\n\n"
+            f"Current: {ch_str}\n\n"
+            "Set a channel and the bot will forward every Pump Live alert there.\n"
+            "Make sure the bot is an admin in the channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Set Channel",    callback_data="pumplive:set_channel")],
+                *([ [InlineKeyboardButton("🗑️ Remove Channel", callback_data="pumplive:clear_channel")] ] if ch else []),
+                [InlineKeyboardButton("⬅️ Back",           callback_data="pumplive:menu")],
+            ])
+        )
+
+    elif action == "set_channel":
+        set_state(uid, waiting_for="pumplive_channel")
+        await query.edit_message_text(
+            "📣 *Set Pump Live Channel*\n\n"
+            "Send the channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:channel_menu"),
+            ]])
+        )
+
+    elif action == "clear_channel":
+        pf.set_pumplive_channel(None)
+        await query.edit_message_text(
+            "🗑️ Pump Live alert channel removed.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="pumplive:menu"),
+            ]])
+        )
+
     elif action == "menu":
         clear_state(uid)
         await _refresh()
@@ -2570,6 +2606,42 @@ async def pumpgrad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "toggle_grad_autobuy":
         pf.set_grad_autobuy(uid, not pf.is_grad_autobuy(uid))
         await _refresh()
+
+    elif action == "channel_menu":
+        ch = pf.get_pumpgrad_channel()
+        ch_str = f"`{ch}`" if ch else "not set"
+        await query.edit_message_text(
+            f"📣 *Pump Grad — Alert Channel*\n\n"
+            f"Current: {ch_str}\n\n"
+            "Set a channel and the bot will forward every graduation alert there.\n"
+            "Make sure the bot is an admin in the channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Set Channel",    callback_data="pumpgrad:set_channel")],
+                *([ [InlineKeyboardButton("🗑️ Remove Channel", callback_data="pumpgrad:clear_channel")] ] if ch else []),
+                [InlineKeyboardButton("⬅️ Back",           callback_data="pumpgrad:menu")],
+            ])
+        )
+
+    elif action == "set_channel":
+        set_state(uid, waiting_for="pumpgrad_channel")
+        await query.edit_message_text(
+            "📣 *Set Pump Grad Channel*\n\n"
+            "Send the channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:channel_menu"),
+            ]])
+        )
+
+    elif action == "clear_channel":
+        pf.set_pumpgrad_channel(None)
+        await query.edit_message_text(
+            "🗑️ Pump Grad alert channel removed.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="pumpgrad:menu"),
+            ]])
+        )
 
     elif action == "menu":
         clear_state(uid)
@@ -5206,6 +5278,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("📣 Channel Settings", callback_data="scanner:alert_channel_menu"),
+            ]])
+        )
+
+    elif state == "pumplive_channel":
+        ch = text.strip()
+        if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
+            await update.message.reply_text(
+                "Enter a channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+                parse_mode="Markdown"
+            )
+            return
+        pf.set_pumplive_channel(ch)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ *Pump Live channel set to* `{ch}`\n\n"
+            f"Every Pump Live alert will now be posted there too.\n"
+            f"Make sure the bot is an admin in the channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📣 Channel Settings", callback_data="pumplive:channel_menu"),
+            ]])
+        )
+
+    elif state == "pumpgrad_channel":
+        ch = text.strip()
+        if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
+            await update.message.reply_text(
+                "Enter a channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+                parse_mode="Markdown"
+            )
+            return
+        pf.set_pumpgrad_channel(ch)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ *Pump Grad channel set to* `{ch}`\n\n"
+            f"Every graduation alert will now be posted there too.\n"
+            f"Make sure the bot is an admin in the channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📣 Channel Settings", callback_data="pumpgrad:channel_menu"),
             ]])
         )
 

@@ -79,6 +79,31 @@ def _prune_seen(s: dict):
     s["seen"] = {m: t for m, t in s.get("seen", {}).items() if t > cutoff}
 
 
+# ─── Alert channel helpers ─────────────────────────────────────────────────────
+
+def get_pumplive_channel() -> str | None:
+    return load_state().get("pumplive_channel")
+
+def set_pumplive_channel(ch: str | None):
+    s = load_state()
+    if ch:
+        s["pumplive_channel"] = ch
+    else:
+        s.pop("pumplive_channel", None)
+    save_state(s)
+
+def get_pumpgrad_channel() -> str | None:
+    return load_state().get("pumpgrad_channel")
+
+def set_pumpgrad_channel(ch: str | None):
+    s = load_state()
+    if ch:
+        s["pumpgrad_channel"] = ch
+    else:
+        s.pop("pumpgrad_channel", None)
+    save_state(s)
+
+
 def get_subscribers() -> dict:
     return load_state().get("subscribers", {})
 
@@ -275,10 +300,14 @@ def filter_status_text(uid: int) -> str:
     tracked  = filters["tracked_wallets"]
     blocked  = filters["blocked_wallets"]
 
+    channel  = get_pumplive_channel()
+    ch_str   = f"`{channel}`" if channel else "not set"
+
     lines = [
         "📡 *PUMP LIVE — FILTER SETTINGS*",
         "",
         f"Status: {status}",
+        f"📣 Channel: {ch_str}",
         "━━━━━━━━━━━━━━━━━━━",
         f"💰 MCap: `{mcap_str}`",
         f"📈 SOL Vol: `{vol_str}`",
@@ -338,6 +367,9 @@ def filter_kb(uid: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("👛 Track Wallet", callback_data="pumplive:set_tracked"),
             InlineKeyboardButton("🚫 Block Wallet", callback_data="pumplive:set_block_wallet"),
+        ],
+        [
+            InlineKeyboardButton("📣 Alert Channel", callback_data="pumplive:channel_menu"),
         ],
         [
             InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
@@ -468,6 +500,23 @@ async def _handle_token(bot: Bot, token: dict):
                 text=text,
                 parse_mode="Markdown",
                 reply_markup=kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
+    # Post to pump live alert channel (URL-only keyboard — callbacks don't work in channels)
+    channel = get_pumplive_channel()
+    if channel:
+        channel_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+             InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
+             InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+        ])
+        try:
+            await bot.send_message(
+                chat_id=channel, text=text,
+                parse_mode="Markdown", reply_markup=channel_kb,
                 disable_web_page_preview=True,
             )
         except Exception:
@@ -634,10 +683,14 @@ def grad_filter_status_text(uid: int) -> str:
     tracked  = filters["tracked_wallets"]
     blocked  = filters["blocked_wallets"]
 
+    grad_channel = get_pumpgrad_channel()
+    ch_str       = f"`{grad_channel}`" if grad_channel else "not set"
+
     lines = [
         "🎓 *PUMP GRAD — FILTER SETTINGS*",
         "",
         f"Status: {status}  ·  Auto-Buy: {ab_status}",
+        f"📣 Channel: {ch_str}",
         "━━━━━━━━━━━━━━━━━━━",
         f"💰 MCap at grad: `{mcap_str}`",
         f"🛒 Dev Buy: `{dev_str}`",
@@ -695,6 +748,9 @@ def grad_filter_kb(uid: int) -> InlineKeyboardMarkup:
         [
             InlineKeyboardButton("👛 Track Wallet", callback_data="pumpgrad:set_tracked"),
             InlineKeyboardButton("🚫 Block Wallet", callback_data="pumpgrad:set_block_wallet"),
+        ],
+        [
+            InlineKeyboardButton("📣 Alert Channel", callback_data="pumpgrad:channel_menu"),
         ],
         [
             InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
@@ -852,6 +908,23 @@ async def _handle_grad_token(bot: Bot, token: dict):
                 await _grad_autobuy_fn(bot, uid, result)
             except Exception:
                 pass
+
+    # Post to pump grad alert channel (URL-only keyboard — callbacks don't work in channels)
+    grad_channel = get_pumpgrad_channel()
+    if grad_channel:
+        channel_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+             InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
+             InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+        ])
+        try:
+            await bot.send_message(
+                chat_id=grad_channel, text=text,
+                parse_mode="Markdown", reply_markup=channel_kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
 
 
 # ─── Graduation polling (pump.fun API) ────────────────────────────────────────
