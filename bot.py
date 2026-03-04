@@ -1415,12 +1415,20 @@ async def show_main_menu(target, uid: int, edit=False):
 
 
 async def _show_top(send_fn):
-    """Show our top 10 scouted tokens ranked by MCap gain since we first alerted them."""
-    log     = sc.load_log()
-    alerted = [e for e in log if e.get("alerted") and e.get("mint")]
-    if not alerted:
+    """Show top 10 tokens we scored in the last 24h, ranked by MCap gain since we saw them."""
+    import time as _time
+    cutoff = _time.time() - 86400
+    log    = sc.load_log()
+
+    # All scored tokens from the last 24h with a recorded mcap
+    recent = [
+        e for e in log
+        if e.get("mint") and e.get("mcap") and e.get("timestamp", 0) >= cutoff and not e.get("dq")
+    ]
+
+    if not recent:
         await send_fn(
-            "*🏆 Top Scouted Tokens*\n\nNo alerted tokens yet — scanner hasn't fired any alerts.\n\nRun /scan to start.",
+            "*🏆 24h Scout History*\n\nNo scored tokens in the last 24 hours yet.\n\nRun /scan to start.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Back", callback_data="menu:market")
@@ -1428,28 +1436,24 @@ async def _show_top(send_fn):
         )
         return
 
-    # De-duplicate: keep first alert per mint (lowest timestamp)
-    seen   = {}
-    for e in sorted(alerted, key=lambda x: x.get("timestamp", 0)):
-        mint = e["mint"]
-        if mint not in seen:
-            seen[mint] = e
+    # De-duplicate: keep first seen per mint
+    seen = {}
+    for e in sorted(recent, key=lambda x: x.get("timestamp", 0)):
+        if e["mint"] not in seen:
+            seen[e["mint"]] = e
 
-    # Enrich with current price from DexScreener (up to 15 tokens)
-    candidates = list(seen.values())[-30:]  # recent 30, we'll rank the top 10
-    enriched   = []
-    for e in candidates:
+    # Enrich with current MCap from DexScreener
+    enriched = []
+    for e in list(seen.values()):
         mint       = e["mint"]
-        alert_mcap = e.get("mcap", 0) or 0
+        entry_mcap = e.get("mcap", 0) or 0
         try:
             pair = fetch_sol_pair(mint)
             if not pair:
                 continue
             cur_mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
-            cur_pr   = float(pair.get("priceUsd") or 0)
-            h24      = pair.get("priceChange", {}).get("h24", 0) or 0
-            if alert_mcap and cur_mcap:
-                gain_pct = ((cur_mcap - alert_mcap) / alert_mcap) * 100
+            if entry_mcap and cur_mcap:
+                gain_pct = ((cur_mcap - entry_mcap) / entry_mcap) * 100
             else:
                 gain_pct = 0
             enriched.append({
@@ -1457,10 +1461,10 @@ async def _show_top(send_fn):
                 "symbol":     e.get("symbol", "?"),
                 "mint":       mint,
                 "score":      e.get("score", 0),
-                "alert_mcap": alert_mcap,
+                "narrative":  e.get("narrative", ""),
+                "alerted":    e.get("alerted", False),
+                "entry_mcap": entry_mcap,
                 "cur_mcap":   cur_mcap,
-                "cur_pr":     cur_pr,
-                "h24":        h24,
                 "gain_pct":   gain_pct,
             })
         except Exception:
@@ -1471,14 +1475,16 @@ async def _show_top(send_fn):
         return
 
     top10 = sorted(enriched, key=lambda x: -x["gain_pct"])[:10]
-    lines = ["*🏆 Top Scouted Calls*\n_Tokens we alerted, ranked by MCap gain_\n"]
+    lines = ["*🏆 24h Scout History*\n_Top performers we scored today, ranked by MCap gain_\n"]
     for i, t in enumerate(top10, 1):
         gain  = t["gain_pct"]
-        arrow = "🚀" if gain > 100 else ("📈" if gain > 0 else "📉")
+        arrow = "🚀" if gain > 200 else ("📈" if gain > 0 else "📉")
+        alert_tag = " 🔔" if t["alerted"] else ""
         lines.append(
-            f"{i}. {arrow} *${t['symbol']}* — score `{t['score']}`\n"
-            f"   MCap: `${t['alert_mcap']:,.0f}` → `${t['cur_mcap']:,.0f}` | `{gain:+.0f}%`"
+            f"{i}. {arrow} *${t['symbol']}*{alert_tag} — score `{t['score']}` | _{t['narrative']}_\n"
+            f"   `${t['entry_mcap']:,.0f}` → `${t['cur_mcap']:,.0f}` | `{gain:+.0f}%`"
         )
+
     # Quick-buy buttons for top 3
     kb_rows = []
     for t in top10[:3]:

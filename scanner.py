@@ -599,6 +599,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             "name":      result["name"],
             "symbol":    result["symbol"],
             "score":     result["total"],
+            "mcap":      mcap,
             "narrative": matched_narrative,
             "alerted":   False,
             "dq":        result.get("disqualified"),
