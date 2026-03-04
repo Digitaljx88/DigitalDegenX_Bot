@@ -2433,16 +2433,21 @@ async def pumplive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "channel_menu":
         ch = pf.get_pumplive_channel()
         ch_str = f"`{ch}`" if ch else "not set"
+        subscribed = pf.is_subscribed(uid)
+        dm_lbl = "🔕 Pause My DM Alerts" if subscribed else "🔔 Resume My DM Alerts"
+        dm_status = "🟢 ON" if subscribed else "🔴 OFF (channel-only)"
         await query.edit_message_text(
             f"📣 *Pump Live — Alert Channel*\n\n"
-            f"Current: {ch_str}\n\n"
-            "Set a channel and the bot will forward every Pump Live alert there.\n"
-            "Make sure the bot is an admin in the channel.",
+            f"Channel: {ch_str}\n"
+            f"Your DMs: {dm_status}\n\n"
+            "Alerts go to both your DMs and the channel.\n"
+            "Pause your DMs to use channel-only mode.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ Set Channel",    callback_data="pumplive:set_channel")],
+                [InlineKeyboardButton("✏️ Set Channel",      callback_data="pumplive:set_channel")],
                 *([ [InlineKeyboardButton("🗑️ Remove Channel", callback_data="pumplive:clear_channel")] ] if ch else []),
-                [InlineKeyboardButton("⬅️ Back",           callback_data="pumplive:menu")],
+                [InlineKeyboardButton(dm_lbl,                callback_data="pumplive:toggle")],
+                [InlineKeyboardButton("⬅️ Back",             callback_data="pumplive:menu")],
             ])
         )
 
@@ -2610,16 +2615,21 @@ async def pumpgrad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "channel_menu":
         ch = pf.get_pumpgrad_channel()
         ch_str = f"`{ch}`" if ch else "not set"
+        subscribed = pf.is_grad_subscribed(uid)
+        dm_lbl = "🔕 Pause My DM Alerts" if subscribed else "🔔 Resume My DM Alerts"
+        dm_status = "🟢 ON" if subscribed else "🔴 OFF (channel-only)"
         await query.edit_message_text(
             f"📣 *Pump Grad — Alert Channel*\n\n"
-            f"Current: {ch_str}\n\n"
-            "Set a channel and the bot will forward every graduation alert there.\n"
-            "Make sure the bot is an admin in the channel.",
+            f"Channel: {ch_str}\n"
+            f"Your DMs: {dm_status}\n\n"
+            "Alerts go to both your DMs and the channel.\n"
+            "Pause your DMs to use channel-only mode.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ Set Channel",    callback_data="pumpgrad:set_channel")],
+                [InlineKeyboardButton("✏️ Set Channel",      callback_data="pumpgrad:set_channel")],
                 *([ [InlineKeyboardButton("🗑️ Remove Channel", callback_data="pumpgrad:clear_channel")] ] if ch else []),
-                [InlineKeyboardButton("⬅️ Back",           callback_data="pumpgrad:menu")],
+                [InlineKeyboardButton(dm_lbl,                callback_data="pumpgrad:toggle")],
+                [InlineKeyboardButton("⬅️ Back",             callback_data="pumpgrad:menu")],
             ])
         )
 
@@ -2854,8 +2864,8 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ch_txt = f"`{ch}`" if ch else "_Not set_"
         await query.edit_message_text(
             f"*📣 Alert Channel*\n\n"
-            f"When set, every scanner alert is also posted to this channel — "
-            f"keeping your DMs clean while the channel gets all the signals.\n\n"
+            f"When set, every scanner alert is also posted to this channel.\n"
+            f"Note: your DMs are still sent too. Pause your DM alerts via the Scanner menu to receive alerts in the channel only.\n\n"
             f"Current: {ch_txt}\n\n"
             f"To set: add the bot as admin to your channel, then enter the channel ID or @username below.",
             parse_mode="Markdown",

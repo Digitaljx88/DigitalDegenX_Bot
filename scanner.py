@@ -621,8 +621,11 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         # Alert threshold — check per-user min score, respect global cooldown
         # Find which users this token qualifies for
         eligible_uids = [uid for uid in chat_ids if score >= get_user_min_score(uid)]
+        alert_channel = get_alert_channel()
 
-        if eligible_uids and cooldown_ok(mint):
+        should_alert = (eligible_uids or alert_channel) and cooldown_ok(mint)
+
+        if should_alert:
             mark_alerted(mint)
 
             # Update log entry
@@ -655,7 +658,6 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                     pass
 
             # Post to alert channel (URL buttons only — callback buttons don't work in channels)
-            alert_channel = get_alert_channel()
             if alert_channel:
                 channel_kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),

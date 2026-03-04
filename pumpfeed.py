@@ -479,7 +479,9 @@ async def _handle_token(bot: Bot, token: dict):
         for uid, cfg in subscribers.items()
         if cfg.get("active")
     ]
-    if not active_subs:
+    channel = get_pumplive_channel()
+
+    if not active_subs and not channel:
         return
 
     loop    = asyncio.get_running_loop()
@@ -506,7 +508,6 @@ async def _handle_token(bot: Bot, token: dict):
             pass
 
     # Post to pump live alert channel (URL-only keyboard — callbacks don't work in channels)
-    channel = get_pumplive_channel()
     if channel:
         channel_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
@@ -848,7 +849,9 @@ async def _handle_grad_token(bot: Bot, token: dict):
         for uid, cfg in grad_subs.items()
         if cfg.get("active")
     ]
-    if not active_subs:
+    grad_channel = get_pumpgrad_channel()
+
+    if not active_subs and not grad_channel:
         return
 
     loop    = asyncio.get_running_loop()
@@ -910,7 +913,6 @@ async def _handle_grad_token(bot: Bot, token: dict):
                 pass
 
     # Post to pump grad alert channel (URL-only keyboard — callbacks don't work in channels)
-    grad_channel = get_pumpgrad_channel()
     if grad_channel:
         channel_kb = InlineKeyboardMarkup([
             [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
@@ -930,10 +932,11 @@ async def _handle_grad_token(bot: Bot, token: dict):
 # ─── Graduation polling (pump.fun API) ────────────────────────────────────────
 
 def _fetch_pumpfun_graduated() -> list[dict]:
-    """Return recently graduated pump.fun tokens created within GRAD_MAX_AGE_H hours.
+    """Return recently graduated pump.fun tokens.
 
-    Strategy: sort by last_trade_timestamp (catches tokens whose graduation tx is recent)
-    then filter by created_timestamp to exclude old tokens that are just being re-traded.
+    Strategy: ask the API to filter complete=true server-side so all 50 results
+    are graduated tokens, sorted by last_trade_timestamp (= graduation time).
+    Then drop tokens whose graduation was more than GRAD_MAX_AGE_H hours ago.
     """
     cutoff_ms = (time.time() - GRAD_MAX_AGE_H * 3600) * 1000
     results = []
@@ -941,7 +944,7 @@ def _fetch_pumpfun_graduated() -> list[dict]:
         r = requests.get(
             f"{PUMPFUN_API}/coins",
             params={"offset": "0", "limit": "50", "sort": "last_trade_timestamp",
-                    "order": "DESC", "includeNsfw": "false"},
+                    "order": "DESC", "includeNsfw": "false", "complete": "true"},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
@@ -950,8 +953,9 @@ def _fetch_pumpfun_graduated() -> list[dict]:
         for c in coins:
             if not c.get("complete"):
                 continue
-            created = c.get("created_timestamp") or 0
-            if created >= cutoff_ms:   # created within our window
+            # Use last_trade_timestamp as graduation time (last bonding-curve trade = grad tx)
+            grad_ts = c.get("last_trade_timestamp") or c.get("created_timestamp") or 0
+            if grad_ts >= cutoff_ms:
                 results.append(c)
     except Exception:
         pass
@@ -977,7 +981,9 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
         for uid, cfg in grad_subs.items()
         if cfg.get("active")
     ]
-    if not active_subs:
+    grad_channel = get_pumpgrad_channel()
+
+    if not active_subs and not grad_channel:
         return
 
     loop    = asyncio.get_running_loop()
@@ -1037,13 +1043,31 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
             except Exception:
                 pass
 
+    # Post to pump grad alert channel (URL-only keyboard — callbacks don't work in channels)
+    if grad_channel:
+        channel_kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+             InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
+             InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+        ])
+        try:
+            await bot.send_message(
+                chat_id=grad_channel, text=text,
+                parse_mode="Markdown", reply_markup=channel_kb,
+                disable_web_page_preview=True,
+            )
+        except Exception:
+            pass
+
 
 async def run_gradwatch(bot: Bot):
     """Poll pump.fun API every 60s for graduated tokens and DM subscribers."""
     while True:
         try:
             s = load_state()
-            if any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values()):
+            has_subs    = any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values())
+            has_channel = bool(s.get("pumpgrad_channel"))
+            if has_subs or has_channel:
                 loop  = asyncio.get_running_loop()
                 coins = await loop.run_in_executor(None, _fetch_pumpfun_graduated)
                 for coin in coins:
@@ -1077,11 +1101,15 @@ async def run_pumpfeed(bot: Bot):
                     tx_type = data.get("txType") or data.get("type") or ""
                     if tx_type == "create":
                         s = load_state()
-                        if any(cfg.get("active") for cfg in s.get("subscribers", {}).values()):
+                        has_subs    = any(cfg.get("active") for cfg in s.get("subscribers", {}).values())
+                        has_channel = bool(s.get("pumplive_channel"))
+                        if has_subs or has_channel:
                             asyncio.create_task(_handle_token(bot, data))
                     elif tx_type in ("complete", "migration", "migrate"):
                         s = load_state()
-                        if any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values()):
+                        has_subs    = any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values())
+                        has_channel = bool(s.get("pumpgrad_channel"))
+                        if has_subs or has_channel:
                             asyncio.create_task(_handle_grad_token(bot, data))
 
         except Exception:
