@@ -19,11 +19,20 @@ STATE_FILE = os.path.join(DATA_DIR, "pumpfeed_state.json")
 os.makedirs(DATA_DIR, exist_ok=True)
 
 WS_URL         = "wss://pumpportal.fun/api/data"
-PUMPFUN_API    = "https://frontend-api.pump.fun"
+PUMPFUN_API    = "https://frontend-api-v3.pump.fun"
 DEDUP_TTL      = 86400
 GRAD_SOL       = 85.0
 VIRT_OFFSET    = 30.0
-GRADWATCH_SECS = 60
+GRADWATCH_SECS = 30          # poll every 30s for faster detection
+GRAD_MAX_AGE_H = 72          # only alert on tokens created within last 72h
+
+# Injected by bot.py at startup to avoid circular import
+_grad_autobuy_fn = None
+
+def set_grad_autobuy_fn(fn):
+    global _grad_autobuy_fn
+    _grad_autobuy_fn = fn
+
 
 DEFAULT_FILTERS = {
     "min_mcap_sol":        0.0,
@@ -508,6 +517,19 @@ def unsubscribe_grad(uid: int):
     save_state(s)
 
 
+def is_grad_autobuy(uid: int) -> bool:
+    subs = load_state().get("grad_subscribers", {})
+    return subs.get(str(uid), {}).get("auto_buy", False)
+
+
+def set_grad_autobuy(uid: int, val: bool):
+    s   = load_state()
+    key = str(uid)
+    s.setdefault("grad_subscribers", {}).setdefault(key, {"active": False, "filters": {}})
+    s["grad_subscribers"][key]["auto_buy"] = val
+    save_state(s)
+
+
 def get_grad_filters(uid: int) -> dict:
     s    = load_state()
     user = s.get("grad_subscribers", {}).get(str(uid), {})
@@ -597,10 +619,12 @@ def passes_grad_filter(token: dict, meta: dict, filters: dict) -> bool:
 # ─── Graduation UI helpers ─────────────────────────────────────────────────────
 
 def grad_filter_status_text(uid: int) -> str:
-    active  = is_grad_subscribed(uid)
-    filters = get_grad_filters(uid)
+    active   = is_grad_subscribed(uid)
+    ab_on    = is_grad_autobuy(uid)
+    filters  = get_grad_filters(uid)
 
     status   = "🟢 *ON*" if active else "🔴 *OFF*"
+    ab_status = "🟢 ON" if ab_on else "🔴 OFF"
     mcap_str = _sol_range_str(filters["min_mcap_sol"], filters["max_mcap_sol"])
     dev_str  = _sol_range_str(filters["min_dev_sol"],  filters["max_dev_sol"])
     soc_str  = "✅ Required" if filters["require_social"]      else "any"
@@ -613,7 +637,7 @@ def grad_filter_status_text(uid: int) -> str:
     lines = [
         "🎓 *PUMP GRAD — FILTER SETTINGS*",
         "",
-        f"Status: {status}",
+        f"Status: {status}  ·  Auto-Buy: {ab_status}",
         "━━━━━━━━━━━━━━━━━━━",
         f"💰 MCap at grad: `{mcap_str}`",
         f"🛒 Dev Buy: `{dev_str}`",
@@ -641,15 +665,20 @@ def grad_filter_status_text(uid: int) -> str:
 
 def grad_filter_kb(uid: int) -> InlineKeyboardMarkup:
     active  = is_grad_subscribed(uid)
+    ab_on   = is_grad_autobuy(uid)
     filters = get_grad_filters(uid)
     soc_lbl = "🔗 Social: ✅" if filters["require_social"]      else "🔗 Social: ANY"
     dsc_lbl = "📝 Desc: ✅"   if filters["require_description"] else "📝 Desc: ANY"
     on_lbl  = "🔴 Turn OFF"   if active                         else "🟢 Turn ON"
+    ab_lbl  = "🤖 Auto-Buy: 🟢 ON" if ab_on                    else "🤖 Auto-Buy: 🔴 OFF"
 
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(on_lbl,           callback_data="pumpgrad:toggle"),
             InlineKeyboardButton("🔄 Reset",        callback_data="pumpgrad:reset"),
+        ],
+        [
+            InlineKeyboardButton(ab_lbl,           callback_data="pumpgrad:toggle_grad_autobuy"),
         ],
         [
             InlineKeyboardButton("💰 MCap",         callback_data="pumpgrad:set_mcap"),
@@ -771,6 +800,27 @@ async def _handle_grad_token(bot: Bot, token: dict):
     uri     = token.get("uri", "")
     meta    = await loop.run_in_executor(None, fetch_uri_metadata, uri) if uri else {}
 
+    # If WS event is missing name/symbol, fill from DexScreener (15s wait for indexing)
+    if not token.get("name") or not token.get("symbol"):
+        await asyncio.sleep(15)
+        try:
+            r = requests.get(
+                f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=8
+            )
+            pairs = r.json().get("pairs") or []
+            if pairs:
+                base = pairs[0].get("baseToken", {})
+                token = dict(token)
+                token.setdefault("name",   base.get("name", "Unknown"))
+                token.setdefault("symbol", base.get("symbol", "???"))
+                # Fill MCap / price from DexScreener
+                if not token.get("marketCapSol"):
+                    mcap_usd = float(pairs[0].get("marketCap") or pairs[0].get("fdv") or 0)
+                    if mcap_usd and sol_usd:
+                        token["marketCapSol"] = mcap_usd / sol_usd
+        except Exception:
+            pass
+
     text = format_grad_notification(token, meta, sol_usd)
     kb   = grad_notification_kb(mint)
 
@@ -788,22 +838,51 @@ async def _handle_grad_token(bot: Bot, token: dict):
             )
         except Exception:
             pass
+        # Auto-buy on graduation if enabled
+        if grad_subs[str(uid)].get("auto_buy") and _grad_autobuy_fn:
+            result = {
+                "mint":      mint,
+                "symbol":    token.get("symbol", "?"),
+                "name":      token.get("name", "?"),
+                "total":     80,   # graduation = strong signal, use 80 as synthetic score
+                "mcap":      float(token.get("marketCapSol", 0)) * sol_usd,
+                "price_usd": 0.0,
+            }
+            try:
+                await _grad_autobuy_fn(bot, uid, result)
+            except Exception:
+                pass
 
 
 # ─── Graduation polling (pump.fun API) ────────────────────────────────────────
 
 def _fetch_pumpfun_graduated() -> list[dict]:
-    """Return recently graduated pump.fun tokens (complete == True)."""
+    """Return recently graduated pump.fun tokens created within GRAD_MAX_AGE_H hours.
+
+    Strategy: sort by last_trade_timestamp (catches tokens whose graduation tx is recent)
+    then filter by created_timestamp to exclude old tokens that are just being re-traded.
+    """
+    cutoff_ms = (time.time() - GRAD_MAX_AGE_H * 3600) * 1000
+    results = []
     try:
         r = requests.get(
             f"{PUMPFUN_API}/coins",
-            params={"sortBy": "last_trade_timestamp", "order": "DESC", "limit": "50"},
+            params={"offset": "0", "limit": "50", "sort": "last_trade_timestamp",
+                    "order": "DESC", "includeNsfw": "false"},
+            headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
         )
+        r.raise_for_status()
         coins = r.json() if isinstance(r.json(), list) else []
-        return [c for c in coins if c.get("complete")]
+        for c in coins:
+            if not c.get("complete"):
+                continue
+            created = c.get("created_timestamp") or 0
+            if created >= cutoff_ms:   # created within our window
+                results.append(c)
     except Exception:
-        return []
+        pass
+    return results
 
 
 async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
@@ -831,8 +910,8 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
     loop    = asyncio.get_running_loop()
     sol_usd = await loop.run_in_executor(None, get_sol_price)
 
-    # pump.fun API returns market_cap in USD
-    mcap_usd = float(coin.get("market_cap") or 0)
+    # v3 API: market_cap is in USD (bonding curve MCap at graduation ≈ $69K)
+    mcap_usd = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
     mcap_sol = (mcap_usd / sol_usd) if sol_usd > 0 else 0
 
     token = {
@@ -840,7 +919,8 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
         "name":            coin.get("name")        or "Unknown",
         "symbol":          coin.get("symbol")      or "???",
         "marketCapSol":    mcap_sol,
-        "solAmount":       float(coin.get("sol_amount")  or 0),
+        # v3 API doesn't have sol_amount / initial_buy for completed tokens
+        "solAmount":       float(coin.get("sol_amount") or coin.get("real_sol_reserves") or 0),
         "initialBuy":      float(coin.get("initial_buy") or 0),
         "traderPublicKey": coin.get("creator")     or "",
         "uri":             coin.get("metadata_uri") or "",
@@ -869,6 +949,20 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
             )
         except Exception:
             pass
+        # Auto-buy on graduation if enabled
+        if grad_subs[str(uid)].get("auto_buy") and _grad_autobuy_fn:
+            result = {
+                "mint":      mint,
+                "symbol":    token.get("symbol", "?"),
+                "name":      token.get("name", "?"),
+                "total":     80,
+                "mcap":      mcap_usd,
+                "price_usd": 0.0,
+            }
+            try:
+                await _grad_autobuy_fn(bot, uid, result)
+            except Exception:
+                pass
 
 
 async def run_gradwatch(bot: Bot):
@@ -898,17 +992,21 @@ async def run_pumpfeed(bot: Bot):
                 ping_timeout=20,
                 open_timeout=15,
             ) as ws:
+                # Subscribe to new token launches
                 await ws.send(json.dumps({"method": "subscribeNewToken"}))
+                # Also subscribe to migration/graduation events
+                await ws.send(json.dumps({"method": "subscribeMigrations"}))
 
                 async for raw in ws:
                     data = json.loads(raw)
                     if "message" in data and "txType" not in data:
                         continue
-                    if data.get("txType") == "create":
+                    tx_type = data.get("txType") or data.get("type") or ""
+                    if tx_type == "create":
                         s = load_state()
                         if any(cfg.get("active") for cfg in s.get("subscribers", {}).values()):
                             asyncio.create_task(_handle_token(bot, data))
-                    elif data.get("txType") == "complete":
+                    elif tx_type in ("complete", "migration", "migrate"):
                         s = load_state()
                         if any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values()):
                             asyncio.create_task(_handle_grad_token(bot, data))

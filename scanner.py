@@ -19,7 +19,7 @@ DEXSCREENER_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_TOKEN    = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_REPORT      = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
-ALERT_COOLDOWN_SECS  = 3600   # one alert per token per hour
+ALERT_COOLDOWN_SECS  = 86400  # one alert per token per day
 MCAP_MIN             = 1_000
 MCAP_MAX             = 10_000_000
 
@@ -90,6 +90,32 @@ def cooldown_ok(mint: str) -> bool:
 def mark_alerted(mint: str):
     s = load_state()
     s.setdefault("alerted", {})[mint] = time.time()
+    save_state(s)
+
+
+def get_user_min_score(uid: int) -> int:
+    """Per-user alert score threshold, defaults to 55."""
+    s = load_state()
+    return s.get("user_min_score", {}).get(str(uid), 55)
+
+
+def set_user_min_score(uid: int, score: int):
+    s = load_state()
+    s.setdefault("user_min_score", {})[str(uid)] = score
+    save_state(s)
+
+
+def get_alert_channel() -> str | None:
+    """Return the alert channel ID/username, or None if not set."""
+    return load_state().get("alert_channel")
+
+
+def set_alert_channel(channel: str | None):
+    s = load_state()
+    if channel:
+        s["alert_channel"] = channel
+    else:
+        s.pop("alert_channel", None)
     save_state(s)
 
 
@@ -538,10 +564,11 @@ def format_heat_score_card(r: dict) -> str:
 
 # ─── Main scan loop (called by bot's job queue) ───────────────────────────────
 
-async def run_scan(bot, chat_ids: list[int]):
+async def run_scan(bot, chat_ids: list[int], on_alert=None):
     """
     Fetch, score, and alert. Called every N seconds by bot job queue.
     chat_ids: list of user IDs to send alerts to.
+    on_alert: optional async callback(bot, result) called when a token fires an alert.
     """
     if not chat_ids:
         return
@@ -590,8 +617,11 @@ async def run_scan(bot, chat_ids: list[int]):
                 "ts": time.time(),
             })
 
-        # Alert threshold — only send DMs if user scanning is on
-        if score >= 55 and cooldown_ok(mint):
+        # Alert threshold — check per-user min score, respect global cooldown
+        # Find which users this token qualifies for
+        eligible_uids = [uid for uid in chat_ids if score >= get_user_min_score(uid)]
+
+        if eligible_uids and cooldown_ok(mint):
             mark_alerted(mint)
 
             # Update log entry
@@ -613,13 +643,37 @@ async def run_scan(bot, chat_ids: list[int]):
                  InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
                  InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
             ])
-            for uid in chat_ids:
+            for uid in eligible_uids:
                 try:
                     await bot.send_message(
                         chat_id=uid, text=msg,
                         parse_mode="Markdown", reply_markup=kb,
                         disable_web_page_preview=True
                     )
+                except Exception:
+                    pass
+
+            # Post to alert channel (URL buttons only — callback buttons don't work in channels)
+            alert_channel = get_alert_channel()
+            if alert_channel:
+                channel_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+                     InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
+                     InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
+                ])
+                try:
+                    await bot.send_message(
+                        chat_id=alert_channel, text=msg,
+                        parse_mode="Markdown", reply_markup=channel_kb,
+                        disable_web_page_preview=True
+                    )
+                except Exception:
+                    pass
+
+            # Trigger auto-buy callback
+            if on_alert:
+                try:
+                    await on_alert(bot, result)
                 except Exception:
                     pass
 

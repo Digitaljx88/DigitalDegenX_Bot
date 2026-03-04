@@ -45,7 +45,9 @@ DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 PORTFOLIO_FILE     = os.path.join(DATA_DIR, "portfolios.json")
 ALERTS_FILE        = os.path.join(DATA_DIR, "alerts.json")
 AUTO_SELL_FILE     = os.path.join(DATA_DIR, "auto_sell.json")
+AUTO_BUY_FILE      = os.path.join(DATA_DIR, "auto_buy.json")
 TRADE_LOG_FILE     = os.path.join(DATA_DIR, "trade_log.json")
+GLOBAL_SETTINGS_FILE = os.path.join(DATA_DIR, "global_settings.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -154,6 +156,54 @@ def remove_auto_sell(uid: int, mint: str):
         save_auto_sell(a)
 
 
+# ── Global settings ───────────────────────────────────────────────────────────
+
+def load_global_settings() -> dict:   return _load(GLOBAL_SETTINGS_FILE)
+def save_global_settings(d: dict):    _save(GLOBAL_SETTINGS_FILE, d)
+
+def get_global_sl() -> dict:
+    return load_global_settings().get("stop_loss", {
+        "enabled": False, "pct": 50, "sell_pct": 100
+    })
+
+def set_global_sl(data: dict):
+    gs = load_global_settings()
+    gs["stop_loss"] = data
+    save_global_settings(gs)
+
+
+STRATEGIES = {
+    "scalp": {
+        "mult_targets": [{"mult": 1.5, "sell_pct": 75, "triggered": False, "label": "1.5x"}],
+        "stop_loss":    {"enabled": True, "pct": 25, "sell_pct": 100, "triggered": False},
+        "trailing_stop": {"enabled": False, "trail_pct": 20, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_tp":  {"enabled": False, "activate_mult": 2.0, "trail_pct": 20, "sell_pct": 50, "active": False, "peak_price": 0.0, "triggered": False},
+        "time_exit":    {"enabled": True, "hours": 2, "target_mult": 1.5, "sell_pct": 100, "triggered": False},
+    },
+    "standard": {
+        "mult_targets": [{"mult": 2.0, "sell_pct": 50, "triggered": False, "label": "2x"}, {"mult": 4.0, "sell_pct": 50, "triggered": False, "label": "4x"}],
+        "stop_loss":    {"enabled": True, "pct": 40, "sell_pct": 100, "triggered": False},
+        "trailing_stop": {"enabled": True, "trail_pct": 25, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_tp":  {"enabled": False, "activate_mult": 2.0, "trail_pct": 20, "sell_pct": 50, "active": False, "peak_price": 0.0, "triggered": False},
+        "time_exit":    {"enabled": False, "hours": 24, "target_mult": 2.0, "sell_pct": 100, "triggered": False},
+    },
+    "diamond": {
+        "mult_targets": [{"mult": 3.0, "sell_pct": 33, "triggered": False, "label": "3x"}, {"mult": 6.0, "sell_pct": 50, "triggered": False, "label": "6x"}],
+        "stop_loss":    {"enabled": False, "pct": 50, "sell_pct": 100, "triggered": False},
+        "trailing_stop": {"enabled": False, "trail_pct": 30, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_tp":  {"enabled": True, "activate_mult": 3.0, "trail_pct": 20, "sell_pct": 100, "active": False, "peak_price": 0.0, "triggered": False},
+        "time_exit":    {"enabled": False, "hours": 24, "target_mult": 2.0, "sell_pct": 100, "triggered": False},
+    },
+    "moon": {
+        "mult_targets": [{"mult": 2.0, "sell_pct": 80, "triggered": False, "label": "2x"}],
+        "stop_loss":    {"enabled": False, "pct": 50, "sell_pct": 100, "triggered": False},
+        "trailing_stop": {"enabled": False, "trail_pct": 30, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_tp":  {"enabled": True, "activate_mult": 5.0, "trail_pct": 15, "sell_pct": 100, "active": False, "peak_price": 0.0, "triggered": False},
+        "time_exit":    {"enabled": False, "hours": 24, "target_mult": 2.0, "sell_pct": 100, "triggered": False},
+    },
+}
+
+
 def setup_auto_sell(uid: int, mint: str, symbol: str,
                     buy_price_usd: float, raw_amount: int, decimals: int):
     """Called after every buy to create default auto-sell config."""
@@ -177,6 +227,46 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
         ],
         # Custom targets added by user
         "custom_targets": existing.get("custom_targets", []) if existing else [],
+        # Hard stop-loss
+        "stop_loss": {
+            "enabled": False,
+            "pct": 50,
+            "sell_pct": 100,
+            "triggered": False,
+        },
+        # Trailing stop-loss
+        "trailing_stop": {
+            "enabled": False,
+            "trail_pct": 30,
+            "sell_pct": 100,
+            "peak_price": 0.0,
+            "triggered": False,
+        },
+        # Trailing take-profit
+        "trailing_tp": {
+            "enabled": False,
+            "activate_mult": 2.0,
+            "trail_pct": 20,
+            "sell_pct": 50,
+            "active": False,
+            "peak_price": 0.0,
+            "triggered": False,
+        },
+        # Time-based exit
+        "time_exit": {
+            "enabled": False,
+            "hours": 24,
+            "target_mult": 2.0,
+            "sell_pct": 100,
+            "buy_time": time.time(),
+            "triggered": False,
+        },
+        # Breakeven stop: move stop-loss to entry once price hits activate_mult
+        "breakeven_stop": {
+            "enabled": False,
+            "activate_mult": 2.0,
+            "triggered": False,
+        },
     }
     set_auto_sell(uid, mint, config)
     return config
@@ -209,6 +299,40 @@ def _detect_narrative(name: str, symbol: str, desc: str = "") -> str:
 
 def _get_buy_price(uid: int, mint: str) -> float | None:
     return load_auto_sell().get(str(uid), {}).get(mint, {}).get("buy_price_usd")
+
+# ── Auto-buy configs ──────────────────────────────────────────────────────────
+
+AUTO_BUY_DEFAULTS = {
+    "enabled":         False,
+    "sol_amount":      0.1,
+    "min_score":       70,
+    "max_mcap":        500_000,
+    "daily_limit_sol": 1.0,
+    "spent_today":     0.0,
+    "spent_date":      "",
+    "bought":          [],   # mints purchased this session (reset each day)
+}
+
+def load_auto_buy() -> dict:  return _load(AUTO_BUY_FILE)
+def save_auto_buy(d: dict):   _save(AUTO_BUY_FILE, d)
+
+def get_auto_buy(uid: int) -> dict:
+    d = load_auto_buy()
+    return d.get(str(uid), dict(AUTO_BUY_DEFAULTS))
+
+def set_auto_buy(uid: int, cfg: dict):
+    d = load_auto_buy()
+    d[str(uid)] = cfg
+    save_auto_buy(d)
+
+def _ab_reset_day_if_needed(cfg: dict) -> dict:
+    """Reset daily spend counter if date has changed."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if cfg.get("spent_date") != today:
+        cfg["spent_today"] = 0.0
+        cfg["spent_date"]  = today
+        cfg["bought"]      = []
+    return cfg
 
 def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
               name: str = "", narrative: str = None, heat_score: int = None,
@@ -352,15 +476,20 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     scan_lbl  = "🔕 Pause Alerts" if uid in targets else "🔔 Resume Alerts"
     pf_lbl    = "🟢 Pump Live: ON" if pf.is_subscribed(uid) else "🔴 Pump Live: OFF"
     pg_lbl    = "🟢 Pump Grad: ON" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad: OFF"
+    ab_cfg    = get_auto_buy(uid)
+    ab_lbl    = "🟢 Auto-Buy: ON" if ab_cfg.get("enabled") else "🔴 Auto-Buy: OFF"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
          InlineKeyboardButton("💰 Trade",        callback_data="menu:trade"),
          InlineKeyboardButton("👜 Portfolio",    callback_data="menu:portfolio")],
         [InlineKeyboardButton("🔔 Alerts",        callback_data="menu:alerts"),
-         InlineKeyboardButton("🤖 Auto-Sell",     callback_data="menu:autosell")],
+         InlineKeyboardButton("🤖 Auto-Sell",     callback_data="menu:autosell"),
+         InlineKeyboardButton(ab_lbl,             callback_data="menu:autobuy")],
         [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
          InlineKeyboardButton("📋 Watchlist",     callback_data="scanner:watchlist"),
          InlineKeyboardButton("🏆 Top Alerts",    callback_data="scanner:topalerts")],
+        [InlineKeyboardButton("🌡️ Threshold",     callback_data="scanner:set_threshold"),
+         InlineKeyboardButton("📣 Alert Channel", callback_data="scanner:alert_channel_menu")],
         [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:toggle"),
          InlineKeyboardButton("⚙️ Live Settings", callback_data="pumplive:menu")],
         [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:toggle"),
@@ -372,7 +501,7 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
 
 def market_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🔥 Top Meme Coins", callback_data="market:top")],
+        [InlineKeyboardButton("🏆 Top Scouted Calls", callback_data="market:top")],
         [InlineKeyboardButton("🔍 Look Up Token",  callback_data="market:lookup")],
         [InlineKeyboardButton("⬅️ Back",            callback_data="menu:main")],
     ])
@@ -401,6 +530,8 @@ def alerts_kb(uid: int) -> InlineKeyboardMarkup:
 def autosell_list_kb(uid: int) -> InlineKeyboardMarkup:
     """List all tokens with auto-sell configs."""
     configs = load_auto_sell().get(str(uid), {})
+    gsl     = get_global_sl()
+    gsl_lbl = "🟢 ON" if gsl.get("enabled") else "🔴 OFF"
     rows = []
     for mint, cfg in configs.items():
         sym     = cfg.get("symbol", mint[:6])
@@ -408,6 +539,7 @@ def autosell_list_kb(uid: int) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(
             f"{enabled} ${sym}", callback_data=f"as:view:{mint}"
         )])
+    rows.append([InlineKeyboardButton(f"🌍 Global Stop-Loss: {gsl_lbl}", callback_data="gsl:menu")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
 
@@ -421,8 +553,16 @@ def autosell_token_kb(uid: int, mint: str) -> InlineKeyboardMarkup:
             "⏸️ Pause" if enabled else "▶️ Enable",
             callback_data=f"as:toggle:{mint}"
         )],
-        [InlineKeyboardButton("➕ Add Custom Target", callback_data=f"as:addcustom:{mint}")],
-        [InlineKeyboardButton("🔄 Reset Targets",     callback_data=f"as:reset:{mint}")],
+        [InlineKeyboardButton("📈 Edit Targets",      callback_data=f"as:mult_targets_menu:{mint}"),
+         InlineKeyboardButton("➕ Add Custom",         callback_data=f"as:addcustom:{mint}")],
+        [InlineKeyboardButton("🏦 MCap Alerts",       callback_data=f"as:mcap_menu:{mint}"),
+         InlineKeyboardButton("⚡ Strategies",         callback_data=f"as:strategies:{mint}")],
+        [InlineKeyboardButton("🛑 Stop-Loss",         callback_data=f"as:sl_menu:{mint}"),
+         InlineKeyboardButton("📉 Trail Stop",        callback_data=f"as:trail_menu:{mint}")],
+        [InlineKeyboardButton("📈 Trail TP",          callback_data=f"as:ttp_menu:{mint}"),
+         InlineKeyboardButton("⏱️ Time Exit",         callback_data=f"as:te_menu:{mint}")],
+        [InlineKeyboardButton("🛡️ Breakeven",         callback_data=f"as:be_menu:{mint}"),
+         InlineKeyboardButton("🔄 Reset",             callback_data=f"as:reset:{mint}")],
         [InlineKeyboardButton("🗑️ Remove Config",     callback_data=f"as:remove:{mint}")],
         [InlineKeyboardButton("⬅️ Back",              callback_data="menu:autosell")],
     ])
@@ -702,6 +842,123 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
             symbol  = cfg.get("symbol", mint[:6])
             changed = False
 
+            # ── Hard stop-loss ────────────────────────────────────────────────
+            sl = cfg.get("stop_loss", {})
+            if sl.get("enabled") and not sl.get("triggered"):
+                drop_pct = ((buy_price - price) / buy_price) * 100
+                if drop_pct >= sl.get("pct", 50):
+                    sl["triggered"] = True
+                    changed = True
+                    await execute_auto_sell(
+                        context.bot, uid, mint, symbol,
+                        sl.get("sell_pct", 100),
+                        f"Stop-Loss -{sl['pct']}%", mode,
+                        price_usd=price, mcap=mcap or 0
+                    )
+
+            # ── Trailing stop-loss ────────────────────────────────────────────
+            ts = cfg.get("trailing_stop", {})
+            if ts.get("enabled") and not ts.get("triggered"):
+                if price > ts.get("peak_price", 0):
+                    ts["peak_price"] = price
+                    changed = True
+                peak = ts["peak_price"]
+                if peak > 0:
+                    drop_from_peak = ((peak - price) / peak) * 100
+                    if drop_from_peak >= ts.get("trail_pct", 30):
+                        ts["triggered"] = True
+                        changed = True
+                        await execute_auto_sell(
+                            context.bot, uid, mint, symbol,
+                            ts.get("sell_pct", 100),
+                            f"Trailing Stop -{ts['trail_pct']}% from peak", mode,
+                            price_usd=price, mcap=mcap or 0
+                        )
+
+            # ── Trailing take-profit ──────────────────────────────────────────
+            ttp = cfg.get("trailing_tp", {})
+            if ttp.get("enabled") and not ttp.get("triggered"):
+                if not ttp.get("active"):
+                    if price >= buy_price * ttp.get("activate_mult", 2.0):
+                        ttp["active"] = True
+                        ttp["peak_price"] = price
+                        changed = True
+                        try:
+                            await context.bot.send_message(
+                                uid,
+                                f"📈 *Trailing TP Activated* — `${symbol}`\n"
+                                f"Price hit `{ttp['activate_mult']}x` — now trailing `{ttp['trail_pct']}%` below peak",
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
+                else:
+                    if price > ttp.get("peak_price", 0):
+                        ttp["peak_price"] = price
+                        changed = True
+                    peak = ttp["peak_price"]
+                    if peak > 0:
+                        drop = ((peak - price) / peak) * 100
+                        if drop >= ttp.get("trail_pct", 20):
+                            ttp["triggered"] = True
+                            changed = True
+                            await execute_auto_sell(
+                                context.bot, uid, mint, symbol,
+                                ttp.get("sell_pct", 50),
+                                f"Trailing TP -{ttp['trail_pct']}% from peak", mode,
+                                price_usd=price, mcap=mcap or 0
+                            )
+
+            # ── Time-based exit ───────────────────────────────────────────────
+            te = cfg.get("time_exit", {})
+            if te.get("enabled") and not te.get("triggered"):
+                buy_time = te.get("buy_time", 0)
+                hours_elapsed = (time.time() - buy_time) / 3600
+                if hours_elapsed >= te.get("hours", 24):
+                    if price < buy_price * te.get("target_mult", 2.0):
+                        te["triggered"] = True
+                        changed = True
+                        await execute_auto_sell(
+                            context.bot, uid, mint, symbol,
+                            te.get("sell_pct", 100),
+                            f"Time Exit ({te['hours']}h — target not reached)", mode,
+                            price_usd=price, mcap=mcap or 0
+                        )
+
+            # ── Breakeven stop ────────────────────────────────────────────────
+            be = cfg.get("breakeven_stop", {})
+            if be.get("enabled") and not be.get("triggered"):
+                if price >= buy_price * be.get("activate_mult", 2.0):
+                    sl = cfg.setdefault("stop_loss", {"enabled": True, "pct": 0, "sell_pct": 100, "triggered": False})
+                    sl["enabled"] = True
+                    sl["pct"] = 0   # trigger at or below buy price
+                    sl["triggered"] = False  # reset if previously triggered
+                    be["triggered"] = True
+                    changed = True
+                    try:
+                        await context.bot.send_message(
+                            uid,
+                            f"🛡️ *Breakeven Stop Activated* — `${symbol}`\n"
+                            f"Price hit `{be['activate_mult']}x` — stop-loss moved to entry price",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
+            # ── Global stop-loss ──────────────────────────────────────────────
+            gsl = get_global_sl()
+            if gsl.get("enabled") and not cfg.get("_gsl_triggered"):
+                drop_pct = ((buy_price - price) / buy_price) * 100
+                if drop_pct >= gsl.get("pct", 50):
+                    cfg["_gsl_triggered"] = True
+                    changed = True
+                    await execute_auto_sell(
+                        context.bot, uid, mint, symbol,
+                        gsl.get("sell_pct", 100),
+                        f"Global Stop-Loss -{gsl['pct']}%", mode,
+                        price_usd=price, mcap=mcap or 0
+                    )
+
             # ── Multiplier targets (auto-sell) ────────────────────────────────
             for target in cfg.get("mult_targets", []):
                 if target["triggered"]:
@@ -797,6 +1054,196 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
 
             if changed:
                 set_auto_sell(uid, mint, cfg)
+
+
+# ─── Auto-buy execution ────────────────────────────────────────────────────────
+
+async def execute_auto_buy(bot, uid: int, result: dict):
+    """
+    Attempt an auto-buy for uid based on a scanner alert result.
+    Handles both paper and live modes. Sends a DM with outcome.
+    """
+    cfg = get_auto_buy(uid)
+    if not cfg.get("enabled"):
+        return
+
+    score     = result.get("total", 0)
+    mint      = result.get("mint", "")
+    symbol    = result.get("symbol", mint[:6])
+    name      = result.get("name", symbol)
+    mcap      = result.get("mcap", 0)
+
+    if score < cfg.get("min_score", 70):
+        return
+    if mcap and mcap > cfg.get("max_mcap", 500_000):
+        return
+
+    cfg = _ab_reset_day_if_needed(cfg)
+
+    if mint in cfg.get("bought", []):
+        return  # already bought this token today
+
+    sol_amount  = cfg.get("sol_amount", 0.1)
+    daily_limit = cfg.get("daily_limit_sol", 1.0)
+    spent_today = cfg.get("spent_today", 0.0)
+
+    if spent_today + sol_amount > daily_limit:
+        try:
+            await bot.send_message(
+                uid,
+                f"⚠️ *Auto-Buy Skipped* — daily limit reached\n\n"
+                f"Limit: `{daily_limit} SOL` | Spent: `{spent_today:.3f} SOL`\n"
+                f"Token: *{name}* (${symbol}) — score `{score}/100`",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        return
+
+    mode = get_mode(uid)
+
+    # ── Paper auto-buy ─────────────────────────────────────────────────────────
+    if mode == "paper":
+        portfolio = get_portfolio(uid)
+        sol_bal   = portfolio.get("SOL", 0)
+        if sol_bal < sol_amount:
+            try:
+                await bot.send_message(
+                    uid,
+                    f"⚠️ *Auto-Buy Skipped* — insufficient paper SOL\n\n"
+                    f"Need: `{sol_amount} SOL` | Have: `{sol_bal:.4f} SOL`\n"
+                    f"Token: *{name}* (${symbol})",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return
+
+        lamports = int(sol_amount * 1_000_000_000)
+        quote    = jupiter_quote(SOL_MINT, mint, lamports)
+        if not quote or "error" in quote:
+            return
+
+        out_amount = int(quote.get("outAmount", 0))
+        price_usd  = result.get("price_usd", 0)
+        decimals   = 6  # default; DexScreener not re-fetched here
+
+        portfolio["SOL"]  = sol_bal - sol_amount
+        portfolio[mint]   = portfolio.get(mint, 0) + out_amount
+        update_portfolio(uid, portfolio)
+        setup_auto_sell(uid, mint, symbol, price_usd, out_amount, decimals)
+        log_trade(uid, "paper", "buy", mint, symbol, name=name,
+                  sol_amount=sol_amount, token_amount=out_amount,
+                  price_usd=price_usd, mcap=mcap, heat_score=score)
+
+        cfg["bought"].append(mint)
+        cfg["spent_today"] = spent_today + sol_amount
+        set_auto_buy(uid, cfg)
+
+        try:
+            await bot.send_message(
+                uid,
+                f"🤖 *Auto-Buy Executed* (Paper)\n\n"
+                f"🪙 *{name}* (${symbol})\n"
+                f"🌡️ Heat Score: `{score}/100`\n"
+                f"💰 Spent: `{sol_amount} SOL`\n"
+                f"📦 Received: `{out_amount:,}` raw tokens\n"
+                f"🏦 MCap: `${mcap:,.0f}`\n"
+                f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Auto-Sell", callback_data=f"as:view:{mint}"),
+                    InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
+                ]])
+            )
+        except Exception:
+            pass
+        return
+
+    # ── Live auto-buy ──────────────────────────────────────────────────────────
+    if not WALLET_PRIVATE_KEY:
+        return
+
+    lamports = int(sol_amount * 1_000_000_000)
+
+    # Try pump.fun bonding curve first
+    bc     = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+    tx_sig = None
+    price_usd = result.get("price_usd", 0)
+
+    if bc and not bc.get("complete"):
+        tok_est = pumpfun.calculate_buy_tokens(lamports, bc)
+        tx_sig  = pumpfun.buy_token(mint, sol_amount, SOLANA_RPC, WALLET_PRIVATE_KEY)
+        out_raw = tok_est
+        route   = "pump.fun"
+        decimals = 6
+    else:
+        quote = jupiter_quote(SOL_MINT, mint, lamports)
+        if not quote or "error" in quote:
+            return
+        tx_sig   = execute_swap_live(quote)
+        out_raw  = int(quote.get("outAmount", 0))
+        route    = "jupiter"
+        decimals = 6
+
+    success = tx_sig and not tx_sig.startswith("ERROR")
+
+    if success:
+        # Update portfolio tracking
+        pubkey = get_wallet_pubkey()
+        if pubkey:
+            sol_bal = get_sol_balance(pubkey)
+        setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals)
+        log_trade(uid, "live", "buy", mint, symbol, name=name,
+                  sol_amount=sol_amount, token_amount=out_raw,
+                  price_usd=price_usd, mcap=mcap, heat_score=score, tx_sig=tx_sig)
+
+        cfg["bought"].append(mint)
+        cfg["spent_today"] = spent_today + sol_amount
+        set_auto_buy(uid, cfg)
+
+        try:
+            await bot.send_message(
+                uid,
+                f"🤖 *Auto-Buy Executed* (Live)\n\n"
+                f"🪙 *{name}* (${symbol})\n"
+                f"🌡️ Heat Score: `{score}/100`\n"
+                f"💰 Spent: `{sol_amount} SOL`\n"
+                f"📦 Received: `{out_raw:,}` raw tokens\n"
+                f"🔀 Route: `{route}`\n"
+                f"🏦 MCap: `${mcap:,.0f}`\n"
+                f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`\n"
+                f"🔗 TX: `{tx_sig[:20]}...`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Auto-Sell", callback_data=f"as:view:{mint}"),
+                    InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
+                ]])
+            )
+        except Exception:
+            pass
+    else:
+        try:
+            await bot.send_message(
+                uid,
+                f"❌ *Auto-Buy Failed* (Live)\n\n"
+                f"Token: *{name}* (${symbol})\n"
+                f"Error: `{tx_sig}`",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+
+
+async def handle_scanner_autobuy(bot, result: dict):
+    """Called by run_scan when a token hits the alert threshold."""
+    s        = sc.load_state()
+    chat_ids = s.get("scan_targets", [])
+    for uid in chat_ids:
+        try:
+            await execute_auto_buy(bot, uid, result)
+        except Exception:
+            pass
 
 
 # ─── Trade execution (shared) ─────────────────────────────────────────────────
@@ -968,33 +1415,85 @@ async def show_main_menu(target, uid: int, edit=False):
 
 
 async def _show_top(send_fn):
-    try:
-        pairs = requests.get(DEXSCREENER_SEARCH + "solana+meme", timeout=10).json().get("pairs") or []
-        top10 = sorted(
-            [p for p in pairs if p.get("chainId") == "solana"],
-            key=lambda p: float(p.get("volume", {}).get("h24", 0) or 0),
-            reverse=True
-        )[:10]
-        if not top10:
-            await send_fn("Could not fetch top tokens.", reply_markup=back_kb("menu:market"))
-            return
-        lines = ["*🔥 Top 10 Solana Meme Coins (24h Volume)*\n"]
-        for i, p in enumerate(top10, 1):
-            sym = p.get("baseToken", {}).get("symbol", "N/A")
-            pr  = p.get("priceUsd", "N/A")
-            h24 = p.get("priceChange", {}).get("h24", "N/A")
-            try: vol = f"${float(p.get('volume',{}).get('h24',0)):,.0f}"
-            except: vol = "N/A"
-            lines.append(f"{i}. *${sym}* `${pr}` | {h24}% | {vol}")
+    """Show our top 10 scouted tokens ranked by MCap gain since we first alerted them."""
+    log     = sc.load_log()
+    alerted = [e for e in log if e.get("alerted") and e.get("mint")]
+    if not alerted:
         await send_fn(
-            "\n".join(lines), parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔄 Refresh", callback_data="market:top"),
-                 InlineKeyboardButton("⬅️ Back",    callback_data="menu:market")]
-            ])
+            "*🏆 Top Scouted Tokens*\n\nNo alerted tokens yet — scanner hasn't fired any alerts.\n\nRun /scan to start.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="menu:market")
+            ]])
         )
-    except Exception as e:
-        await send_fn(f"Error: {e}")
+        return
+
+    # De-duplicate: keep first alert per mint (lowest timestamp)
+    seen   = {}
+    for e in sorted(alerted, key=lambda x: x.get("timestamp", 0)):
+        mint = e["mint"]
+        if mint not in seen:
+            seen[mint] = e
+
+    # Enrich with current price from DexScreener (up to 15 tokens)
+    candidates = list(seen.values())[-30:]  # recent 30, we'll rank the top 10
+    enriched   = []
+    for e in candidates:
+        mint       = e["mint"]
+        alert_mcap = e.get("mcap", 0) or 0
+        try:
+            pair = fetch_sol_pair(mint)
+            if not pair:
+                continue
+            cur_mcap = float(pair.get("marketCap") or pair.get("fdv") or 0)
+            cur_pr   = float(pair.get("priceUsd") or 0)
+            h24      = pair.get("priceChange", {}).get("h24", 0) or 0
+            if alert_mcap and cur_mcap:
+                gain_pct = ((cur_mcap - alert_mcap) / alert_mcap) * 100
+            else:
+                gain_pct = 0
+            enriched.append({
+                "name":       e.get("name", "?"),
+                "symbol":     e.get("symbol", "?"),
+                "mint":       mint,
+                "score":      e.get("score", 0),
+                "alert_mcap": alert_mcap,
+                "cur_mcap":   cur_mcap,
+                "cur_pr":     cur_pr,
+                "h24":        h24,
+                "gain_pct":   gain_pct,
+            })
+        except Exception:
+            continue
+
+    if not enriched:
+        await send_fn("Could not fetch current prices.", reply_markup=back_kb("menu:market"))
+        return
+
+    top10 = sorted(enriched, key=lambda x: -x["gain_pct"])[:10]
+    lines = ["*🏆 Top Scouted Calls*\n_Tokens we alerted, ranked by MCap gain_\n"]
+    for i, t in enumerate(top10, 1):
+        gain  = t["gain_pct"]
+        arrow = "🚀" if gain > 100 else ("📈" if gain > 0 else "📉")
+        lines.append(
+            f"{i}. {arrow} *${t['symbol']}* — score `{t['score']}`\n"
+            f"   MCap: `${t['alert_mcap']:,.0f}` → `${t['cur_mcap']:,.0f}` | `{gain:+.0f}%`"
+        )
+    # Quick-buy buttons for top 3
+    kb_rows = []
+    for t in top10[:3]:
+        kb_rows.append([
+            InlineKeyboardButton(f"🟢 Buy ${t['symbol']}", callback_data=f"quick:buy:{t['mint']}"),
+            InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{t['mint']}"),
+        ])
+    kb_rows.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="market:top"),
+        InlineKeyboardButton("⬅️ Back",    callback_data="menu:market"),
+    ])
+    await send_fn(
+        "\n".join(lines), parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb_rows)
+    )
 
 
 def _pct_kb(mint: str, back: str = "menu:portfolio") -> InlineKeyboardMarkup:
@@ -1010,7 +1509,10 @@ def _pct_kb(mint: str, back: str = "menu:portfolio") -> InlineKeyboardMarkup:
          InlineKeyboardButton("25%",  callback_data=f"qp:buy:{mint}:25"),
          InlineKeyboardButton("50%",  callback_data=f"qp:buy:{mint}:50"),
          InlineKeyboardButton("100%", callback_data=f"qp:buy:{mint}:100")],
-        [InlineKeyboardButton("⬅️ Portfolio", callback_data=back)],
+        [InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/solana/{mint}"),
+         InlineKeyboardButton("🪙 Pump.fun",    url=f"https://pump.fun/{mint}")],
+        [InlineKeyboardButton("🤖 Auto-Sell",  callback_data=f"as:view:{mint}"),
+         InlineKeyboardButton("⬅️ Portfolio",  callback_data=back)],
     ])
 
 
@@ -1042,17 +1544,21 @@ async def _show_portfolio(send_fn, uid: int):
                 val    = price * acc["ui_amount"]
                 as_tag = " 🤖" if as_configs.get(acc["mint"], {}).get("enabled") else ""
                 lines.append(f"`{sym}`{as_tag}: {acc['ui_amount']:,.4f} ≈ `${val:,.4f}`")
-                token_rows.append(InlineKeyboardButton(f"⚡ {sym}", callback_data=f"qt:{acc['mint']}"))
+                token_rows.append([
+                    InlineKeyboardButton(f"⚡ {sym}",  callback_data=f"qt:{acc['mint']}"),
+                    InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{acc['mint']}"),
+                    InlineKeyboardButton("🪙", url=f"https://pump.fun/{acc['mint']}"),
+                ])
         else:
             lines.append("No token positions found.")
 
-        # Group token buttons 3 per row
-        kb = [token_rows[i:i+3] for i in range(0, len(token_rows), 3)]
+        kb = token_rows[:]   # each entry is already a [⚡, 📊, 🪙] row
         kb += [
             [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
              InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
             [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
              InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
+            [InlineKeyboardButton("💣 Sell All",  callback_data="portfolio:sell_all_confirm")],
             [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
         ]
         await send_fn("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
@@ -1087,21 +1593,30 @@ async def _show_portfolio(send_fn, uid: int):
                     pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
                     if pending:
                         lines.append(f"  ↳ Next target: {pending[0]}")
-                token_rows.append(InlineKeyboardButton(f"⚡ {sym}", callback_data=f"qt:{mint}"))
+                token_rows.append([
+                    InlineKeyboardButton(f"⚡ {sym}", callback_data=f"qt:{mint}"),
+                    InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
+                    InlineKeyboardButton("🪙", url=f"https://pump.fun/{mint}"),
+                ])
             else:
                 lines.append(f"`{mint[:8]}...`: {raw_amt:,} raw")
-                token_rows.append(InlineKeyboardButton(f"⚡ {mint[:6]}", callback_data=f"qt:{mint}"))
+                token_rows.append([
+                    InlineKeyboardButton(f"⚡ {mint[:6]}", callback_data=f"qt:{mint}"),
+                    InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
+                    InlineKeyboardButton("🪙", url=f"https://pump.fun/{mint}"),
+                ])
         if total_usd:
             lines.append(f"\n*Est. Value:* `${total_usd:,.4f}`")
     else:
         lines.append("No positions yet.")
 
-    kb = [token_rows[i:i+3] for i in range(0, len(token_rows), 3)]
+    kb = token_rows[:]   # each entry is already a [⚡, 📊, 🪙] row
     kb += [
         [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
          InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
         [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
          InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
+        [InlineKeyboardButton("💣 Sell All",  callback_data="portfolio:sell_all_confirm")],
         [InlineKeyboardButton("🗑️ Reset",     callback_data="settings:reset_paper"),
          InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main")],
     ]
@@ -1110,12 +1625,18 @@ async def _show_portfolio(send_fn, uid: int):
 
 async def _show_autosell(send_fn, uid: int):
     configs = load_auto_sell().get(str(uid), {})
+    gsl     = get_global_sl()
+    gsl_status = "🟢 ON" if gsl.get("enabled") else "🔴 OFF"
+    gsl_info   = (f"Drop `{gsl['pct']}%` → sell `{gsl['sell_pct']}%`"
+                  if gsl.get("enabled") else "Disabled")
     if not configs:
         await send_fn(
-            "*🤖 Auto-Sell*\n\nNo positions tracked yet.\n"
-            "Buy a token and auto-sell is configured automatically.",
+            f"*🤖 Auto-Sell*\n\nNo positions tracked yet.\n"
+            f"Buy a token and auto-sell is configured automatically.\n\n"
+            f"*🌍 Global Stop-Loss:* {gsl_status} — {gsl_info}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"🌍 Global Stop-Loss: {gsl_status}", callback_data="gsl:menu")],
                 [InlineKeyboardButton("💰 Trade", callback_data="menu:trade")],
                 [InlineKeyboardButton("⬅️ Back",  callback_data="menu:main")],
             ])
@@ -1124,8 +1645,7 @@ async def _show_autosell(send_fn, uid: int):
     count = len(configs)
     await send_fn(
         f"*🤖 Auto-Sell Monitor*\n\n{count} position(s) tracked.\n\n"
-        "Default: 2x → sell 50% | 4x → sell 50%\n"
-        "MCap alerts: 100K / 500K / 1M\n\n"
+        f"*🌍 Global Stop-Loss:* {gsl_status} — {gsl_info}\n\n"
         "Tap a token to manage its targets:",
         parse_mode="Markdown",
         reply_markup=autosell_list_kb(uid)
@@ -1164,7 +1684,225 @@ def _format_autosell_config(cfg: dict) -> str:
             else:
                 desc = f"mcap ${ct['value']:,.0f} → alert"
             lines.append(f"  {i+1}. {status} {desc}")
+
+    # Stop-loss
+    sl = cfg.get("stop_loss", {})
+    if sl:
+        sl_on  = "🟢 ON" if sl.get("enabled") else "🔴 OFF"
+        sl_tri = " ✅ Triggered" if sl.get("triggered") else ""
+        lines.append(f"\n*Stop-Loss:* {sl_on}{sl_tri}")
+        lines.append(f"  Drop {sl.get('pct', 50)}% from buy → sell {sl.get('sell_pct', 100)}%")
+
+    # Trailing stop
+    ts = cfg.get("trailing_stop", {})
+    if ts:
+        ts_on  = "🟢 ON" if ts.get("enabled") else "🔴 OFF"
+        ts_tri = " ✅ Triggered" if ts.get("triggered") else ""
+        peak   = ts.get("peak_price", 0)
+        lines.append(f"\n*Trailing Stop:* {ts_on}{ts_tri}")
+        lines.append(f"  Trail {ts.get('trail_pct', 30)}% from peak → sell {ts.get('sell_pct', 100)}%")
+        if peak > 0:
+            lines.append(f"  Peak: `${peak:.8f}`")
+
+    # Trailing TP
+    ttp = cfg.get("trailing_tp", {})
+    if ttp:
+        ttp_on  = "🟢 ON" if ttp.get("enabled") else "🔴 OFF"
+        ttp_tri = " ✅ Triggered" if ttp.get("triggered") else ""
+        ttp_act = " 📈 Active" if ttp.get("active") else ""
+        lines.append(f"\n*Trailing TP:* {ttp_on}{ttp_tri}{ttp_act}")
+        lines.append(f"  Activates at {ttp.get('activate_mult', 2.0)}x, trail {ttp.get('trail_pct', 20)}% → sell {ttp.get('sell_pct', 50)}%")
+
+    # Time exit
+    te = cfg.get("time_exit", {})
+    if te:
+        te_on  = "🟢 ON" if te.get("enabled") else "🔴 OFF"
+        te_tri = " ✅ Triggered" if te.get("triggered") else ""
+        elapsed = (time.time() - te.get("buy_time", time.time())) / 3600
+        lines.append(f"\n*Time Exit:* {te_on}{te_tri}")
+        lines.append(f"  If not {te.get('target_mult', 2.0)}x after {te.get('hours', 24)}h → sell {te.get('sell_pct', 100)}%")
+        lines.append(f"  Elapsed: `{elapsed:.1f}h`")
+
+    # Breakeven stop
+    be = cfg.get("breakeven_stop", {})
+    if be:
+        be_on  = "🟢 ON" if be.get("enabled") else "🔴 OFF"
+        be_tri = " ✅ Activated" if be.get("triggered") else ""
+        lines.append(f"\n*Breakeven Stop:* {be_on}{be_tri}")
+        lines.append(f"  Move stop to entry when price hits `{be.get('activate_mult', 2.0)}x`")
+
     return "\n".join(lines)
+
+
+# ─── Auto-Buy UI ──────────────────────────────────────────────────────────────
+
+def _autobuy_status_text(uid: int) -> str:
+    cfg         = get_auto_buy(uid)
+    cfg         = _ab_reset_day_if_needed(cfg)
+    enabled     = cfg.get("enabled", False)
+    sol_amount  = cfg.get("sol_amount", 0.1)
+    min_score   = cfg.get("min_score", 70)
+    max_mcap    = cfg.get("max_mcap", 500_000)
+    daily_limit = cfg.get("daily_limit_sol", 1.0)
+    spent       = cfg.get("spent_today", 0.0)
+    bought      = cfg.get("bought", [])
+    mode        = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
+
+    status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
+    return (
+        f"*🤖 Auto-Buy Settings*\n\n"
+        f"Status: *{status}*\n"
+        f"Mode: *{mode}*\n\n"
+        f"SOL per trade: `{sol_amount} SOL`\n"
+        f"Min heat score: `{min_score}/100`\n"
+        f"Max MCap: `${max_mcap:,.0f}`\n"
+        f"Daily SOL limit: `{daily_limit} SOL`\n"
+        f"Spent today: `{spent:.3f} SOL`\n"
+        f"Bought today: `{len(bought)}` token(s)\n\n"
+        f"_Auto-buys fire when scanner alerts a token above your min score._"
+    )
+
+
+def _autobuy_kb(uid: int) -> InlineKeyboardMarkup:
+    cfg     = get_auto_buy(uid)
+    enabled = cfg.get("enabled", False)
+    toggle_lbl = "⏸️ Disable" if enabled else "▶️ Enable"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_lbl,            callback_data="autobuy:toggle")],
+        [InlineKeyboardButton("💰 SOL Amount",        callback_data="autobuy:set_sol"),
+         InlineKeyboardButton("🌡️ Min Score",         callback_data="autobuy:set_score")],
+        [InlineKeyboardButton("🏦 Max MCap",          callback_data="autobuy:set_mcap"),
+         InlineKeyboardButton("📅 Daily Limit",       callback_data="autobuy:set_daily")],
+        [InlineKeyboardButton("🔄 Reset Today",       callback_data="autobuy:reset_day")],
+        [InlineKeyboardButton("⬅️ Back",              callback_data="menu:main")],
+    ])
+
+
+async def _show_autobuy(send_fn, uid: int):
+    await send_fn(
+        _autobuy_status_text(uid),
+        parse_mode="Markdown",
+        reply_markup=_autobuy_kb(uid),
+    )
+
+
+async def cmd_autobuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("Loading auto-buy...")
+    await _show_autobuy(msg.edit_text, update.effective_user.id)
+
+
+async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    action = query.data.split(":")[1]
+    await query.answer()
+
+    cfg = get_auto_buy(uid)
+    cfg = _ab_reset_day_if_needed(cfg)
+
+    if action == "toggle":
+        cfg["enabled"] = not cfg.get("enabled", False)
+        set_auto_buy(uid, cfg)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_sol":
+        set_state(uid, waiting_for="ab_sol_amount")
+        await query.edit_message_text(
+            "💰 *Set SOL amount per auto-buy*\n\n"
+            "Enter amount in SOL (e.g. `0.05`, `0.1`, `0.25`)\n"
+            f"Current: `{cfg.get('sol_amount', 0.1)} SOL`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("0.05", callback_data="autobuy:sol_preset:0.05"),
+                InlineKeyboardButton("0.1",  callback_data="autobuy:sol_preset:0.1"),
+                InlineKeyboardButton("0.25", callback_data="autobuy:sol_preset:0.25"),
+                InlineKeyboardButton("0.5",  callback_data="autobuy:sol_preset:0.5"),
+            ], [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")]])
+        )
+
+    elif action == "sol_preset":
+        val = float(query.data.split(":")[2])
+        cfg["sol_amount"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_score":
+        set_state(uid, waiting_for="ab_min_score")
+        await query.edit_message_text(
+            "🌡️ *Set minimum heat score for auto-buy*\n\n"
+            "Higher = fewer but better trades.\n"
+            f"Current: `{cfg.get('min_score', 70)}/100`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("55", callback_data="autobuy:score_preset:55"),
+                InlineKeyboardButton("65", callback_data="autobuy:score_preset:65"),
+                InlineKeyboardButton("70", callback_data="autobuy:score_preset:70"),
+                InlineKeyboardButton("80", callback_data="autobuy:score_preset:80"),
+            ], [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")]])
+        )
+
+    elif action == "score_preset":
+        val = int(query.data.split(":")[2])
+        cfg["min_score"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_mcap":
+        set_state(uid, waiting_for="ab_max_mcap")
+        await query.edit_message_text(
+            "🏦 *Set maximum market cap for auto-buy*\n\n"
+            "Tokens above this MCap will be skipped.\n"
+            f"Current: `${cfg.get('max_mcap', 500_000):,.0f}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("$100K",  callback_data="autobuy:mcap_preset:100000"),
+                InlineKeyboardButton("$250K",  callback_data="autobuy:mcap_preset:250000"),
+                InlineKeyboardButton("$500K",  callback_data="autobuy:mcap_preset:500000"),
+                InlineKeyboardButton("$1M",    callback_data="autobuy:mcap_preset:1000000"),
+            ], [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")]])
+        )
+
+    elif action == "mcap_preset":
+        val = int(query.data.split(":")[2])
+        cfg["max_mcap"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_daily":
+        set_state(uid, waiting_for="ab_daily_limit")
+        await query.edit_message_text(
+            "📅 *Set daily SOL spending limit*\n\n"
+            "Auto-buy pauses when this limit is reached.\n"
+            f"Current: `{cfg.get('daily_limit_sol', 1.0)} SOL`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("0.5 SOL",  callback_data="autobuy:daily_preset:0.5"),
+                InlineKeyboardButton("1 SOL",    callback_data="autobuy:daily_preset:1.0"),
+                InlineKeyboardButton("2 SOL",    callback_data="autobuy:daily_preset:2.0"),
+                InlineKeyboardButton("5 SOL",    callback_data="autobuy:daily_preset:5.0"),
+            ], [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")]])
+        )
+
+    elif action == "daily_preset":
+        val = float(query.data.split(":")[2])
+        cfg["daily_limit_sol"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "reset_day":
+        cfg["spent_today"] = 0.0
+        cfg["bought"]      = []
+        cfg["spent_date"]  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        set_auto_buy(uid, cfg)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "menu":
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
 
 
 # ─── Commands ─────────────────────────────────────────────────────────────────
@@ -1823,6 +2561,10 @@ async def pumpgrad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]),
         )
 
+    elif action == "toggle_grad_autobuy":
+        pf.set_grad_autobuy(uid, not pf.is_grad_autobuy(uid))
+        await _refresh()
+
     elif action == "menu":
         clear_state(uid)
         await _refresh()
@@ -1937,9 +2679,9 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s["scan_targets"] = targets
             sc.save_state(s)
             await query.edit_message_text(
-                "🟢 *Live alerts resumed!*\n\n"
-                "Scanning every 15 seconds.\n"
-                "Alerts fire when Heat Score ≥ 55/100.",
+                f"🟢 *Live alerts resumed!*\n\n"
+                f"Scanning every 15 seconds.\n"
+                f"Alerts fire when Heat Score ≥ {sc.get_user_min_score(uid)}/100.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔕 Pause Alerts", callback_data="scanner:toggle"),
@@ -1999,6 +2741,75 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
+    elif action == "set_threshold":
+        cur = sc.get_user_min_score(uid)
+        await query.edit_message_text(
+            f"*🌡️ Alert Score Threshold*\n\n"
+            f"Current: `{cur}/100`\n\n"
+            f"You'll only receive alerts for tokens scoring at or above this value.\n"
+            f"Lower = more alerts · Higher = fewer but stronger signals.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("50", callback_data="scanner:threshold:50"),
+                 InlineKeyboardButton("55", callback_data="scanner:threshold:55"),
+                 InlineKeyboardButton("60", callback_data="scanner:threshold:60")],
+                [InlineKeyboardButton("65", callback_data="scanner:threshold:65"),
+                 InlineKeyboardButton("70", callback_data="scanner:threshold:70"),
+                 InlineKeyboardButton("80", callback_data="scanner:threshold:80")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+            ])
+        )
+
+    elif action == "threshold":
+        val = int(query.data.split(":")[2])
+        sc.set_user_min_score(uid, val)
+        await query.edit_message_text(
+            f"✅ Alert threshold set to `{val}/100`\n\nYou'll receive alerts for tokens scoring ≥ {val}.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main"),
+            ]])
+        )
+
+    elif action == "alert_channel_menu":
+        ch = sc.get_alert_channel()
+        ch_txt = f"`{ch}`" if ch else "_Not set_"
+        await query.edit_message_text(
+            f"*📣 Alert Channel*\n\n"
+            f"When set, every scanner alert is also posted to this channel — "
+            f"keeping your DMs clean while the channel gets all the signals.\n\n"
+            f"Current: {ch_txt}\n\n"
+            f"To set: add the bot as admin to your channel, then enter the channel ID or @username below.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Set Channel", callback_data="scanner:set_alert_channel")],
+                *([[InlineKeyboardButton("🗑️ Remove Channel", callback_data="scanner:clear_alert_channel")]] if ch else []),
+                [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+            ])
+        )
+
+    elif action == "set_alert_channel":
+        set_state(uid, waiting_for="scanner_alert_channel")
+        await query.edit_message_text(
+            "📣 *Set Alert Channel*\n\n"
+            "Send the channel ID (e.g. `-1001234567890`) or username (e.g. `@mychannel`).\n\n"
+            "_Make sure the bot is added as an admin to the channel first._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="scanner:alert_channel_menu"),
+            ]])
+        )
+
+    elif action == "clear_alert_channel":
+        sc.set_alert_channel(None)
+        await query.edit_message_text(
+            "✅ Alert channel removed. Alerts will only be sent as DMs.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="menu:main"),
+            ]])
+        )
+
 
 # ─── Callbacks ────────────────────────────────────────────────────────────────
 
@@ -2029,6 +2840,8 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     elif action == "autosell":
         await _show_autosell(query.edit_message_text, uid)
+    elif action == "autobuy":
+        await _show_autobuy(query.edit_message_text, uid)
     elif action == "settings":
         await query.edit_message_text(
             "*⚙️ Settings*\n\n📄 Paper — virtual 10 SOL\n🔴 Live — real on-chain",
@@ -2182,6 +2995,957 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ])
         )
 
+    # ── Stop-Loss menu ────────────────────────────────────────────────────────
+    elif action == "sl_menu":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        sl = cfg.get("stop_loss", {})
+        on = sl.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        await query.edit_message_text(
+            f"*🛑 Stop-Loss — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trigger: drop `{sl.get('pct',50)}%` from buy price\n"
+            f"Sell: `{sl.get('sell_pct',100)}%` of position",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:sl_toggle:{mint}")],
+                [InlineKeyboardButton("25% drop",  callback_data=f"as:sl_pct:{mint}:25"),
+                 InlineKeyboardButton("50% drop",  callback_data=f"as:sl_pct:{mint}:50"),
+                 InlineKeyboardButton("75% drop",  callback_data=f"as:sl_pct:{mint}:75")],
+                [InlineKeyboardButton("✏️ Custom drop %", callback_data=f"as:sl_custom_pct:{mint}")],
+                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:sl_sell_pct:{mint}:10"),
+                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:sl_sell_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:sl_sell_pct:{mint}:50")],
+                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:sl_sell_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:sl_sell_pct:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:sl_custom_sell:{mint}")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "sl_toggle":
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            sl = cfg.setdefault("stop_loss", {"enabled": False, "pct": 50, "sell_pct": 100, "triggered": False})
+            sl["enabled"] = not sl.get("enabled", False)
+            set_auto_sell(uid, mint, cfg)
+        sl = cfg.get("stop_loss", {})
+        on = sl.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        await query.edit_message_text(
+            f"*🛑 Stop-Loss — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trigger: drop `{sl.get('pct',50)}%` from buy price\n"
+            f"Sell: `{sl.get('sell_pct',100)}%` of position",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:sl_toggle:{mint}")],
+                [InlineKeyboardButton("25% drop",  callback_data=f"as:sl_pct:{mint}:25"),
+                 InlineKeyboardButton("50% drop",  callback_data=f"as:sl_pct:{mint}:50"),
+                 InlineKeyboardButton("75% drop",  callback_data=f"as:sl_pct:{mint}:75")],
+                [InlineKeyboardButton("✏️ Custom drop %", callback_data=f"as:sl_custom_pct:{mint}")],
+                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:sl_sell_pct:{mint}:10"),
+                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:sl_sell_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:sl_sell_pct:{mint}:50")],
+                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:sl_sell_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:sl_sell_pct:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:sl_custom_sell:{mint}")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "sl_pct":
+        pct = int(parts[3]) if len(parts) > 3 else 50
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("stop_loss", {})["pct"] = pct
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Stop-loss trigger set to {pct}% drop")
+            sl = cfg["stop_loss"]
+            on = sl.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            await query.edit_message_text(
+                f"*🛑 Stop-Loss — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}\n"
+                f"Trigger: drop `{sl.get('pct',50)}%` from buy price\n"
+                f"Sell: `{sl.get('sell_pct',100)}%` of position",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:sl_toggle:{mint}")],
+                    [InlineKeyboardButton("25% drop",  callback_data=f"as:sl_pct:{mint}:25"),
+                     InlineKeyboardButton("50% drop",  callback_data=f"as:sl_pct:{mint}:50"),
+                     InlineKeyboardButton("75% drop",  callback_data=f"as:sl_pct:{mint}:75")],
+                    [InlineKeyboardButton("✏️ Custom drop %", callback_data=f"as:sl_custom_pct:{mint}")],
+                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:sl_sell_pct:{mint}:10"),
+                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:sl_sell_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:sl_sell_pct:{mint}:50")],
+                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:sl_sell_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:sl_sell_pct:{mint}:100")],
+                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:sl_custom_sell:{mint}")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    elif action == "sl_sell_pct":
+        sell_pct = int(parts[3]) if len(parts) > 3 else 100
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("stop_loss", {})["sell_pct"] = sell_pct
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Stop-loss sell set to {sell_pct}%")
+            sl = cfg["stop_loss"]
+            on = sl.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            await query.edit_message_text(
+                f"*🛑 Stop-Loss — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}\n"
+                f"Trigger: drop `{sl.get('pct',50)}%` from buy price\n"
+                f"Sell: `{sl.get('sell_pct',100)}%` of position",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:sl_toggle:{mint}")],
+                    [InlineKeyboardButton("25% drop",  callback_data=f"as:sl_pct:{mint}:25"),
+                     InlineKeyboardButton("50% drop",  callback_data=f"as:sl_pct:{mint}:50"),
+                     InlineKeyboardButton("75% drop",  callback_data=f"as:sl_pct:{mint}:75")],
+                    [InlineKeyboardButton("✏️ Custom drop %", callback_data=f"as:sl_custom_pct:{mint}")],
+                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:sl_sell_pct:{mint}:10"),
+                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:sl_sell_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:sl_sell_pct:{mint}:50")],
+                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:sl_sell_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:sl_sell_pct:{mint}:100")],
+                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:sl_custom_sell:{mint}")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    elif action == "sl_custom_pct":
+        set_state(uid, waiting_for="as_sl_pct", as_mint=mint)
+        await query.edit_message_text(
+            "Enter custom stop-loss drop % (e.g. 35 for 35% drop from buy price):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:sl_menu:{mint}")
+            ]])
+        )
+
+    elif action == "sl_custom_sell":
+        set_state(uid, waiting_for="as_sl_sell_pct_input", as_mint=mint)
+        await query.edit_message_text(
+            "Enter sell % for stop-loss (1-100):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:sl_menu:{mint}")
+            ]])
+        )
+
+    # ── Trailing stop menu ────────────────────────────────────────────────────
+    elif action == "trail_menu":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        ts = cfg.get("trailing_stop", {})
+        on = ts.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        peak = ts.get("peak_price", 0)
+        peak_txt = f"`${peak:.8f}`" if peak > 0 else "not set yet"
+        await query.edit_message_text(
+            f"*📉 Trailing Stop — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trail: `{ts.get('trail_pct',30)}%` from peak → sell `{ts.get('sell_pct',100)}%`\n"
+            f"Peak price: {peak_txt}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:trail_toggle:{mint}")],
+                [InlineKeyboardButton("15%", callback_data=f"as:trail_pct:{mint}:15"),
+                 InlineKeyboardButton("25%", callback_data=f"as:trail_pct:{mint}:25"),
+                 InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
+                 InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
+                [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
+                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
+                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
+                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "trail_toggle":
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            ts = cfg.setdefault("trailing_stop", {"enabled": False, "trail_pct": 30, "sell_pct": 100, "peak_price": 0.0, "triggered": False})
+            ts["enabled"] = not ts.get("enabled", False)
+            set_auto_sell(uid, mint, cfg)
+        ts = cfg.get("trailing_stop", {})
+        on = ts.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        peak = ts.get("peak_price", 0)
+        peak_txt = f"`${peak:.8f}`" if peak > 0 else "not set yet"
+        await query.edit_message_text(
+            f"*📉 Trailing Stop — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trail: `{ts.get('trail_pct',30)}%` from peak → sell `{ts.get('sell_pct',100)}%`\n"
+            f"Peak price: {peak_txt}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:trail_toggle:{mint}")],
+                [InlineKeyboardButton("15%", callback_data=f"as:trail_pct:{mint}:15"),
+                 InlineKeyboardButton("25%", callback_data=f"as:trail_pct:{mint}:25"),
+                 InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
+                 InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
+                [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
+                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
+                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
+                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "trail_pct":
+        trail_pct = int(parts[3]) if len(parts) > 3 else 30
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("trailing_stop", {})["trail_pct"] = trail_pct
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Trail pct set to {trail_pct}%")
+            ts = cfg["trailing_stop"]
+            on = ts.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            peak = ts.get("peak_price", 0)
+            peak_txt = f"`${peak:.8f}`" if peak > 0 else "not set yet"
+            await query.edit_message_text(
+                f"*📉 Trailing Stop — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}\n"
+                f"Trail: `{ts.get('trail_pct',30)}%` from peak → sell `{ts.get('sell_pct',100)}%`\n"
+                f"Peak price: {peak_txt}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:trail_toggle:{mint}")],
+                    [InlineKeyboardButton("15%", callback_data=f"as:trail_pct:{mint}:15"),
+                     InlineKeyboardButton("25%", callback_data=f"as:trail_pct:{mint}:25"),
+                     InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
+                     InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
+                    [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
+                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
+                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
+                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
+                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    elif action == "trail_sell_pct":
+        sell_pct = int(parts[3]) if len(parts) > 3 else 100
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("trailing_stop", {})["sell_pct"] = sell_pct
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Trail sell set to {sell_pct}%")
+            ts = cfg["trailing_stop"]
+            on = ts.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            peak = ts.get("peak_price", 0)
+            peak_txt = f"`${peak:.8f}`" if peak > 0 else "not set yet"
+            await query.edit_message_text(
+                f"*📉 Trailing Stop — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}\n"
+                f"Trail: `{ts.get('trail_pct',30)}%` from peak → sell `{ts.get('sell_pct',100)}%`\n"
+                f"Peak price: {peak_txt}",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:trail_toggle:{mint}")],
+                    [InlineKeyboardButton("15%", callback_data=f"as:trail_pct:{mint}:15"),
+                     InlineKeyboardButton("25%", callback_data=f"as:trail_pct:{mint}:25"),
+                     InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
+                     InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
+                    [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
+                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
+                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
+                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
+                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    elif action == "trail_custom_pct":
+        set_state(uid, waiting_for="as_trail_pct", as_mint=mint)
+        await query.edit_message_text(
+            "Enter custom trailing stop % (e.g. 35 for 35% drop from peak):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:trail_menu:{mint}")
+            ]])
+        )
+
+    elif action == "trail_custom_sell":
+        set_state(uid, waiting_for="as_trail_sell_pct_input", as_mint=mint)
+        await query.edit_message_text(
+            "Enter sell % for trailing stop (1-100):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:trail_menu:{mint}")
+            ]])
+        )
+
+    # ── Trailing TP menu ──────────────────────────────────────────────────────
+    elif action == "ttp_menu":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        ttp = cfg.get("trailing_tp", {})
+        on = ttp.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        active_txt = " 📈 Trailing" if ttp.get("active") else ""
+        await query.edit_message_text(
+            f"*📈 Trailing TP — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}{active_txt}\n"
+            f"Activates at: `{ttp.get('activate_mult',2.0)}x`\n"
+            f"Trail: `{ttp.get('trail_pct',20)}%` from peak → sell `{ttp.get('sell_pct',50)}%`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:ttp_toggle:{mint}")],
+                [InlineKeyboardButton("Activate 1.5x", callback_data=f"as:ttp_act:{mint}:1.5"),
+                 InlineKeyboardButton("Activate 2x",   callback_data=f"as:ttp_act:{mint}:2"),
+                 InlineKeyboardButton("Activate 3x",   callback_data=f"as:ttp_act:{mint}:3"),
+                 InlineKeyboardButton("Activate 5x",   callback_data=f"as:ttp_act:{mint}:5")],
+                [InlineKeyboardButton("Trail 10%", callback_data=f"as:ttp_trail:{mint}:10"),
+                 InlineKeyboardButton("Trail 20%", callback_data=f"as:ttp_trail:{mint}:20"),
+                 InlineKeyboardButton("Trail 30%", callback_data=f"as:ttp_trail:{mint}:30")],
+                [InlineKeyboardButton("Sell 25%",  callback_data=f"as:ttp_sell_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:ttp_sell_pct:{mint}:50"),
+                 InlineKeyboardButton("Sell 75%",  callback_data=f"as:ttp_sell_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:ttp_sell_pct:{mint}:100")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "ttp_toggle":
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            ttp = cfg.setdefault("trailing_tp", {"enabled": False, "activate_mult": 2.0, "trail_pct": 20, "sell_pct": 50, "active": False, "peak_price": 0.0, "triggered": False})
+            ttp["enabled"] = not ttp.get("enabled", False)
+            set_auto_sell(uid, mint, cfg)
+        ttp = cfg.get("trailing_tp", {})
+        on = ttp.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        active_txt = " 📈 Trailing" if ttp.get("active") else ""
+        await query.edit_message_text(
+            f"*📈 Trailing TP — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}{active_txt}\n"
+            f"Activates at: `{ttp.get('activate_mult',2.0)}x`\n"
+            f"Trail: `{ttp.get('trail_pct',20)}%` from peak → sell `{ttp.get('sell_pct',50)}%`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:ttp_toggle:{mint}")],
+                [InlineKeyboardButton("Activate 1.5x", callback_data=f"as:ttp_act:{mint}:1.5"),
+                 InlineKeyboardButton("Activate 2x",   callback_data=f"as:ttp_act:{mint}:2"),
+                 InlineKeyboardButton("Activate 3x",   callback_data=f"as:ttp_act:{mint}:3"),
+                 InlineKeyboardButton("Activate 5x",   callback_data=f"as:ttp_act:{mint}:5")],
+                [InlineKeyboardButton("Trail 10%", callback_data=f"as:ttp_trail:{mint}:10"),
+                 InlineKeyboardButton("Trail 20%", callback_data=f"as:ttp_trail:{mint}:20"),
+                 InlineKeyboardButton("Trail 30%", callback_data=f"as:ttp_trail:{mint}:30")],
+                [InlineKeyboardButton("Sell 25%",  callback_data=f"as:ttp_sell_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:ttp_sell_pct:{mint}:50"),
+                 InlineKeyboardButton("Sell 75%",  callback_data=f"as:ttp_sell_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:ttp_sell_pct:{mint}:100")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "ttp_act":
+        mult = float(parts[3]) if len(parts) > 3 else 2.0
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("trailing_tp", {})["activate_mult"] = mult
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Activation mult set to {mult}x")
+            ttp = cfg["trailing_tp"]
+            on = ttp.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            active_txt = " 📈 Trailing" if ttp.get("active") else ""
+            await query.edit_message_text(
+                f"*📈 Trailing TP — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}{active_txt}\n"
+                f"Activates at: `{ttp.get('activate_mult',2.0)}x`\n"
+                f"Trail: `{ttp.get('trail_pct',20)}%` from peak → sell `{ttp.get('sell_pct',50)}%`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:ttp_toggle:{mint}")],
+                    [InlineKeyboardButton("Activate 1.5x", callback_data=f"as:ttp_act:{mint}:1.5"),
+                     InlineKeyboardButton("Activate 2x",   callback_data=f"as:ttp_act:{mint}:2"),
+                     InlineKeyboardButton("Activate 3x",   callback_data=f"as:ttp_act:{mint}:3"),
+                     InlineKeyboardButton("Activate 5x",   callback_data=f"as:ttp_act:{mint}:5")],
+                    [InlineKeyboardButton("Trail 10%", callback_data=f"as:ttp_trail:{mint}:10"),
+                     InlineKeyboardButton("Trail 20%", callback_data=f"as:ttp_trail:{mint}:20"),
+                     InlineKeyboardButton("Trail 30%", callback_data=f"as:ttp_trail:{mint}:30")],
+                    [InlineKeyboardButton("Sell 25%",  callback_data=f"as:ttp_sell_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:ttp_sell_pct:{mint}:50"),
+                     InlineKeyboardButton("Sell 75%",  callback_data=f"as:ttp_sell_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:ttp_sell_pct:{mint}:100")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    elif action == "ttp_trail":
+        trail_pct = int(parts[3]) if len(parts) > 3 else 20
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("trailing_tp", {})["trail_pct"] = trail_pct
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Trail pct set to {trail_pct}%")
+            ttp = cfg["trailing_tp"]
+            on = ttp.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            active_txt = " 📈 Trailing" if ttp.get("active") else ""
+            await query.edit_message_text(
+                f"*📈 Trailing TP — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}{active_txt}\n"
+                f"Activates at: `{ttp.get('activate_mult',2.0)}x`\n"
+                f"Trail: `{ttp.get('trail_pct',20)}%` from peak → sell `{ttp.get('sell_pct',50)}%`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:ttp_toggle:{mint}")],
+                    [InlineKeyboardButton("Activate 1.5x", callback_data=f"as:ttp_act:{mint}:1.5"),
+                     InlineKeyboardButton("Activate 2x",   callback_data=f"as:ttp_act:{mint}:2"),
+                     InlineKeyboardButton("Activate 3x",   callback_data=f"as:ttp_act:{mint}:3"),
+                     InlineKeyboardButton("Activate 5x",   callback_data=f"as:ttp_act:{mint}:5")],
+                    [InlineKeyboardButton("Trail 10%", callback_data=f"as:ttp_trail:{mint}:10"),
+                     InlineKeyboardButton("Trail 20%", callback_data=f"as:ttp_trail:{mint}:20"),
+                     InlineKeyboardButton("Trail 30%", callback_data=f"as:ttp_trail:{mint}:30")],
+                    [InlineKeyboardButton("Sell 25%",  callback_data=f"as:ttp_sell_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:ttp_sell_pct:{mint}:50"),
+                     InlineKeyboardButton("Sell 75%",  callback_data=f"as:ttp_sell_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:ttp_sell_pct:{mint}:100")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    elif action == "ttp_sell_pct":
+        sell_pct = int(parts[3]) if len(parts) > 3 else 50
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("trailing_tp", {})["sell_pct"] = sell_pct
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"TTP sell set to {sell_pct}%")
+            ttp = cfg["trailing_tp"]
+            on = ttp.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            active_txt = " 📈 Trailing" if ttp.get("active") else ""
+            await query.edit_message_text(
+                f"*📈 Trailing TP — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}{active_txt}\n"
+                f"Activates at: `{ttp.get('activate_mult',2.0)}x`\n"
+                f"Trail: `{ttp.get('trail_pct',20)}%` from peak → sell `{ttp.get('sell_pct',50)}%`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:ttp_toggle:{mint}")],
+                    [InlineKeyboardButton("Activate 1.5x", callback_data=f"as:ttp_act:{mint}:1.5"),
+                     InlineKeyboardButton("Activate 2x",   callback_data=f"as:ttp_act:{mint}:2"),
+                     InlineKeyboardButton("Activate 3x",   callback_data=f"as:ttp_act:{mint}:3"),
+                     InlineKeyboardButton("Activate 5x",   callback_data=f"as:ttp_act:{mint}:5")],
+                    [InlineKeyboardButton("Trail 10%", callback_data=f"as:ttp_trail:{mint}:10"),
+                     InlineKeyboardButton("Trail 20%", callback_data=f"as:ttp_trail:{mint}:20"),
+                     InlineKeyboardButton("Trail 30%", callback_data=f"as:ttp_trail:{mint}:30")],
+                    [InlineKeyboardButton("Sell 25%",  callback_data=f"as:ttp_sell_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:ttp_sell_pct:{mint}:50"),
+                     InlineKeyboardButton("Sell 75%",  callback_data=f"as:ttp_sell_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:ttp_sell_pct:{mint}:100")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    # ── Time exit menu ────────────────────────────────────────────────────────
+    elif action == "te_menu":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        te = cfg.get("time_exit", {})
+        on = te.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        elapsed = (time.time() - te.get("buy_time", time.time())) / 3600
+        await query.edit_message_text(
+            f"*⏱️ Time Exit — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}\n"
+            f"Exit if not `{te.get('target_mult',2.0)}x` after `{te.get('hours',24)}h`\n"
+            f"Sell: `{te.get('sell_pct',100)}%` of position\n"
+            f"Elapsed: `{elapsed:.1f}h`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:te_toggle:{mint}")],
+                [InlineKeyboardButton("6h",  callback_data=f"as:te_hours:{mint}:6"),
+                 InlineKeyboardButton("12h", callback_data=f"as:te_hours:{mint}:12"),
+                 InlineKeyboardButton("24h", callback_data=f"as:te_hours:{mint}:24"),
+                 InlineKeyboardButton("48h", callback_data=f"as:te_hours:{mint}:48")],
+                [InlineKeyboardButton("Target 1.5x", callback_data=f"as:te_mult:{mint}:1.5"),
+                 InlineKeyboardButton("Target 2x",   callback_data=f"as:te_mult:{mint}:2"),
+                 InlineKeyboardButton("Target 3x",   callback_data=f"as:te_mult:{mint}:3"),
+                 InlineKeyboardButton("Target 5x",   callback_data=f"as:te_mult:{mint}:5")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "te_toggle":
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            te = cfg.setdefault("time_exit", {"enabled": False, "hours": 24, "target_mult": 2.0, "sell_pct": 100, "buy_time": time.time(), "triggered": False})
+            te["enabled"] = not te.get("enabled", False)
+            set_auto_sell(uid, mint, cfg)
+        te = cfg.get("time_exit", {})
+        on = te.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        elapsed = (time.time() - te.get("buy_time", time.time())) / 3600
+        await query.edit_message_text(
+            f"*⏱️ Time Exit — ${cfg.get('symbol','?')}*\n\n"
+            f"Status: {status_txt}\n"
+            f"Exit if not `{te.get('target_mult',2.0)}x` after `{te.get('hours',24)}h`\n"
+            f"Sell: `{te.get('sell_pct',100)}%` of position\n"
+            f"Elapsed: `{elapsed:.1f}h`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:te_toggle:{mint}")],
+                [InlineKeyboardButton("6h",  callback_data=f"as:te_hours:{mint}:6"),
+                 InlineKeyboardButton("12h", callback_data=f"as:te_hours:{mint}:12"),
+                 InlineKeyboardButton("24h", callback_data=f"as:te_hours:{mint}:24"),
+                 InlineKeyboardButton("48h", callback_data=f"as:te_hours:{mint}:48")],
+                [InlineKeyboardButton("Target 1.5x", callback_data=f"as:te_mult:{mint}:1.5"),
+                 InlineKeyboardButton("Target 2x",   callback_data=f"as:te_mult:{mint}:2"),
+                 InlineKeyboardButton("Target 3x",   callback_data=f"as:te_mult:{mint}:3"),
+                 InlineKeyboardButton("Target 5x",   callback_data=f"as:te_mult:{mint}:5")],
+                [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "te_hours":
+        hours = int(parts[3]) if len(parts) > 3 else 24
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("time_exit", {})["hours"] = hours
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Time exit set to {hours}h")
+            te = cfg["time_exit"]
+            on = te.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            elapsed = (time.time() - te.get("buy_time", time.time())) / 3600
+            await query.edit_message_text(
+                f"*⏱️ Time Exit — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}\n"
+                f"Exit if not `{te.get('target_mult',2.0)}x` after `{te.get('hours',24)}h`\n"
+                f"Sell: `{te.get('sell_pct',100)}%` of position\n"
+                f"Elapsed: `{elapsed:.1f}h`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:te_toggle:{mint}")],
+                    [InlineKeyboardButton("6h",  callback_data=f"as:te_hours:{mint}:6"),
+                     InlineKeyboardButton("12h", callback_data=f"as:te_hours:{mint}:12"),
+                     InlineKeyboardButton("24h", callback_data=f"as:te_hours:{mint}:24"),
+                     InlineKeyboardButton("48h", callback_data=f"as:te_hours:{mint}:48")],
+                    [InlineKeyboardButton("Target 1.5x", callback_data=f"as:te_mult:{mint}:1.5"),
+                     InlineKeyboardButton("Target 2x",   callback_data=f"as:te_mult:{mint}:2"),
+                     InlineKeyboardButton("Target 3x",   callback_data=f"as:te_mult:{mint}:3"),
+                     InlineKeyboardButton("Target 5x",   callback_data=f"as:te_mult:{mint}:5")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    elif action == "te_mult":
+        mult = float(parts[3]) if len(parts) > 3 else 2.0
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("time_exit", {})["target_mult"] = mult
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Target mult set to {mult}x")
+            te = cfg["time_exit"]
+            on = te.get("enabled", False)
+            toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+            status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+            elapsed = (time.time() - te.get("buy_time", time.time())) / 3600
+            await query.edit_message_text(
+                f"*⏱️ Time Exit — ${cfg.get('symbol','?')}*\n\n"
+                f"Status: {status_txt}\n"
+                f"Exit if not `{te.get('target_mult',2.0)}x` after `{te.get('hours',24)}h`\n"
+                f"Sell: `{te.get('sell_pct',100)}%` of position\n"
+                f"Elapsed: `{elapsed:.1f}h`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton(toggle_lbl, callback_data=f"as:te_toggle:{mint}")],
+                    [InlineKeyboardButton("6h",  callback_data=f"as:te_hours:{mint}:6"),
+                     InlineKeyboardButton("12h", callback_data=f"as:te_hours:{mint}:12"),
+                     InlineKeyboardButton("24h", callback_data=f"as:te_hours:{mint}:24"),
+                     InlineKeyboardButton("48h", callback_data=f"as:te_hours:{mint}:48")],
+                    [InlineKeyboardButton("Target 1.5x", callback_data=f"as:te_mult:{mint}:1.5"),
+                     InlineKeyboardButton("Target 2x",   callback_data=f"as:te_mult:{mint}:2"),
+                     InlineKeyboardButton("Target 3x",   callback_data=f"as:te_mult:{mint}:3"),
+                     InlineKeyboardButton("Target 5x",   callback_data=f"as:te_mult:{mint}:5")],
+                    [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
+                ])
+            )
+
+    # ── Mult targets menu ─────────────────────────────────────────────────────
+    elif action == "mult_targets_menu":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        targets = cfg.get("mult_targets", [])
+        sym = cfg.get("symbol", mint[:6])
+        rows = []
+        for i, t in enumerate(targets):
+            status = "✅" if t.get("triggered") else "⏳"
+            label = f"{t['mult']}x → {t['sell_pct']}% {status}"
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"as:noop:{mint}"),
+                InlineKeyboardButton("✏️ Edit", callback_data=f"as:mt_edit:{mint}:{i}"),
+                InlineKeyboardButton("🗑️ Del",  callback_data=f"as:mt_del:{mint}:{i}"),
+            ])
+        rows.append([InlineKeyboardButton("➕ Add Mult Target", callback_data=f"as:mt_add:{mint}")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"as:view:{mint}")])
+        await query.edit_message_text(
+            f"*📈 Multiplier Targets — ${sym}*\n\nManage auto-sell targets by multiplier.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    elif action == "mt_del":
+        idx = int(parts[3]) if len(parts) > 3 else 0
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            targets = cfg.get("mult_targets", [])
+            if 0 <= idx < len(targets):
+                targets.pop(idx)
+                cfg["mult_targets"] = targets
+                set_auto_sell(uid, mint, cfg)
+                await query.answer("Target deleted.")
+            else:
+                await query.answer("Invalid index.")
+        # Re-show mult_targets_menu
+        cfg = get_auto_sell(uid, mint) or {}
+        targets = cfg.get("mult_targets", [])
+        sym = cfg.get("symbol", mint[:6])
+        rows = []
+        for i, t in enumerate(targets):
+            status = "✅" if t.get("triggered") else "⏳"
+            label = f"{t['mult']}x → {t['sell_pct']}% {status}"
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"as:noop:{mint}"),
+                InlineKeyboardButton("✏️ Edit", callback_data=f"as:mt_edit:{mint}:{i}"),
+                InlineKeyboardButton("🗑️ Del",  callback_data=f"as:mt_del:{mint}:{i}"),
+            ])
+        rows.append([InlineKeyboardButton("➕ Add Mult Target", callback_data=f"as:mt_add:{mint}")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"as:view:{mint}")])
+        await query.edit_message_text(
+            f"*📈 Multiplier Targets — ${sym}*\n\nManage auto-sell targets by multiplier.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    elif action == "mt_add":
+        set_state(uid, waiting_for="as_mt_add_mult", as_mint=mint)
+        await query.edit_message_text(
+            "Enter multiplier (e.g. 3 for 3x):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:mult_targets_menu:{mint}")
+            ]])
+        )
+
+    elif action == "mt_edit":
+        idx = int(parts[3]) if len(parts) > 3 else 0
+        cfg = get_auto_sell(uid, mint) or {}
+        targets = cfg.get("mult_targets", [])
+        if 0 <= idx < len(targets):
+            t = targets[idx]
+            set_state(uid, waiting_for="as_mt_edit_mult", as_mint=mint, as_mt_idx=idx)
+            await query.edit_message_text(
+                f"Enter new multiplier for target {idx+1} (current: {t['mult']}x):",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"as:mult_targets_menu:{mint}")
+                ]])
+            )
+        else:
+            await query.answer("Invalid index.")
+
+    elif action == "mt_add_sp":
+        # Preset sell% button when adding a mult target
+        pct  = int(parts[3]) if len(parts) > 3 else 50
+        mult = get_state(uid, "as_mt_mult")
+        clear_state(uid)
+        cfg  = get_auto_sell(uid, mint)
+        if cfg and mult is not None:
+            label = f"{mult}x" if mult != int(mult) else f"{int(mult)}x"
+            cfg.setdefault("mult_targets", []).append({
+                "mult": mult, "sell_pct": pct, "triggered": False, "label": label
+            })
+            set_auto_sell(uid, mint, cfg)
+            sym = cfg.get("symbol", mint[:6])
+            await query.edit_message_text(
+                f"✅ Added: `{label}` → sell `{pct}%` for `${sym}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                ]])
+            )
+        else:
+            await query.edit_message_text("Session expired. Please try again.", reply_markup=back_kb("menu:autosell"))
+
+    elif action == "mt_edit_sp":
+        # Preset sell% button when editing a mult target
+        pct  = int(parts[3]) if len(parts) > 3 else 50
+        mult = get_state(uid, "as_mt_mult")
+        idx  = get_state(uid, "as_mt_idx")
+        clear_state(uid)
+        cfg  = get_auto_sell(uid, mint)
+        if cfg and mult is not None and idx is not None:
+            targets = cfg.get("mult_targets", [])
+            if 0 <= idx < len(targets):
+                label = f"{mult}x" if mult != int(mult) else f"{int(mult)}x"
+                targets[idx].update({"mult": mult, "sell_pct": pct, "label": label})
+                cfg["mult_targets"] = targets
+                set_auto_sell(uid, mint, cfg)
+                sym = cfg.get("symbol", mint[:6])
+                await query.edit_message_text(
+                    f"✅ Updated target {idx+1}: `{label}` → sell `{pct}%` for `${sym}`",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                    ]])
+                )
+            else:
+                await query.edit_message_text("Invalid target.", reply_markup=back_kb(f"as:mult_targets_menu:{mint}"))
+        else:
+            await query.edit_message_text("Session expired. Please try again.", reply_markup=back_kb("menu:autosell"))
+
+    elif action == "mt_sp_custom":
+        # User wants to type a custom sell % — state is already set (add or edit flow)
+        await query.edit_message_text(
+            "Enter sell % (1–100):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:mult_targets_menu:{mint}")
+            ]])
+        )
+
+    elif action == "noop":
+        await query.answer()
+
+    # ── MCap alerts menu ──────────────────────────────────────────────────────
+    elif action == "mcap_menu":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        alerts = cfg.get("mcap_alerts", [])
+        sym = cfg.get("symbol", mint[:6])
+        rows = []
+        for i, ma in enumerate(alerts):
+            status = "✅" if ma.get("triggered") else "⏳"
+            label = f"${ma['label']} — {status}"
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"as:noop:{mint}"),
+                InlineKeyboardButton("🗑️ Del", callback_data=f"as:ma_del:{mint}:{i}"),
+            ])
+        rows.append([InlineKeyboardButton("➕ Add MCap Alert", callback_data=f"as:ma_add:{mint}")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"as:view:{mint}")])
+        await query.edit_message_text(
+            f"*🏦 MCap Alerts — ${sym}*\n\nAlerts fire when market cap is reached.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    elif action == "ma_del":
+        idx = int(parts[3]) if len(parts) > 3 else 0
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            alerts = cfg.get("mcap_alerts", [])
+            if 0 <= idx < len(alerts):
+                alerts.pop(idx)
+                cfg["mcap_alerts"] = alerts
+                set_auto_sell(uid, mint, cfg)
+                await query.answer("Alert deleted.")
+            else:
+                await query.answer("Invalid index.")
+        # Re-show mcap_menu
+        cfg = get_auto_sell(uid, mint) or {}
+        alerts = cfg.get("mcap_alerts", [])
+        sym = cfg.get("symbol", mint[:6])
+        rows = []
+        for i, ma in enumerate(alerts):
+            status = "✅" if ma.get("triggered") else "⏳"
+            label = f"${ma['label']} — {status}"
+            rows.append([
+                InlineKeyboardButton(label, callback_data=f"as:noop:{mint}"),
+                InlineKeyboardButton("🗑️ Del", callback_data=f"as:ma_del:{mint}:{i}"),
+            ])
+        rows.append([InlineKeyboardButton("➕ Add MCap Alert", callback_data=f"as:ma_add:{mint}")])
+        rows.append([InlineKeyboardButton("⬅️ Back", callback_data=f"as:view:{mint}")])
+        await query.edit_message_text(
+            f"*🏦 MCap Alerts — ${sym}*\n\nAlerts fire when market cap is reached.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows)
+        )
+
+    elif action == "ma_add":
+        set_state(uid, waiting_for="as_ma_add", as_mint=mint)
+        await query.edit_message_text(
+            "Enter market cap target in USD (e.g. 250000 for $250K). Alert fires when reached.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:mcap_menu:{mint}")
+            ]])
+        )
+
+    # ── Breakeven stop menu ───────────────────────────────────────────────────
+    elif action == "be_menu":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        be = cfg.get("breakeven_stop", {"enabled": False, "activate_mult": 2.0, "triggered": False})
+        sym = cfg.get("symbol", mint[:6])
+        on = be.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        tri_txt = " ✅ Activated" if be.get("triggered") else ""
+        await query.edit_message_text(
+            f"*🛡️ Breakeven Stop — ${sym}*\n\n"
+            f"Status: {status_txt}{tri_txt}\n"
+            f"Activates at: `{be.get('activate_mult', 2.0)}x`\n\n"
+            f"When price hits the activation mult, stop-loss is moved to entry price.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:be_toggle:{mint}")],
+                [InlineKeyboardButton("Activates 1.5x", callback_data=f"as:be_mult:{mint}:1.5"),
+                 InlineKeyboardButton("Activates 2x",   callback_data=f"as:be_mult:{mint}:2"),
+                 InlineKeyboardButton("Activates 3x",   callback_data=f"as:be_mult:{mint}:3")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "be_toggle":
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            be = cfg.setdefault("breakeven_stop", {"enabled": False, "activate_mult": 2.0, "triggered": False})
+            be["enabled"] = not be.get("enabled", False)
+            set_auto_sell(uid, mint, cfg)
+        be = cfg.get("breakeven_stop", {})
+        sym = cfg.get("symbol", mint[:6])
+        on = be.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        tri_txt = " ✅ Activated" if be.get("triggered") else ""
+        await query.edit_message_text(
+            f"*🛡️ Breakeven Stop — ${sym}*\n\n"
+            f"Status: {status_txt}{tri_txt}\n"
+            f"Activates at: `{be.get('activate_mult', 2.0)}x`\n\n"
+            f"When price hits the activation mult, stop-loss is moved to entry price.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:be_toggle:{mint}")],
+                [InlineKeyboardButton("Activates 1.5x", callback_data=f"as:be_mult:{mint}:1.5"),
+                 InlineKeyboardButton("Activates 2x",   callback_data=f"as:be_mult:{mint}:2"),
+                 InlineKeyboardButton("Activates 3x",   callback_data=f"as:be_mult:{mint}:3")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "be_mult":
+        mult = float(parts[3]) if len(parts) > 3 else 2.0
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("breakeven_stop", {})["activate_mult"] = mult
+            set_auto_sell(uid, mint, cfg)
+            await query.answer(f"Breakeven activates at {mult}x")
+        be = cfg.get("breakeven_stop", {})
+        sym = cfg.get("symbol", mint[:6])
+        on = be.get("enabled", False)
+        toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        tri_txt = " ✅ Activated" if be.get("triggered") else ""
+        await query.edit_message_text(
+            f"*🛡️ Breakeven Stop — ${sym}*\n\n"
+            f"Status: {status_txt}{tri_txt}\n"
+            f"Activates at: `{be.get('activate_mult', 2.0)}x`\n\n"
+            f"When price hits the activation mult, stop-loss is moved to entry price.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl, callback_data=f"as:be_toggle:{mint}")],
+                [InlineKeyboardButton("Activates 1.5x", callback_data=f"as:be_mult:{mint}:1.5"),
+                 InlineKeyboardButton("Activates 2x",   callback_data=f"as:be_mult:{mint}:2"),
+                 InlineKeyboardButton("Activates 3x",   callback_data=f"as:be_mult:{mint}:3")],
+                [InlineKeyboardButton("⬅️ Back", callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    # ── Strategy presets ──────────────────────────────────────────────────────
+    elif action == "strategies":
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        sym = cfg.get("symbol", mint[:6])
+        await query.edit_message_text(
+            f"*⚡ Strategy Presets — ${sym}*\n\n"
+            "Choose a preset strategy. This will overwrite your current targets, stop-loss, and exit settings.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏃 Scalp",    callback_data=f"as:strategy_apply:{mint}:scalp")],
+                [InlineKeyboardButton("📊 Standard", callback_data=f"as:strategy_apply:{mint}:standard")],
+                [InlineKeyboardButton("💎 Diamond",  callback_data=f"as:strategy_apply:{mint}:diamond")],
+                [InlineKeyboardButton("🌙 Moon Bag", callback_data=f"as:strategy_apply:{mint}:moon")],
+                [InlineKeyboardButton("⬅️ Back",     callback_data=f"as:view:{mint}")],
+            ])
+        )
+
+    elif action == "strategy_apply":
+        strategy_name = parts[3] if len(parts) > 3 else "standard"
+        cfg = get_auto_sell(uid, mint)
+        if not cfg:
+            await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
+            return
+        preset = STRATEGIES.get(strategy_name)
+        if not preset:
+            await query.answer("Unknown strategy.")
+            return
+        buy_time = cfg.get("time_exit", {}).get("buy_time", time.time())
+        cfg["mult_targets"]   = preset["mult_targets"]
+        cfg["stop_loss"]      = preset["stop_loss"]
+        cfg["trailing_stop"]  = preset["trailing_stop"]
+        cfg["trailing_tp"]    = preset["trailing_tp"]
+        te = dict(preset["time_exit"])
+        te["buy_time"] = buy_time
+        cfg["time_exit"] = te
+        set_auto_sell(uid, mint, cfg)
+        sym = cfg.get("symbol", mint[:6])
+        names = {"scalp": "🏃 Scalp", "standard": "📊 Standard", "diamond": "💎 Diamond", "moon": "🌙 Moon Bag"}
+        await query.edit_message_text(
+            f"✅ *{names.get(strategy_name, strategy_name)} strategy applied to ${sym}!*\n\n"
+            + _format_autosell_config(cfg),
+            parse_mode="Markdown",
+            reply_markup=autosell_token_kb(uid, mint)
+        )
+
 
 async def custom_target_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
@@ -2209,10 +3973,112 @@ async def custom_target_type_callback(update: Update, context: ContextTypes.DEFA
 
 
 async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer("Refreshing...")
-    await query.edit_message_text("Loading...")
-    await _show_portfolio(query.edit_message_text, query.from_user.id)
+    query  = update.callback_query
+    uid    = query.from_user.id
+    action = query.data.split(":")[1] if len(query.data.split(":")) > 1 else "refresh"
+
+    if action == "refresh":
+        await query.answer("Refreshing...")
+        await query.edit_message_text("Loading...")
+        await _show_portfolio(query.edit_message_text, uid)
+
+    elif action == "sell_all_confirm":
+        await query.answer()
+        mode = get_mode(uid)
+        if mode == "live":
+            pubkey   = get_wallet_pubkey()
+            accounts = get_token_accounts(pubkey) if pubkey else []
+            count    = len(accounts)
+        else:
+            portfolio = get_portfolio(uid)
+            count     = len([k for k, v in portfolio.items() if k != "SOL" and v > 0])
+        if count == 0:
+            await query.answer("No token positions to sell.", show_alert=True)
+            return
+        mode_label = "🔴 Live" if mode == "live" else "📄 Paper"
+        await query.edit_message_text(
+            f"⚠️ *Sell All — Confirm*\n\n"
+            f"Sell *{count} token position(s)* at 100% each.\n"
+            f"Mode: {mode_label}\n\n"
+            f"This cannot be undone. Proceed?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Yes, Sell All", callback_data="portfolio:sell_all_exec"),
+                 InlineKeyboardButton("❌ Cancel",        callback_data="portfolio:refresh")],
+            ])
+        )
+
+    elif action == "sell_all_exec":
+        await query.answer("Executing sell all...")
+        mode    = get_mode(uid)
+        results = []
+
+        if mode == "paper":
+            portfolio = get_portfolio(uid)
+            positions = {k: v for k, v in list(portfolio.items()) if k != "SOL" and v > 0}
+            total_sol = 0.0
+            for mint, raw_held in positions.items():
+                pair  = fetch_sol_pair(mint)
+                sym   = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
+                quote = jupiter_quote(mint, SOL_MINT, raw_held)
+                if quote and "outAmount" in quote:
+                    sol_recv = int(quote["outAmount"]) / 1e9
+                    portfolio.pop(mint, None)
+                    portfolio["SOL"] = portfolio.get("SOL", 0) + sol_recv
+                    total_sol += sol_recv
+                    remove_auto_sell(uid, mint)
+                    results.append(f"✅ `${sym}` → `{sol_recv:.4f} SOL`")
+                else:
+                    results.append(f"❌ `${sym}` — quote failed")
+            update_portfolio(uid, portfolio)
+            summary = "\n".join(results) or "Nothing sold."
+            await query.edit_message_text(
+                f"📄 *Sell All Complete*\n\n{summary}\n\n"
+                f"Total received: `{total_sol:.4f} SOL`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")
+                ]])
+            )
+
+        else:
+            pubkey   = get_wallet_pubkey()
+            accounts = get_token_accounts(pubkey) if pubkey else []
+            if not accounts:
+                await query.edit_message_text(
+                    "No token positions found in live wallet.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")
+                    ]])
+                )
+                return
+            total_sol = 0.0
+            for acc in accounts:
+                mint     = acc["mint"]
+                raw_held = acc["amount"]
+                pair     = fetch_sol_pair(mint)
+                sym      = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
+                quote    = jupiter_quote(mint, SOL_MINT, raw_held)
+                if quote and "outAmount" in quote:
+                    sig      = execute_swap_live(quote)
+                    sol_recv = int(quote.get("outAmount", 0)) / 1e9
+                    if "ERROR" in sig or "error" in sig.lower():
+                        results.append(f"❌ `${sym}` — swap failed: `{sig[:40]}`")
+                    else:
+                        total_sol += sol_recv
+                        remove_auto_sell(uid, mint)
+                        results.append(f"✅ `${sym}` → `~{sol_recv:.4f} SOL`")
+                else:
+                    results.append(f"❌ `${sym}` — quote failed")
+            summary = "\n".join(results) or "Nothing sold."
+            await query.edit_message_text(
+                f"🔴 *Sell All Complete*\n\n{summary}\n\n"
+                f"Est. total: `~{total_sol:.4f} SOL`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")
+                ]])
+            )
 
 
 async def qt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2968,6 +4834,375 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]])
             )
 
+    elif state == "as_sl_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 99:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 99 (e.g. 40 for 40% drop).")
+            return
+        mint = get_state(uid, "as_mint") or get_state(uid, "custom_mint")
+        clear_state(uid)
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("stop_loss", {})["pct"] = val
+            set_auto_sell(uid, mint, cfg)
+            sym = cfg.get("symbol", mint[:6])
+            await update.message.reply_text(
+                f"✅ Stop-loss trigger set to `{val}%` drop for `${sym}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Stop-Loss Settings", callback_data=f"as:sl_menu:{mint}")
+                ]])
+            )
+
+    elif state == "as_sl_sell_pct_input":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        mint = get_state(uid, "as_mint") or get_state(uid, "custom_mint")
+        clear_state(uid)
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("stop_loss", {})["sell_pct"] = val
+            set_auto_sell(uid, mint, cfg)
+            sym = cfg.get("symbol", mint[:6])
+            await update.message.reply_text(
+                f"✅ Stop-loss sell set to `{val}%` for `${sym}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Stop-Loss Settings", callback_data=f"as:sl_menu:{mint}")
+                ]])
+            )
+
+    elif state == "as_trail_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 99:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 99 (e.g. 25 for 25% drop from peak).")
+            return
+        mint = get_state(uid, "as_mint") or get_state(uid, "custom_mint")
+        clear_state(uid)
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("trailing_stop", {})["trail_pct"] = val
+            set_auto_sell(uid, mint, cfg)
+            sym = cfg.get("symbol", mint[:6])
+            await update.message.reply_text(
+                f"✅ Trailing stop set to `{val}%` from peak for `${sym}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Trail Stop Settings", callback_data=f"as:trail_menu:{mint}")
+                ]])
+            )
+
+    elif state == "as_trail_sell_pct_input":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        mint = get_state(uid, "as_mint") or get_state(uid, "custom_mint")
+        clear_state(uid)
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            cfg.setdefault("trailing_stop", {})["sell_pct"] = val
+            set_auto_sell(uid, mint, cfg)
+            sym = cfg.get("symbol", mint[:6])
+            await update.message.reply_text(
+                f"✅ Trailing stop sell set to `{val}%` for `${sym}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Trail Stop Settings", callback_data=f"as:trail_menu:{mint}")
+                ]])
+            )
+
+    elif state == "as_mt_add_mult":
+        try:
+            mult = float(text)
+            if mult <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid multiplier (e.g. 3 for 3x).")
+            return
+        mint  = get_state(uid, "as_mint")
+        label = f"{mult}x" if mult != int(mult) else f"{int(mult)}x"
+        set_state(uid, waiting_for="as_mt_add_sell_pct", as_mt_mult=mult, as_mint=mint)
+        await update.message.reply_text(
+            f"Multiplier: `{label}`\n\nHow much to sell at this target?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("25%",  callback_data=f"as:mt_add_sp:{mint}:25"),
+                 InlineKeyboardButton("50%",  callback_data=f"as:mt_add_sp:{mint}:50"),
+                 InlineKeyboardButton("75%",  callback_data=f"as:mt_add_sp:{mint}:75"),
+                 InlineKeyboardButton("100%", callback_data=f"as:mt_add_sp:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom %", callback_data=f"as:mt_sp_custom:{mint}")],
+                [InlineKeyboardButton("❌ Cancel",    callback_data=f"as:mult_targets_menu:{mint}")],
+            ])
+        )
+
+    elif state == "as_mt_add_sell_pct":
+        try:
+            sell_pct = int(float(text))
+            if sell_pct < 1 or sell_pct > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        mint = get_state(uid, "as_mint")
+        mult = get_state(uid, "as_mt_mult")
+        clear_state(uid)
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            label = f"{mult}x" if mult != int(mult) else f"{int(mult)}x"
+            cfg.setdefault("mult_targets", []).append({
+                "mult": mult, "sell_pct": sell_pct, "triggered": False, "label": label
+            })
+            set_auto_sell(uid, mint, cfg)
+            sym = cfg.get("symbol", mint[:6])
+            await update.message.reply_text(
+                f"✅ Added target: `{label}` → sell `{sell_pct}%` for `${sym}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                ]])
+            )
+
+    elif state == "as_mt_edit_mult":
+        try:
+            mult = float(text)
+            if mult <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid multiplier (e.g. 3 for 3x).")
+            return
+        mint  = get_state(uid, "as_mint")
+        idx   = get_state(uid, "as_mt_idx")
+        label = f"{mult}x" if mult != int(mult) else f"{int(mult)}x"
+        set_state(uid, waiting_for="as_mt_edit_sell_pct", as_mt_mult=mult, as_mint=mint, as_mt_idx=idx)
+        await update.message.reply_text(
+            f"New multiplier: `{label}`\n\nHow much to sell at this target?",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("25%",  callback_data=f"as:mt_edit_sp:{mint}:25"),
+                 InlineKeyboardButton("50%",  callback_data=f"as:mt_edit_sp:{mint}:50"),
+                 InlineKeyboardButton("75%",  callback_data=f"as:mt_edit_sp:{mint}:75"),
+                 InlineKeyboardButton("100%", callback_data=f"as:mt_edit_sp:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom %", callback_data=f"as:mt_sp_custom:{mint}")],
+                [InlineKeyboardButton("❌ Cancel",    callback_data=f"as:mult_targets_menu:{mint}")],
+            ])
+        )
+
+    elif state == "as_mt_edit_sell_pct":
+        try:
+            sell_pct = int(float(text))
+            if sell_pct < 1 or sell_pct > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        mint = get_state(uid, "as_mint")
+        mult = get_state(uid, "as_mt_mult")
+        idx  = get_state(uid, "as_mt_idx")
+        clear_state(uid)
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            targets = cfg.get("mult_targets", [])
+            if idx is not None and 0 <= idx < len(targets):
+                label = f"{mult}x" if mult != int(mult) else f"{int(mult)}x"
+                targets[idx].update({"mult": mult, "sell_pct": sell_pct, "label": label})
+                cfg["mult_targets"] = targets
+                set_auto_sell(uid, mint, cfg)
+                sym = cfg.get("symbol", mint[:6])
+                await update.message.reply_text(
+                    f"✅ Updated target {idx+1}: `{label}` → sell `{sell_pct}%` for `${sym}`",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                    ]])
+                )
+            else:
+                await update.message.reply_text("Invalid target index.")
+
+    elif state == "as_ma_add":
+        try:
+            val = float(text.replace(",", "").replace("$", ""))
+            if val <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid USD amount (e.g. 250000 for $250K).")
+            return
+        mint = get_state(uid, "as_mint")
+        clear_state(uid)
+        cfg = get_auto_sell(uid, mint)
+        if cfg:
+            if val < 1_000_000:
+                label = f"{val/1000:.0f}K"
+            else:
+                label = f"{val/1_000_000:.1f}M"
+            cfg.setdefault("mcap_alerts", []).append({
+                "mcap": val, "triggered": False, "label": label
+            })
+            set_auto_sell(uid, mint, cfg)
+            sym = cfg.get("symbol", mint[:6])
+            await update.message.reply_text(
+                f"✅ MCap alert added for `${sym}` at `${label}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🏦 MCap Alerts", callback_data=f"as:mcap_menu:{mint}")
+                ]])
+            )
+
+    elif state == "ab_sol_amount":
+        try:
+            val = float(text)
+            if val <= 0 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid SOL amount (e.g. 0.1).")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["sol_amount"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Auto-buy SOL amount set to `{val} SOL`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_min_score":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a score between 1 and 100.")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["min_score"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Auto-buy min score set to `{val}/100`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_max_mcap":
+        try:
+            val = float(text.replace(",", "").replace("$", "").replace("k", "000").replace("K", "000").replace("m", "000000").replace("M", "000000"))
+            if val <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid MCap (e.g. 500000 or 500K).")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["max_mcap"] = int(val)
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Auto-buy max MCap set to `${int(val):,}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_daily_limit":
+        try:
+            val = float(text)
+            if val <= 0 or val > 1000:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid daily limit in SOL (e.g. 1.0).")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["daily_limit_sol"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Daily auto-buy limit set to `{val} SOL`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "gsl_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 99:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 99.")
+            return
+        clear_state(uid)
+        gsl = get_global_sl()
+        gsl["pct"] = val
+        set_global_sl(gsl)
+        await update.message.reply_text(
+            f"✅ Global stop-loss trigger set to `{val}%` drop",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🌍 Global SL Settings", callback_data="gsl:menu")
+            ]])
+        )
+
+    elif state == "gsl_sell_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        clear_state(uid)
+        gsl = get_global_sl()
+        gsl["sell_pct"] = val
+        set_global_sl(gsl)
+        await update.message.reply_text(
+            f"✅ Global stop-loss sell amount set to `{val}%`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🌍 Global SL Settings", callback_data="gsl:menu")
+            ]])
+        )
+
+    elif state == "scanner_alert_channel":
+        # Accept channel ID (numeric, e.g. -1001234567890) or @username
+        ch = text.strip()
+        if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
+            await update.message.reply_text(
+                "Enter a channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+                parse_mode="Markdown"
+            )
+            return
+        sc.set_alert_channel(ch)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ *Alert channel set to* `{ch}`\n\n"
+            f"Every scanner alert will now be posted there too.\n"
+            f"Make sure the bot is an admin in the channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📣 Channel Settings", callback_data="scanner:alert_channel_menu"),
+            ]])
+        )
+
     else:
         # Natural language scanner triggers
         tl = text.lower()
@@ -3094,6 +5329,48 @@ def _build_analytics(uid: int, days: int = None) -> tuple:
             f"{n}({nar_alert_counts[n]})" for n in top_nar[:3]
         ))
 
+    # ── Auto-buy performance ──────────────────────────────────────────────────
+    ab_trades = [t for t in trades if t.get("heat_score") is not None]
+    if ab_trades:
+        ab_buys  = [t for t in ab_trades if t.get("action") == "buy"]
+        ab_sells_with_pnl = [t for t in ab_trades if t.get("action") == "sell" and t.get("pnl_pct") is not None]
+        ab_wins  = [t for t in ab_sells_with_pnl if t["pnl_pct"] > 0]
+        ab_wr    = len(ab_wins) / len(ab_sells_with_pnl) * 100 if ab_sells_with_pnl else 0
+        avg_score_bought = sum(t["heat_score"] for t in ab_buys) / len(ab_buys) if ab_buys else 0
+        lines.append(f"\n*🤖 Auto-Buy Performance*")
+        lines.append(f"Auto-buys: {len(ab_buys)} · Closed: {len(ab_sells_with_pnl)}")
+        if ab_sells_with_pnl:
+            avg_ab_pnl = sum(t["pnl_pct"] for t in ab_sells_with_pnl) / len(ab_sells_with_pnl)
+            lines.append(f"Win Rate: {ab_wr:.0f}% · Avg P&L: {avg_ab_pnl:+.0f}%")
+        lines.append(f"Avg Score at Buy: {avg_score_bought:.0f}/100")
+
+    # ── Best calls leaderboard ────────────────────────────────────────────────
+    scanner_log = sc.load_log()
+    alerted_log = [e for e in scanner_log if e.get("alerted") and e.get("mint")]
+    # De-dupe by mint, keep first occurrence
+    seen_mints: dict[str, dict] = {}
+    for e in sorted(alerted_log, key=lambda x: x.get("timestamp", 0)):
+        if e["mint"] not in seen_mints:
+            seen_mints[e["mint"]] = e
+    # Enrich with current mcap
+    enriched_calls = []
+    for e in list(seen_mints.values())[-20:]:  # check last 20 alerted tokens
+        try:
+            price, cur_mcap = fetch_token_price(e["mint"])
+            alert_mcap = e.get("mcap", 0) or 0
+            if alert_mcap and cur_mcap:
+                gain = ((cur_mcap - alert_mcap) / alert_mcap) * 100
+                enriched_calls.append({"symbol": e.get("symbol","?"), "gain": gain,
+                                       "score": e.get("score", 0), "mint": e["mint"]})
+        except Exception:
+            continue
+    if enriched_calls:
+        top_calls = sorted(enriched_calls, key=lambda x: -x["gain"])[:5]
+        lines.append(f"\n*🏆 Best Calls (MCap Gain)*")
+        for c in top_calls:
+            arrow = "🚀" if c["gain"] > 100 else ("📈" if c["gain"] > 0 else "📉")
+            lines.append(f"  {arrow} `${c['symbol']}` {c['gain']:+.0f}% — score `{c['score']}`")
+
     text = "\n".join(lines)
     kb   = InlineKeyboardMarkup([[
         InlineKeyboardButton("All", callback_data="analytics:all"),
@@ -3102,6 +5379,96 @@ def _build_analytics(uid: int, days: int = None) -> tuple:
         InlineKeyboardButton("🔄",  callback_data="analytics:all"),
     ]])
     return text, kb
+
+
+async def _build_pnl(uid: int) -> str:
+    """Build P&L summary: realized (trade log) + unrealized (open positions vs buy price)."""
+    mode     = get_mode(uid)
+    trades   = load_trade_log()
+    my_trades = [t for t in trades if t.get("uid") == uid]
+    buys     = [t for t in my_trades if t.get("action") == "buy"]
+    sells    = [t for t in my_trades if t.get("action") == "sell"]
+    closed   = [t for t in sells if t.get("pnl_pct") is not None]
+
+    # Realized
+    sol_spent    = sum(t.get("sol_amount", 0) or 0 for t in buys)
+    sol_received = sum(t.get("sol_received", 0) or 0 for t in sells)
+    realized_sol = sol_received - sol_spent
+    wins   = [t for t in closed if t["pnl_pct"] > 0]
+    losses = [t for t in closed if t["pnl_pct"] <= 0]
+    win_rate = len(wins) / len(closed) * 100 if closed else 0
+
+    # Unrealized — check open positions in auto_sell configs
+    as_configs = load_auto_sell().get(str(uid), {})
+    portfolio  = get_portfolio(uid)
+    unreal_lines = []
+    total_unreal_sol = 0.0
+    for mint, cfg in as_configs.items():
+        buy_price = cfg.get("buy_price_usd", 0)
+        symbol    = cfg.get("symbol", mint[:6])
+        decimals  = cfg.get("decimals", 6)
+        if not buy_price:
+            continue
+        raw_held = portfolio.get(mint, 0) if mode == "paper" else 0
+        if mode == "live":
+            # Try to get current balance from auto_sell initial_raw as estimate
+            raw_held = cfg.get("initial_raw", 0)
+        if not raw_held:
+            continue
+        try:
+            price, _ = fetch_token_price(mint)
+            if not price:
+                continue
+            pnl_pct = ((price - buy_price) / buy_price) * 100
+            ui_amt  = raw_held / (10 ** decimals)
+            cur_val_sol = price * ui_amt / 150  # rough SOL estimate
+            arrow = "📈" if pnl_pct > 0 else "📉"
+            unreal_lines.append(
+                f"  {arrow} `${symbol}` — {pnl_pct:+.0f}% (buy `${buy_price:.6f}` → now `${price:.6f}`)"
+            )
+            total_unreal_sol += cur_val_sol
+        except Exception:
+            continue
+
+    lines = ["*💰 P&L Summary*\n"]
+    lines.append(f"*Mode:* {'📄 Paper' if mode == 'paper' else '🔴 Live'}")
+    lines.append(f"*Total Trades:* {len(buys)} buys · {len(sells)} sells\n")
+
+    lines.append("*Realized*")
+    lines.append(f"SOL Spent:    `{sol_spent:.4f}`")
+    lines.append(f"SOL Received: `{sol_received:.4f}`")
+    net_arrow = "📈" if realized_sol >= 0 else "📉"
+    lines.append(f"Net SOL: {net_arrow} `{realized_sol:+.4f}`")
+    if closed:
+        lines.append(f"Win Rate: `{win_rate:.0f}%` ({len(wins)}W / {len(losses)}L)")
+
+    if unreal_lines:
+        lines.append("\n*Unrealized (open positions)*")
+        lines.extend(unreal_lines)
+    elif as_configs:
+        lines.append("\n_No open positions with price data._")
+
+    if not buys and not as_configs:
+        lines.append("\n_No trades yet. Buy a token to start tracking._")
+
+    return "\n".join(lines)
+
+
+async def cmd_pnl(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    msg = await update.message.reply_text("Calculating P&L...")
+    uid = update.effective_user.id
+    try:
+        text = await _build_pnl(uid)
+    except Exception as e:
+        text = f"Error building P&L: {e}"
+    await msg.edit_text(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Refresh",   callback_data="pnl:refresh"),
+            InlineKeyboardButton("📊 Analytics", callback_data="analytics:all"),
+            InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
+        ]])
+    )
 
 
 async def cmd_analytics(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -3120,10 +5487,141 @@ async def analytics_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     await query.edit_message_text(text, reply_markup=kb, parse_mode="Markdown")
 
 
+async def pnl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    uid = query.from_user.id
+    try:
+        text = await _build_pnl(uid)
+    except Exception as e:
+        text = f"Error: {e}"
+    await query.edit_message_text(
+        text, parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Refresh",   callback_data="pnl:refresh"),
+            InlineKeyboardButton("📊 Analytics", callback_data="analytics:all"),
+            InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
+        ]])
+    )
+
+
+# ─── Global Stop-Loss callback ────────────────────────────────────────────────
+
+def _gsl_menu_kb(gsl: dict) -> InlineKeyboardMarkup:
+    on         = gsl.get("enabled", False)
+    toggle_lbl = "⏸️ Disable" if on else "▶️ Enable"
+    status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(toggle_lbl, callback_data="gsl:toggle")],
+        [InlineKeyboardButton("Drop 25%", callback_data="gsl:pct:25"),
+         InlineKeyboardButton("Drop 50%", callback_data="gsl:pct:50"),
+         InlineKeyboardButton("Drop 75%", callback_data="gsl:pct:75")],
+        [InlineKeyboardButton("✏️ Custom drop %", callback_data="gsl:pct_custom")],
+        [InlineKeyboardButton("Sell 25%",  callback_data="gsl:sell_pct:25"),
+         InlineKeyboardButton("Sell 50%",  callback_data="gsl:sell_pct:50"),
+         InlineKeyboardButton("Sell 75%",  callback_data="gsl:sell_pct:75"),
+         InlineKeyboardButton("Sell 100%", callback_data="gsl:sell_pct:100")],
+        [InlineKeyboardButton("✏️ Custom sell %", callback_data="gsl:sell_pct_custom")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:autosell")],
+    ])
+
+
+async def gsl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+    await query.answer()
+
+    gsl = get_global_sl()
+
+    if action == "menu":
+        on = gsl.get("enabled", False)
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        await query.edit_message_text(
+            f"*🌍 Global Stop-Loss*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trigger: price drops `{gsl.get('pct', 50)}%` from buy price\n"
+            f"Action: sell `{gsl.get('sell_pct', 100)}%` of position\n\n"
+            f"Applies to ALL tracked positions as a safety net.",
+            parse_mode="Markdown",
+            reply_markup=_gsl_menu_kb(gsl)
+        )
+
+    elif action == "toggle":
+        gsl["enabled"] = not gsl.get("enabled", False)
+        set_global_sl(gsl)
+        on = gsl["enabled"]
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        await query.edit_message_text(
+            f"*🌍 Global Stop-Loss*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trigger: price drops `{gsl.get('pct', 50)}%` from buy price\n"
+            f"Action: sell `{gsl.get('sell_pct', 100)}%` of position\n\n"
+            f"Applies to ALL tracked positions as a safety net.",
+            parse_mode="Markdown",
+            reply_markup=_gsl_menu_kb(gsl)
+        )
+
+    elif action == "pct":
+        pct = int(parts[2])
+        gsl["pct"] = pct
+        set_global_sl(gsl)
+        await query.answer(f"Drop threshold set to {pct}%")
+        on = gsl.get("enabled", False)
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        await query.edit_message_text(
+            f"*🌍 Global Stop-Loss*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trigger: price drops `{gsl.get('pct', 50)}%` from buy price\n"
+            f"Action: sell `{gsl.get('sell_pct', 100)}%` of position\n\n"
+            f"Applies to ALL tracked positions as a safety net.",
+            parse_mode="Markdown",
+            reply_markup=_gsl_menu_kb(gsl)
+        )
+
+    elif action == "sell_pct":
+        pct = int(parts[2])
+        gsl["sell_pct"] = pct
+        set_global_sl(gsl)
+        await query.answer(f"Sell amount set to {pct}%")
+        on = gsl.get("enabled", False)
+        status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+        await query.edit_message_text(
+            f"*🌍 Global Stop-Loss*\n\n"
+            f"Status: {status_txt}\n"
+            f"Trigger: price drops `{gsl.get('pct', 50)}%` from buy price\n"
+            f"Action: sell `{gsl.get('sell_pct', 100)}%` of position\n\n"
+            f"Applies to ALL tracked positions as a safety net.",
+            parse_mode="Markdown",
+            reply_markup=_gsl_menu_kb(gsl)
+        )
+
+    elif action == "pct_custom":
+        set_state(uid, waiting_for="gsl_pct")
+        await query.edit_message_text(
+            "Enter custom drop % to trigger global stop-loss (e.g. 40 for 40% drop):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gsl:menu")
+            ]])
+        )
+
+    elif action == "sell_pct_custom":
+        set_state(uid, waiting_for="gsl_sell_pct")
+        await query.edit_message_text(
+            "Enter sell % when global stop-loss fires (1–100):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gsl:menu")
+            ]])
+        )
+
+
 # ─── Bot command list ─────────────────────────────────────────────────────────
 
 
 async def post_init(app):
+    # Inject auto-buy callback into pumpfeed (avoids circular import)
+    pf.set_grad_autobuy_fn(execute_auto_buy)
     # Start pump.fun live feed WebSocket listener as background task
     asyncio.create_task(pf.run_pumpfeed(app.bot))
     # Poll pump.fun API for graduated tokens → pumpgrad DM notifications
@@ -3133,7 +5631,7 @@ async def post_init(app):
         BotCommand("start",      "Launch the bot"),
         BotCommand("menu",       "Show all options & buttons"),
         BotCommand("price",      "Look up a token price"),
-        BotCommand("top",        "Top 10 Solana meme coins by volume"),
+        BotCommand("top",        "Our top scouted tokens ranked by MCap gain"),
         BotCommand("buy",        "Buy a token (paper or live)"),
         BotCommand("sell",       "Sell a token from your portfolio"),
         BotCommand("portfolio",  "View your holdings & balances"),
@@ -3150,6 +5648,8 @@ async def post_init(app):
         BotCommand("wallet",     "Manage your Solana wallet"),
         BotCommand("pumplive",   "Toggle live pump.fun launch notifications"),
         BotCommand("pumpgrad",   "Alerts when pump.fun tokens hit 100% bonding curve"),
+        BotCommand("autobuy",    "Auto-buy tokens when scanner fires alerts"),
+        BotCommand("pnl",        "View realized & unrealized P&L summary"),
     ])
 
 
@@ -3184,6 +5684,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
+    app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
+    app.add_handler(CommandHandler("pnl",        cmd_pnl))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
@@ -3208,6 +5710,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(pumpgrad_callback,            pattern=r"^pumpgrad:"))
     app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
     app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
+    app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))
+    app.add_handler(CallbackQueryHandler(pnl_callback,                 pattern=r"^pnl:"))
+    app.add_handler(CallbackQueryHandler(gsl_callback,                 pattern=r"^gsl:"))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
@@ -3219,7 +5724,7 @@ if __name__ == "__main__":
     async def run_scanner_job(ctx):
         s        = sc.load_state()
         chat_ids = s.get("scan_targets", [])
-        await sc.run_scan(ctx.bot, chat_ids)
+        await sc.run_scan(ctx.bot, chat_ids, on_alert=handle_scanner_autobuy)
 
     app.job_queue.run_repeating(run_scanner_job, interval=15, first=5)
 
