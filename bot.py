@@ -1420,10 +1420,10 @@ async def _show_top(send_fn):
     cutoff = _time.time() - 86400
     log    = sc.load_log()
 
-    # All scored tokens from the last 24h with a recorded mcap
+    # All scored tokens from the last 24h (mcap optional — older entries may not have it)
     recent = [
         e for e in log
-        if e.get("mint") and e.get("mcap") and e.get("timestamp", 0) >= cutoff and not e.get("dq")
+        if e.get("mint") and e.get("timestamp", 0) >= cutoff and not e.get("dq")
     ]
 
     if not recent:
