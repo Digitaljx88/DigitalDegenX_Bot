@@ -19,6 +19,7 @@ import scanner as sc
 import pumpfun
 import pumpfeed as pf
 import intelligence_tracker as intel
+import wallet_manager as wm
 
 import config as _cfg
 from config import (
@@ -3069,22 +3070,84 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_wallet_menu(query.edit_message_text)
 
     elif action == "create":
-        from solders.keypair import Keypair as _KP
-        kp     = _KP()
-        pubkey = str(kp.pubkey())
-        secret = kp.to_base58_string()
-        set_state(uid, pending_wallet_key=secret)
+        # Show backup mode choice
         await query.edit_message_text(
-            f"*✨ New Wallet Generated*\n\n"
-            f"📬 Address: `{pubkey}`\n\n"
-            f"🔑 Private Key:\n`{secret}`\n\n"
-            f"⚠️ *SAVE THIS KEY NOW — it cannot be recovered!*\n\n"
-            f"Tap Save to set this as your active wallet.",
+            "*✨ Create New Wallet*\n\n"
+            "Choose your seed phrase backup method:\n\n"
+            "🌱 *Manual Backup*\n"
+            "You write down 12 words\n"
+            "Bot stores nothing\n"
+            "Highest security\n\n"
+            "🔐 *Encrypted Backup*\n"
+            "12 words encrypted with password\n"
+            "Stored in bot safely\n"
+            "Easier recovery",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✅ Save as Active Wallet", callback_data="wallet:save_pending")],
-                [InlineKeyboardButton("❌ Discard",               callback_data="wallet:menu")],
+                [InlineKeyboardButton("🌱 Manual Backup",    callback_data="wallet:create_manual"),
+                 InlineKeyboardButton("🔐 Encrypted Backup", callback_data="wallet:create_encrypted")],
+                [InlineKeyboardButton("❌ Cancel",           callback_data="wallet:menu")],
             ])
+        )
+
+    elif action == "create_manual":
+        try:
+            wallet_data = wm.create_wallet_with_mnemonic(backup_mode="manual")
+            set_state(uid, pending_wallet_mnemonic=wallet_data["mnemonic"],
+                         pending_wallet_pubkey=wallet_data["public_key"],
+                         pending_wallet_privkey=wallet_data["private_key_base58"])
+            msg = wm.format_wallet_creation_message(wallet_data)
+            await query.edit_message_text(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ I saved the 12 words", callback_data="wallet:save_pending_bip39")],
+                    [InlineKeyboardButton("❌ Start over",           callback_data="wallet:create")],
+                ])
+            )
+        except Exception as e:
+            await query.edit_message_text(f"❌ Error: {str(e)[:100]}", reply_markup=back_kb())
+
+    elif action == "create_encrypted":
+        set_state(uid, create_mode="bip39_encrypted")
+        await query.edit_message_text(
+            "*🔐 Encrypted Backup*\n\n"
+            "Choose a strong password to encrypt your seed phrase.\n\n"
+            "This password:\n"
+            "• Is NOT stored anywhere\n"
+            "• You must remember it to recover\n"
+            "• Can be any length (longer = better)\n\n"
+            "_Type your password below:_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:create")]])
+        )
+        set_state(uid, waiting_for="wallet_backup_password")
+
+    elif action == "save_pending_bip39":
+        pubkey = get_state(uid, "pending_wallet_pubkey")
+        privkey = get_state(uid, "pending_wallet_privkey")
+        privkey_old = get_state(uid, "pending_wallet_privkey")
+        
+        if not pubkey or not privkey:
+            await query.edit_message_text("Error: No wallet pending.", reply_markup=back_kb())
+            return
+        
+        # Clear all pending data
+        clear_state(uid)
+        
+        # Save to config
+        save_wallet_key(privkey)
+        
+        await query.edit_message_text(
+            f"✅ *Wallet Saved!*\n\n"
+            f"Address: `{pubkey}`\n\n"
+            f"✨ Your seed phrase is your backup.\n"
+            f"🔐 Recovery code verified.\n\n"
+            f"Switch to Live mode to start trading.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")
+            ]])
         )
 
     elif action == "save_pending":
@@ -3106,12 +3169,41 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "import":
+        # Show import choice
+        await query.edit_message_text(
+            "*📥 Import / Recover Wallet*\n\n"
+            "Choose how you want to import a wallet:\n\n"
+            "🔑 *Private Key*\n"
+            "Import using base58 private key\n\n"
+            "🌱 *Seed Phrase*\n"
+            "Recover using 12-word mnemonic",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔑 Private Key",  callback_data="wallet:import_key"),
+                 InlineKeyboardButton("🌱 Seed Phrase",  callback_data="wallet:import_seed")],
+                [InlineKeyboardButton("❌ Cancel",       callback_data="wallet:menu")],
+            ])
+        )
+
+    elif action == "import_key":
         set_state(uid, waiting_for="wallet_import_key")
         await query.edit_message_text(
-            "*📥 Import Wallet*\n\nPaste your base58 private key:",
+            "*📥 Import from Private Key*\n\nPaste your base58 private key:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")
+                InlineKeyboardButton("❌ Cancel", callback_data="wallet:import")
+            ]])
+        )
+
+    elif action == "import_seed":
+        set_state(uid, waiting_for="wallet_import_seed")
+        await query.edit_message_text(
+            "*🌱 Recover from Seed Phrase*\n\n"
+            "Paste your 12 words separated by spaces:\n\n"
+            "_Example: word1 word2 word3 ... word12_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="wallet:import")
             ]])
         )
 
@@ -5811,7 +5903,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text(
                 "❌ Invalid private key. Make sure it's a base58-encoded Solana private key.",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:import")
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:import_key")
                 ]])
             )
             return
@@ -5828,6 +5920,138 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]),
             disable_web_page_preview=True,
         )
+
+    elif state == "wallet_backup_password":
+        password = text.strip()
+        if len(password) < 8:
+            await update.message.reply_text(
+                "❌ Password too short. Use at least 8 characters.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:create_encrypted")
+                ]])
+            )
+            return
+        
+        try:
+            wallet_data = wm.create_wallet_with_mnemonic(
+                backup_mode="encrypted",
+                backup_password=password
+            )
+            set_state(uid, pending_wallet_mnemonic=wallet_data["mnemonic"],
+                         pending_wallet_pubkey=wallet_data["public_key"],
+                         pending_wallet_privkey=wallet_data["private_key_base58"],
+                         backup_password_set=True)
+            msg = wm.format_wallet_creation_message(wallet_data)
+            clear_state(uid, "waiting_for")
+            await update.message.reply_text(
+                msg,
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ I saved the 12 words", callback_data="wallet:save_pending_bip39")],
+                    [InlineKeyboardButton("❌ Start over",           callback_data="wallet:create")],
+                ])
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+    elif state == "wallet_import_seed":
+        clear_state(uid, "waiting_for")
+        seed_phrase = text.strip().lower()
+        
+        # First check if seed is valid (may be encrypted)
+        if not wm.validate_mnemonic(seed_phrase):
+            await update.message.reply_text(
+                "❌ Invalid seed phrase. Make sure you have all 12 words in correct order.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:import_seed")
+                ]])
+            )
+            return
+        
+        try:
+            # Check if seed is encrypted by checking backup storage
+            # If the user has an encrypted backup for this seed, they'll need the password
+            recovered = wm.recover_from_mnemonic(seed_phrase)
+            pubkey = recovered["public_key"]
+            privkey = recovered["private_key_base58"]
+            
+            # Check if this pubkey has an encrypted backup
+            backup_status = wm.get_wallet_backup_status(pubkey)
+            if backup_status["has_backup"] and backup_status["backup_type"] == "encrypted":
+                set_state(uid, waiting_for="wallet_encrypted_recovery_password",
+                         pending_pubkey=pubkey, seed_phrase=seed_phrase)
+                await update.message.reply_text(
+                    "🔐 *This wallet has an encrypted backup.*\n\n"
+                    "Enter the password you set when creating it:",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❌ Cancel", callback_data="wallet:import")
+                    ]])
+                )
+                return
+            
+            # No encryption, proceed with recovery
+            save_wallet_key(privkey)
+            bal = get_sol_balance(pubkey)
+            await update.message.reply_text(
+                f"✅ *Wallet recovered!*\n\n"
+                f"Address: `{pubkey}`\n"
+                f"Balance: `{bal:.4f} SOL`\n\n"
+                f"[Solscan](https://solscan.io/account/{pubkey})",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")
+                ]]),
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Recovery failed: {str(e)[:80]}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:import_seed")
+                ]])
+            )
+
+    elif state == "wallet_encrypted_recovery_password":
+        password = text.strip()
+        seed_phrase = get_state(uid, "seed_phrase")
+        pending_pubkey = get_state(uid, "pending_pubkey")
+        clear_state(uid)
+        
+        try:
+            recovered = wm.recover_from_mnemonic(seed_phrase, password=password)
+            pubkey = recovered["public_key"]
+            privkey = recovered["private_key_base58"]
+            
+            if pubkey != pending_pubkey:
+                await update.message.reply_text(
+                    "❌ Password incorrect or seed mismatch.",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("↩️ Try Again", callback_data="wallet:import_seed")
+                    ]])
+                )
+                return
+            
+            save_wallet_key(privkey)
+            bal = get_sol_balance(pubkey)
+            await update.message.reply_text(
+                f"✅ *Wallet recovered!*\n\n"
+                f"Address: `{pubkey}`\n"
+                f"Balance: `{bal:.4f} SOL`\n\n"
+                f"[Solscan](https://solscan.io/account/{pubkey})",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")
+                ]]),
+                disable_web_page_preview=True,
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ {str(e)[:100]}",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:import_seed")
+                ]])
+            )
 
     elif state == "tracked_wallet_address":
         clear_state(uid)
