@@ -8,6 +8,7 @@ import os
 import time
 import requests
 from datetime import datetime, timezone
+import wallet_tracker
 
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 SCANNER_STATE_FILE = os.path.join(DATA_DIR, "scanner_state.json")
@@ -405,12 +406,98 @@ def score_age(token: dict) -> tuple[int, str]:
     return 0, f"{age_hrs:.0f} hrs old (too old)"
 
 
+def score_liquidity_strength(token: dict, rc: dict) -> tuple[int, str]:
+    """10 pts — liquidity strength via dev buy + bonding curve reserves."""
+    dev_sol = float(token.get("solAmount", 0) or 0)
+    reserves_sol = max(0.0, float(token.get("vSolInBondingCurve", 30) or 30) - 30.0)
+    total_liquidity = dev_sol + reserves_sol
+
+    if dev_sol >= 50 and reserves_sol >= 50:
+        return 10, f"Strong launch (Dev: {dev_sol:.1f}◎ + Reserves: {reserves_sol:.1f}◎)"
+    if dev_sol >= 20 or reserves_sol >= 30:
+        return 7, f"Healthy liquidity (Dev: {dev_sol:.1f}◎, Res: {reserves_sol:.1f}◎)"
+    if dev_sol >= 5:
+        return 3, f"Minimal launch ({dev_sol:.2f}◎ dev buy)"
+    return 0, f"Very weak liquidity ({total_liquidity:.2f}◎)"
+
+
+def score_volume_momentum(token: dict) -> tuple[int, str]:
+    """20 pts — volume momentum acceleration (m1 → m5 → h1 progression)."""
+    m1 = float(token.get("volume_m1", 0) or 0)
+    m5 = float(token.get("volume_m5", 0) or 0)
+    h1 = float(token.get("volume_h1", 0) or 0)
+
+    if not h1:
+        return 0, "No volume data"
+
+    # Calculate escalation
+    if m1 > 0 and m5 > 0:
+        m1_annualized = m1 * 60  # 1m extrapolated to 1h
+        m1_to_m5_ratio = m1_annualized / m5 if m5 > 0 else 0
+        
+        if m1_to_m5_ratio >= 4:
+            return 15, f"Extreme 1m spike ({m1_to_m5_ratio:.1f}x 5m average)"
+
+    if m5 > 0:
+        m5_to_h1_ratio = m5 / h1 if h1 > 0 else 0
+        
+        if m5_to_h1_ratio >= 3:
+            return 12, f"3x+ 5m momentum ({m5_to_h1_ratio:.1f}x hourly)"
+        if m5_to_h1_ratio >= 2:
+            return 8, f"2x 5m momentum ({m5_to_h1_ratio:.1f}x hourly)"
+
+    if h1 > 100_000:
+        return 5, f"Strong 1h volume (${h1:,.0f})"
+    if h1 > 50_000:
+        return 2, f"Moderate 1h volume (${h1:,.0f})"
+    return 0, f"Flat volume (${h1:,.0f} h1)"
+
+
+def score_watched_wallet_entry(token_mint: str) -> tuple[int, str]:
+    """15 pts — detect tracked wallet cluster entry signals."""
+    try:
+        entries = wallet_tracker.detect_wallet_entry(token_mint, time_window_secs=60)
+        
+        if not entries:
+            return 0, "No tracked wallet activity"
+        
+        # Count unique wallets
+        unique_wallets = len(set(e["wallet"] for e in entries))
+        
+        # Score based on cluster intensity
+        if unique_wallets >= 3:
+            wallet_str = ", ".join([e["name"] for e in entries[:3]])
+            return 15, f"Cluster signal: {unique_wallets} smart wallets ({wallet_str})"
+        
+        if unique_wallets == 2:
+            wallet_str = ", ".join([e["name"] for e in entries])
+            return 10, f"Multi-wallet: {wallet_str} entering"
+        
+        if unique_wallets == 1:
+            entry = entries[0]
+            age_secs = time.time() - entry["entry_ts"]
+            if age_secs <= 30:
+                return 5, f"Smart wallet early entry ({entry['name']}, {age_secs:.0f}s ago)"
+            return 3, f"Smart wallet active ({entry['name']})"
+        
+        return 0, "Tracked wallets detected but weak signal"
+    
+    except Exception as e:
+        # Wallet tracker not initialized or error
+        return 0, "Wallet tracking unavailable"
+
+
 def calculate_heat_score(token: dict, rc: dict) -> dict:
     """
-    Run all 8 scoring categories. Returns full score breakdown dict.
-    Returns None if instantly disqualified.
+    Run 11 scoring categories (120 pts max).
+    Returns full score breakdown dict. Returns disqualified flag if instantly DQ.
     """
-    vol_pts,  vol_reason  = score_volume(token)
+    # New scoring order: momentum first, then liquidity, then wallet, then rest
+    mom_pts,  mom_reason  = score_volume_momentum(token)
+    liq_pts,  liq_reason  = score_liquidity_strength(token, rc)
+    mid_mint = token.get("mint", "")
+    wal_pts,  wal_reason  = score_watched_wallet_entry(mid_mint)
+    
     wall_pts, wall_reason = score_wallets(rc)
     twit_pts, twit_reason = score_twitter(token)
     narr_pts, narr_reason = score_narrative(token)
@@ -428,18 +515,22 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     elif rc.get("rugged"):
         disqualified = "Flagged as rugged by RugCheck"
 
-    total = vol_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
+    # New total: 120 pts (up from 100)
+    # momentum(20) + liquidity(10) + wallets_reputation(15) + wallets(15) + twitter(15) + 
+    # narrative(15) + migration(10) + dev(10) + holders(10) + age(5) = 115 base + slack = 120
+    total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
 
-    # Risk level
+    # Risk level (adjusted for 120pt scale)
     red_flags = []
     if rc.get("risks"):
         red_flags = [r["name"] for r in rc["risks"] if r.get("level") in ("danger", "warn")]
     if token.get("liquidity", 0) < 5000:
         red_flags.append("Very low liquidity")
 
-    if total >= 85 or (total >= 70 and not red_flags):
+    # Risk thresholds for 120pt scale
+    if total >= 100 or (total >= 80 and not red_flags):
         risk = "LOW"
-    elif total >= 70 and red_flags:
+    elif total >= 80 and red_flags:
         risk = "MEDIUM"
     else:
         risk = "HIGH"
@@ -459,7 +550,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         "risk":          risk,
         "red_flags":     red_flags,
         "breakdown": {
-            "volume":    (vol_pts,  vol_reason),
+            "momentum":  (mom_pts,  mom_reason),
+            "liquidity": (liq_pts,  liq_reason),
+            "wallet_rep": (wal_pts, wal_reason),
             "wallets":   (wall_pts, wall_reason),
             "twitter":   (twit_pts, twit_reason),
             "narrative": (narr_pts, narr_reason),
@@ -472,7 +565,8 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
 
 
 def priority_label(score: int) -> str:
-    if score >= 90: return "🔴 ULTRA HOT"
+    """Priority label for heat score (0–120 scale)."""
+    if score >= 95: return "🔴 ULTRA HOT"
     if score >= 80: return "🟠 HOT"
     if score >= 70: return "🟡 WARM"
     if score >= 50: return "⚪ WATCH"
@@ -489,19 +583,22 @@ def age_str(pair_created_ms: int) -> str:
 
 
 def format_alert(r: dict) -> str:
-    """Format the Telegram alert message per ALERTS.md spec."""
+    """Format the Telegram alert message per ALERTS.md spec (updated for 120pt scale)."""
     bd    = r["breakdown"]
     mint  = r["mint"]
     label = priority_label(r["total"])
 
     def line(key):
         pts, reason = bd[key]
-        return f"  • {key.title()}: *{pts}pts* — {reason}"
+        return f"  • {key.replace('_', ' ').title()}: *{pts}pts* — {reason}"
 
     flags_str  = ", ".join(r["red_flags"]) if r["red_flags"] else "None"
     risk_emoji = {"LOW": "🟢", "MEDIUM": "🟡", "HIGH": "🔴"}.get(r["risk"], "⚪")
     price_usd  = r.get("price_usd", 0)
     price_str  = f"${price_usd:.8f}" if price_usd and price_usd < 0.01 else (f"${price_usd:.4f}" if price_usd else "N/A")
+
+    # Build signal lines dynamically from breakdown
+    signal_lines = "\n".join(line(cat) for cat in bd.keys())
 
     return (
         f"{label}\n"
@@ -509,7 +606,7 @@ def format_alert(r: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{r['name']}* (${r['symbol']})\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🌡️ Heat Score: *{r['total']}/100*\n"
+        f"🌡️ Heat Score: *{r['total']}/120*\n"
         f"💵 Price: `{price_str}`\n"
         f"🏦 MCap: `${r['mcap']:,.0f}`\n"
         f"📊 Vol (1h): `${r['volume_h1']:,.0f}`\n"
@@ -520,21 +617,14 @@ def format_alert(r: dict) -> str:
         f"📋 *Mint:*\n`{mint}`\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"📈 *Signals:*\n"
-        f"{line('volume')}\n"
-        f"{line('wallets')}\n"
-        f"{line('twitter')}\n"
-        f"{line('narrative')}\n"
-        f"{line('migration')}\n"
-        f"{line('dev')}\n"
-        f"{line('holders')}\n"
-        f"{line('age')}\n"
+        f"{signal_lines}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"{risk_emoji} Risk: *{r['risk']}*  |  ⚠️ Flags: {flags_str}"
     )
 
 
 def format_heat_score_card(r: dict) -> str:
-    """Shorter card for manual /heatscore lookups."""
+    """Shorter card for manual /heatscore lookups (120pt scale)."""
     bd        = r["breakdown"]
     label     = priority_label(r["total"])
     mint      = r["mint"]
@@ -542,7 +632,7 @@ def format_heat_score_card(r: dict) -> str:
     price_str = f"${price_usd:.8f}" if price_usd and price_usd < 0.01 else (f"${price_usd:.4f}" if price_usd else "N/A")
 
     lines = [
-        f"🌡️ *Heat Score: {r['total']}/100* — {label}\n",
+        f"🌡️ *Heat Score: {r['total']}/120* — {label}\n",
         f"*{r['name']}* (${r['symbol']})",
         f"💵 Price: `{price_str}`",
         f"🏦 MCap: `${r['mcap']:,.0f}` | 📊 Vol 1h: `${r['volume_h1']:,.0f}`",
@@ -553,7 +643,7 @@ def format_heat_score_card(r: dict) -> str:
         f"*Breakdown:*",
     ]
     for cat, (pts, reason) in bd.items():
-        lines.append(f"`{cat:<10}` *{pts:>2}pts*  {reason}")
+        lines.append(f"`{cat:<12}` *{pts:>2}pts*  {reason}")
 
     if r["disqualified"]:
         lines.append(f"\n❌ *DISQUALIFIED:* {r['disqualified']}")
