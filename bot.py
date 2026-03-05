@@ -585,7 +585,8 @@ def autosell_list_kb(uid: int) -> InlineKeyboardMarkup:
         rows.append([InlineKeyboardButton(
             f"{enabled} ${sym}", callback_data=f"as:view:{mint}"
         )])
-    rows.append([InlineKeyboardButton(f"🌍 Global Stop-Loss: {gsl_lbl}", callback_data="gsl:menu")])
+    rows.append([InlineKeyboardButton("🔧 Default Presets", callback_data="as_preset:menu"),
+                 InlineKeyboardButton(f"🌍 Global SL: {gsl_lbl}", callback_data="gsl:menu")])
     rows.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
     return InlineKeyboardMarkup(rows)
 
@@ -599,7 +600,7 @@ def autosell_token_kb(uid: int, mint: str) -> InlineKeyboardMarkup:
             "⏸️ Pause" if enabled else "▶️ Enable",
             callback_data=f"as:toggle:{mint}"
         )],
-        [InlineKeyboardButton("📈 Edit Targets",      callback_data=f"as:mult_targets_menu:{mint}"),
+        [InlineKeyboardButton("📈 Edit Targets",      callback_data=f"as:mt_menu:{mint}"),
          InlineKeyboardButton("➕ Add Custom",         callback_data=f"as:addcustom:{mint}")],
         [InlineKeyboardButton("🏦 MCap Alerts",       callback_data=f"as:mcap_menu:{mint}"),
          InlineKeyboardButton("⚡ Strategies",         callback_data=f"as:strategies:{mint}")],
@@ -1608,13 +1609,18 @@ async def _show_portfolio(send_fn, uid: int):
                 sym    = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
                 price  = float(pair.get("priceUsd", 0) or 0) if pair else 0
                 val    = price * acc["ui_amount"]
-                as_tag = " 🤖" if as_configs.get(acc["mint"], {}).get("enabled") else ""
+                as_cfg = as_configs.get(acc["mint"], {})
+                as_tag = " 🤖" if as_cfg.get("enabled") else ""
                 lines.append(f"`{sym}`{as_tag}: {acc['ui_amount']:,.4f} ≈ `${val:,.4f}`")
                 token_rows.append([
                     InlineKeyboardButton(f"⚡ {sym}",  callback_data=f"qt:{acc['mint']}"),
                     InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{acc['mint']}"),
                     InlineKeyboardButton("🪙", url=f"https://pump.fun/{acc['mint']}"),
                 ])
+                if as_cfg.get("enabled"):
+                    token_rows.append([
+                        InlineKeyboardButton(f"🤖 {sym} Auto-Sell Config", callback_data=f"as:view:{acc['mint']}")
+                    ])
         else:
             lines.append("No token positions found.")
 
@@ -1664,6 +1670,10 @@ async def _show_portfolio(send_fn, uid: int):
                     InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
                     InlineKeyboardButton("🪙", url=f"https://pump.fun/{mint}"),
                 ])
+                if cfg and cfg.get("enabled"):
+                    token_rows.append([
+                        InlineKeyboardButton(f"🤖 {sym} Auto-Sell Config", callback_data=f"as:view:{mint}")
+                    ])
             else:
                 lines.append(f"`{mint[:8]}...`: {raw_amt:,} raw")
                 token_rows.append([
@@ -1699,9 +1709,11 @@ async def _show_autosell(send_fn, uid: int):
         await send_fn(
             f"*🤖 Auto-Sell*\n\nNo positions tracked yet.\n"
             f"Buy a token and auto-sell is configured automatically.\n\n"
-            f"*🌍 Global Stop-Loss:* {gsl_status} — {gsl_info}",
+            f"*🌍 Global Stop-Loss:* {gsl_status} — {gsl_info}\n\n"
+            f"You can pre-configure default sell presets for future buys.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔧 Configure Default Presets", callback_data="as_preset:menu")],
                 [InlineKeyboardButton(f"🌍 Global Stop-Loss: {gsl_status}", callback_data="gsl:menu")],
                 [InlineKeyboardButton("💰 Trade", callback_data="menu:trade")],
                 [InlineKeyboardButton("⬅️ Back",  callback_data="menu:main")],
@@ -3316,12 +3328,12 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
                  InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
                 [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
-                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
-                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
-                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
-                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
-                 InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
-                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:tsl_pct:{mint}:10"),
+                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:tsl_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:tsl_pct:{mint}:50")],
+                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:tsl_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:tsl_pct:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:tcs:{mint}")],
                 [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
             ])
         )
@@ -3351,12 +3363,12 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
                  InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
                 [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
-                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
-                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
-                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
-                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
-                 InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
-                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                [InlineKeyboardButton("Sell 10%",  callback_data=f"as:tsl_pct:{mint}:10"),
+                 InlineKeyboardButton("Sell 25%",  callback_data=f"as:tsl_pct:{mint}:25"),
+                 InlineKeyboardButton("Sell 50%",  callback_data=f"as:tsl_pct:{mint}:50")],
+                [InlineKeyboardButton("Sell 75%",  callback_data=f"as:tsl_pct:{mint}:75"),
+                 InlineKeyboardButton("Sell 100%", callback_data=f"as:tsl_pct:{mint}:100")],
+                [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:tcs:{mint}")],
                 [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
             ])
         )
@@ -3387,17 +3399,17 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
                      InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
                     [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
-                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
-                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
-                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
-                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
-                     InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
-                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:tsl_pct:{mint}:10"),
+                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:tsl_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:tsl_pct:{mint}:50")],
+                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:tsl_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:tsl_pct:{mint}:100")],
+                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:tcs:{mint}")],
                     [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
                 ])
             )
 
-    elif action == "trail_sell_pct":
+    elif action == "tsl_pct":
         sell_pct = int(parts[3]) if len(parts) > 3 else 100
         cfg = get_auto_sell(uid, mint)
         if cfg:
@@ -3423,12 +3435,12 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                      InlineKeyboardButton("30%", callback_data=f"as:trail_pct:{mint}:30"),
                      InlineKeyboardButton("50%", callback_data=f"as:trail_pct:{mint}:50")],
                     [InlineKeyboardButton("✏️ Custom trail %", callback_data=f"as:trail_custom_pct:{mint}")],
-                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:trail_sell_pct:{mint}:10"),
-                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:trail_sell_pct:{mint}:25"),
-                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:trail_sell_pct:{mint}:50")],
-                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:trail_sell_pct:{mint}:75"),
-                     InlineKeyboardButton("Sell 100%", callback_data=f"as:trail_sell_pct:{mint}:100")],
-                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:trail_custom_sell:{mint}")],
+                    [InlineKeyboardButton("Sell 10%",  callback_data=f"as:tsl_pct:{mint}:10"),
+                     InlineKeyboardButton("Sell 25%",  callback_data=f"as:tsl_pct:{mint}:25"),
+                     InlineKeyboardButton("Sell 50%",  callback_data=f"as:tsl_pct:{mint}:50")],
+                    [InlineKeyboardButton("Sell 75%",  callback_data=f"as:tsl_pct:{mint}:75"),
+                     InlineKeyboardButton("Sell 100%", callback_data=f"as:tsl_pct:{mint}:100")],
+                    [InlineKeyboardButton("✏️ Custom sell %", callback_data=f"as:tcs:{mint}")],
                     [InlineKeyboardButton("⬅️ Back",   callback_data=f"as:view:{mint}")],
                 ])
             )
@@ -3442,7 +3454,7 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
-    elif action == "trail_custom_sell":
+    elif action == "tcs":
         set_state(uid, waiting_for="as_trail_sell_pct_input", as_mint=mint)
         await query.edit_message_text(
             "Enter sell % for trailing stop (1-100):",
@@ -3755,7 +3767,7 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     # ── Mult targets menu ─────────────────────────────────────────────────────
-    elif action == "mult_targets_menu":
+    elif action == "mt_menu":
         cfg = get_auto_sell(uid, mint)
         if not cfg:
             await query.edit_message_text("Config not found.", reply_markup=back_kb(f"as:view:{mint}"))
@@ -3817,7 +3829,7 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "Enter multiplier (e.g. 3 for 3x):",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data=f"as:mult_targets_menu:{mint}")
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:mt_menu:{mint}")
             ]])
         )
 
@@ -3831,7 +3843,7 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"Enter new multiplier for target {idx+1} (current: {t['mult']}x):",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Cancel", callback_data=f"as:mult_targets_menu:{mint}")
+                    InlineKeyboardButton("❌ Cancel", callback_data=f"as:mt_menu:{mint}")
                 ]])
             )
         else:
@@ -3854,7 +3866,7 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Added: `{label}` → sell `{pct}%` for `${sym}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                    InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mt_menu:{mint}")
                 ]])
             )
         else:
@@ -3879,11 +3891,11 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Updated target {idx+1}: `{label}` → sell `{pct}%` for `${sym}`",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                        InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mt_menu:{mint}")
                     ]])
                 )
             else:
-                await query.edit_message_text("Invalid target.", reply_markup=back_kb(f"as:mult_targets_menu:{mint}"))
+                await query.edit_message_text("Invalid target.", reply_markup=back_kb(f"as:mt_menu:{mint}"))
         else:
             await query.edit_message_text("Session expired. Please try again.", reply_markup=back_kb("menu:autosell"))
 
@@ -3892,7 +3904,7 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "Enter sell % (1–100):",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data=f"as:mult_targets_menu:{mint}")
+                InlineKeyboardButton("❌ Cancel", callback_data=f"as:mt_menu:{mint}")
             ]])
         )
 
@@ -4058,15 +4070,15 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Choose a preset strategy. This will overwrite your current targets, stop-loss, and exit settings.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🏃 Scalp",    callback_data=f"as:strategy_apply:{mint}:scalp")],
-                [InlineKeyboardButton("📊 Standard", callback_data=f"as:strategy_apply:{mint}:standard")],
-                [InlineKeyboardButton("💎 Diamond",  callback_data=f"as:strategy_apply:{mint}:diamond")],
-                [InlineKeyboardButton("🌙 Moon Bag", callback_data=f"as:strategy_apply:{mint}:moon")],
+                [InlineKeyboardButton("🏃 Scalp",    callback_data=f"as:sa:{mint}:scalp")],
+                [InlineKeyboardButton("📊 Standard", callback_data=f"as:sa:{mint}:standard")],
+                [InlineKeyboardButton("💎 Diamond",  callback_data=f"as:sa:{mint}:diamond")],
+                [InlineKeyboardButton("🌙 Moon Bag", callback_data=f"as:sa:{mint}:moon")],
                 [InlineKeyboardButton("⬅️ Back",     callback_data=f"as:view:{mint}")],
             ])
         )
 
-    elif action == "strategy_apply":
+    elif action == "sa":
         strategy_name = parts[3] if len(parts) > 3 else "standard"
         cfg = get_auto_sell(uid, mint)
         if not cfg:
@@ -5262,7 +5274,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("75%",  callback_data=f"as:mt_add_sp:{mint}:75"),
                  InlineKeyboardButton("100%", callback_data=f"as:mt_add_sp:{mint}:100")],
                 [InlineKeyboardButton("✏️ Custom %", callback_data=f"as:mt_sp_custom:{mint}")],
-                [InlineKeyboardButton("❌ Cancel",    callback_data=f"as:mult_targets_menu:{mint}")],
+                [InlineKeyboardButton("❌ Cancel",    callback_data=f"as:mt_menu:{mint}")],
             ])
         )
 
@@ -5289,7 +5301,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"✅ Added target: `{label}` → sell `{sell_pct}%` for `${sym}`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                    InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mt_menu:{mint}")
                 ]])
             )
 
@@ -5314,7 +5326,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("75%",  callback_data=f"as:mt_edit_sp:{mint}:75"),
                  InlineKeyboardButton("100%", callback_data=f"as:mt_edit_sp:{mint}:100")],
                 [InlineKeyboardButton("✏️ Custom %", callback_data=f"as:mt_sp_custom:{mint}")],
-                [InlineKeyboardButton("❌ Cancel",    callback_data=f"as:mult_targets_menu:{mint}")],
+                [InlineKeyboardButton("❌ Cancel",    callback_data=f"as:mt_menu:{mint}")],
             ])
         )
 
@@ -5343,7 +5355,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     f"✅ Updated target {idx+1}: `{label}` → sell `{sell_pct}%` for `${sym}`",
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[
-                        InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mult_targets_menu:{mint}")
+                        InlineKeyboardButton("📈 Edit Targets", callback_data=f"as:mt_menu:{mint}")
                     ]])
                 )
             else:
