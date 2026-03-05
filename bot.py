@@ -6819,6 +6819,169 @@ async def pnl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ─── Portfolio Distribution Watcher ────────────────────────────────────────────
+
+async def cmd_portfolio_watch(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show tokens being monitored by the distribution watcher."""
+    uid = update.effective_user.id
+    portfolio = get_portfolio(uid)
+    
+    if not portfolio:
+        await update.message.reply_text(
+            "📊 *Portfolio Watcher*\n\n"
+            "Your portfolio is empty. Tokens will be monitored for crash signals once you buy.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("💰 Buy a Token", callback_data="menu:buy"),
+                InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+            ]])
+        )
+        return
+    
+    # Load watcher state
+    try:
+        import json
+        with open(os.path.join(DATA_DIR, "portfolio_watcher_state.json"), "r") as f:
+            state = json.load(f)
+    except Exception:
+        state = {}
+    
+    # Build watchlist display
+    lines = ["📊 *Portfolio Watcher Status*\n"]
+    tokens_watching = 0
+    
+    for mint, amount in sorted(portfolio.items(), key=lambda x: -x[1])[:20]:
+        if amount <= 0:
+            continue
+        
+        token_state = state.get(mint, {})
+        symbol = token_state.get("symbol", mint[:8])
+        cycles = token_state.get("cycles_observed", 0)
+        last_signals = token_state.get("last_alert_signals", [])
+        
+        tokens_watching += 1
+        
+        status_txt = f"📍 Baseline ({cycles})" if cycles < 3 else "🟢 Active"
+        signal_txt = f" | {len(last_signals)} signals" if last_signals else ""
+        
+        lines.append(f"• ${symbol}\n  {status_txt}{signal_txt}")
+    
+    if tokens_watching == 0:
+        lines.append("_No tokens in portfolio to monitor_")
+    else:
+        lines.append(f"\n_Watching {tokens_watching} token(s)_")
+        lines.append("_Alerts sent to main channel when risk detected_")
+    
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("⚙️ Settings", callback_data="watch:settings"),
+            InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+        ]])
+    )
+
+
+async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle portfolio watcher settings callbacks."""
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    await query.answer()
+    
+    if action == "settings":
+        gs = load_global_settings()
+        watcher_enabled = gs.get(f"watcher_enabled_{uid}", True)
+        status = "🟢 Enabled" if watcher_enabled else "🔴 Disabled"
+        
+        await query.edit_message_text(
+            f"⚙️ *Portfolio Watcher Settings*\n\n"
+            f"Status: {status}\n\n"
+            f"The watcher monitors your portfolio tokens for:\n"
+            f"• 📛 Developer wallet movement\n"
+            f"• 🐋 Whale exits\n"
+            f"• 💧 Liquidity draining\n"
+            f"• 📉 Sell pressure rising\n"
+            f"• 📊 Volume collapsing\n\n"
+            f"High-risk alerts are sent to the main channel.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Toggle", callback_data="watch:toggle")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="watch:back")],
+            ])
+        )
+    
+    elif action == "toggle":
+        gs = load_global_settings()
+        watcher_enabled = gs.get(f"watcher_enabled_{uid}", True)
+        gs[f"watcher_enabled_{uid}"] = not watcher_enabled
+        save_global_settings(gs)
+        
+        new_status = "🟢 Enabled" if not watcher_enabled else "🔴 Disabled"
+        await query.edit_message_text(
+            f"✅ *Watcher {new_status}*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Settings", callback_data="watch:settings"),
+                InlineKeyboardButton("⬅️ Back", callback_data="watch:back"),
+            ]])
+        )
+    
+    elif action == "back":
+        portfolio = get_portfolio(uid)
+        
+        if not portfolio:
+            await query.edit_message_text(
+                "📊 *Portfolio Watcher*\n\n"
+                "Your portfolio is empty.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💰 Buy a Token", callback_data="menu:buy"),
+                    InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+                ]])
+            )
+            return
+        
+        # Rebuild watchlist display
+        try:
+            import json
+            with open(os.path.join(DATA_DIR, "portfolio_watcher_state.json"), "r") as f:
+                state = json.load(f)
+        except Exception:
+            state = {}
+        
+        lines = ["📊 *Portfolio Watcher Status*\n"]
+        tokens_watching = 0
+        
+        for mint, amount in sorted(portfolio.items(), key=lambda x: -x[1])[:20]:
+            if amount <= 0:
+                continue
+            
+            token_state = state.get(mint, {})
+            symbol = token_state.get("symbol", mint[:8])
+            cycles = token_state.get("cycles_observed", 0)
+            last_signals = token_state.get("last_alert_signals", [])
+            
+            tokens_watching += 1
+            status_txt = f"📍 Baseline ({cycles})" if cycles < 3 else "🟢 Active"
+            signal_txt = f" | {len(last_signals)} signals" if last_signals else ""
+            
+            lines.append(f"• ${symbol}\n  {status_txt}{signal_txt}")
+        
+        if tokens_watching == 0:
+            lines.append("_No tokens in portfolio to monitor_")
+        
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Settings", callback_data="watch:settings"),
+                InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+            ]])
+        )
+
+
 # ─── Global Stop-Loss callback ────────────────────────────────────────────────
 
 def _gsl_menu_kb(gsl: dict) -> InlineKeyboardMarkup:
@@ -6940,6 +7103,8 @@ async def post_init(app):
     asyncio.create_task(pf.run_pumpfeed(app.bot))
     # Poll pump.fun API for graduated tokens → pumpgrad DM notifications
     asyncio.create_task(pf.run_gradwatch(app.bot))
+    # Monitor portfolio tokens for crash signals (distribution watcher)
+    asyncio.create_task(pf.run_portfolio_watch(app.bot))
 
     await app.bot.set_my_commands([
         BotCommand("start",      "Launch the bot"),
@@ -7000,6 +7165,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("wallet",     cmd_wallet))
     app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
+    app.add_handler(CommandHandler("watch",      cmd_portfolio_watch))
     app.add_handler(CommandHandler("whalebuy",        cmd_whalebuy))
     app.add_handler(CommandHandler("momentum",        cmd_momentum))
     app.add_handler(CommandHandler("contract",        cmd_contract))
@@ -7035,6 +7201,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(wallet_callback,              pattern=r"^wallet:"))
     app.add_handler(CallbackQueryHandler(pumplive_callback,            pattern=r"^pumplive:"))
     app.add_handler(CallbackQueryHandler(pumpgrad_callback,            pattern=r"^pumpgrad:"))
+    app.add_handler(CallbackQueryHandler(watch_callback,               pattern=r"^watch:"))
     app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
     app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
     app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))

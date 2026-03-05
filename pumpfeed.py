@@ -1225,3 +1225,63 @@ async def run_pumpfeed(bot: Bot):
         except Exception as e:
             print(f"[PUMPFEED] WS error: {e}", flush=True)
             await asyncio.sleep(5)
+
+
+# ─── Portfolio Distribution Watcher ───────────────────────────────────────────
+
+async def run_portfolio_watch(bot: Bot):
+    """Monitor portfolio tokens for crash signals (5-signal distribution detection).
+    Sends alerts to main channel when high-risk conditions detected.
+    """
+    from bot import get_portfolio, load_global_settings
+    from portfolio_watcher import check_portfolio_for_alerts
+    import config
+    
+    if not config.PORTFOLIO_WATCHER_ENABLED:
+        print("[WATCH] Portfolio watcher disabled in config", flush=True)
+        return
+    
+    if not config.MAIN_CHANNEL_ID:
+        print("[WATCH] MAIN_CHANNEL_ID not configured", flush=True)
+        return
+    
+    interval = config.PORTFOLIO_WATCHER_INTERVAL_SECS
+    print(f"[WATCH] Starting portfolio watcher (interval={interval}s)", flush=True)
+    
+    while True:
+        try:
+            gs = load_global_settings()
+            # Get all users with portfolios
+            state_file = os.path.join(DATA_DIR, "portfolios.json")
+            if not os.path.exists(state_file):
+                await asyncio.sleep(interval)
+                continue
+            
+            with open(state_file, "r") as f:
+                all_portfolios = json.load(f)
+            
+            # Check each user's portfolio
+            for uid_str, portfolio in all_portfolios.items():
+                try:
+                    uid = int(uid_str)
+                    alerts = await check_portfolio_for_alerts(bot, uid, portfolio, lambda u: get_portfolio(u))
+                    
+                    # Send alerts to main channel
+                    for mint, symbol, signals, score, risk_level, message in alerts:
+                        try:
+                            await bot.send_message(
+                                chat_id=config.MAIN_CHANNEL_ID,
+                                text=message,
+                                parse_mode="Markdown"
+                            )
+                            print(f"[WATCH] Alert: {symbol} risk={risk_level} score={score:.1f}", flush=True)
+                        except Exception as e:
+                            print(f"[WATCH] Alert send error: {e}", flush=True)
+                
+                except Exception as e:
+                    print(f"[WATCH] Error checking portfolio for uid {uid_str}: {e}", flush=True)
+            
+        except Exception as e:
+            print(f"[WATCH] Error in main loop: {e}", flush=True)
+        
+        await asyncio.sleep(interval)
