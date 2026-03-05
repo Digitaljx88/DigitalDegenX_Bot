@@ -50,6 +50,7 @@ AUTO_SELL_FILE     = os.path.join(DATA_DIR, "auto_sell.json")
 AUTO_BUY_FILE      = os.path.join(DATA_DIR, "auto_buy.json")
 TRADE_LOG_FILE     = os.path.join(DATA_DIR, "trade_log.json")
 GLOBAL_SETTINGS_FILE = os.path.join(DATA_DIR, "global_settings.json")
+ALERT_PREFS_FILE   = os.path.join(DATA_DIR, "alert_prefs.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -141,6 +142,32 @@ def remove_alert(uid: int, index: int):
     if key in a and 0 <= index < len(a[key]):
         a[key].pop(index)
         save_alerts(a)
+
+# ── Alert preferences ─────────────────────────────────────────────────────────
+
+def load_alert_prefs() -> dict:   return _load(ALERT_PREFS_FILE)
+def save_alert_prefs(d: dict):    _save(ALERT_PREFS_FILE, d)
+
+def get_alert_prefs(uid: int) -> dict:
+    """Get alert preferences with defaults."""
+    prefs = load_alert_prefs().get(str(uid), {})
+    defaults = {
+        "price_alerts": True,
+        "crash_signals": True,
+        "liquidity_drain": True,
+        "whale_activity": True,
+        "portfolio_loss": True,
+        "pump_live": True,
+        "pump_grad": True,
+        "mcap_milestones": True,
+    }
+    return {**defaults, **prefs}
+
+def set_alert_pref(uid: int, pref_type: str, enabled: bool):
+    """Toggle a specific alert preference."""
+    prefs = load_alert_prefs()
+    prefs.setdefault(str(uid), {})[pref_type] = enabled
+    save_alert_prefs(prefs)
 
 # ── Auto-sell configs ─────────────────────────────────────────────────────────
 
@@ -561,7 +588,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("📋 Watchlist",     callback_data="scanner:watchlist"),
          InlineKeyboardButton("🏆 Top Alerts",    callback_data="scanner:topalerts")],
         [InlineKeyboardButton("🌡️ Threshold",     callback_data="scanner:set_threshold"),
-         InlineKeyboardButton("📣 Alert Channel", callback_data="scanner:alert_channel_menu")],
+         InlineKeyboardButton("� Channels",      callback_data="channels:menu"),
+         InlineKeyboardButton("⚙️ Alerts",        callback_data="alert_prefs:menu")],
         [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:toggle"),
          InlineKeyboardButton("⚙️ Live Settings", callback_data="pumplive:menu")],
         [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:toggle"),
@@ -2151,9 +2179,74 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(text, parse_mode="Markdown", reply_markup=alerts_kb(uid))
 
 
+async def cmd_alert_prefs(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show alert preferences customization menu."""
+    uid = update.effective_user.id
+    await alert_prefs_menu(update.message, uid)
+
+
+async def alert_prefs_menu(target, uid: int, edit=False):
+    """Display alert preferences customization menu."""
+    prefs = get_alert_prefs(uid)
+    
+    text = (
+        "*⚙️ Alert Preferences*\n\n"
+        "Choose which alerts to receive:\n\n"
+    )
+    
+    alert_types = {
+        "price_alerts": "💰 Price Alerts",
+        "crash_signals": "🔴 Crash Signals",
+        "liquidity_drain": "🚨 Liquidity Drain",
+        "whale_activity": "🐋 Whale Activity",
+        "portfolio_loss": "📊 Portfolio Loss",
+        "pump_live": "🟢 Pump Live",
+        "pump_grad": "🟢 Pump Grad",
+        "mcap_milestones": "🏁 MCap Milestones",
+    }
+    
+    buttons = []
+    for pref_type, label in alert_types.items():
+        status = "✅" if prefs.get(pref_type, True) else "❌"
+        buttons.append([InlineKeyboardButton(
+            f"{status} {label}",
+            callback_data=f"alert_prefs:toggle:{pref_type}"
+        )])
+    
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
+    
+    markup = InlineKeyboardMarkup(buttons)
+    
+    if edit:
+        await target.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
+    else:
+        await target.reply_text(text, parse_mode="Markdown", reply_markup=markup)
+
+
 async def cmd_autosell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Loading auto-sell...")
     await _show_autosell(msg.edit_text, update.effective_user.id)
+
+
+async def alert_prefs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle alert preference toggles."""
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    
+    await query.answer()
+    
+    if action == "menu":
+        await alert_prefs_menu(query.message, uid, edit=True)
+    
+    elif action == "toggle":
+        pref_type = parts[2] if len(parts) > 2 else ""
+        if pref_type:
+            prefs = get_alert_prefs(uid)
+            current = prefs.get(pref_type, True)
+            set_alert_pref(uid, pref_type, not current)
+            await alert_prefs_menu(query.message, uid, edit=True)
 
 
 async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7817,6 +7910,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))
     app.add_handler(CommandHandler("stoploss",   cmd_stoploss))
+    app.add_handler(CommandHandler("alertprefs", cmd_alert_prefs))
     app.add_handler(CommandHandler("wallets",    cmd_wallets_intel))
     app.add_handler(CommandHandler("narratives", cmd_narratives_intel))
 
@@ -7845,6 +7939,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(watch_callback,               pattern=r"^watch:"))
     app.add_handler(CallbackQueryHandler(launches_callback,            pattern=r"^launches:"))
     app.add_handler(CallbackQueryHandler(channels_callback,            pattern=r"^channels:"))
+    app.add_handler(CallbackQueryHandler(alert_prefs_callback,         pattern=r"^alert_prefs:"))
     app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
     app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
     app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))
