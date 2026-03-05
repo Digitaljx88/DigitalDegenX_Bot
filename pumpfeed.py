@@ -13,6 +13,7 @@ import time
 import requests
 import websockets
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
+from scanner import calculate_heat_score, fetch_rugcheck, priority_label
 
 DATA_DIR   = os.path.join(os.path.dirname(__file__), "data")
 STATE_FILE = os.path.join(DATA_DIR, "pumpfeed_state.json")
@@ -28,6 +29,25 @@ GRAD_MAX_AGE_H = 72          # only alert on tokens created within last 72h
 
 # Injected by bot.py at startup to avoid circular import
 _grad_autobuy_fn = None
+
+
+def _build_scanner_token(token: dict, meta: dict, sol_usd: float, dex: str = "") -> dict:
+    """Map a pumpfeed token + meta to the dict format expected by calculate_heat_score."""
+    mcap_sol = float(token.get("marketCapSol", 0) or 0)
+    return {
+        "mint":        token.get("mint", ""),
+        "name":        token.get("name", ""),
+        "symbol":      token.get("symbol", ""),
+        "description": meta.get("description", ""),
+        "twitter_url": meta.get("twitter", ""),
+        "mcap":        mcap_sol * sol_usd,
+        "price_usd":   0.0,
+        "volume_m5":   0,
+        "volume_h1":   0,
+        "pair_created": 0,
+        "dex":         dex,
+        "liquidity":   max(0.0, float(token.get("vSolInBondingCurve", 0) or 0) - VIRT_OFFSET) * sol_usd,
+    }
 
 def set_grad_autobuy_fn(fn):
     global _grad_autobuy_fn
@@ -384,7 +404,7 @@ def _bar(pct: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
-def format_notification(token: dict, meta: dict, sol_usd: float) -> str:
+def format_notification(token: dict, meta: dict, sol_usd: float, heat: dict | None = None) -> str:
     name     = token.get("name",   "Unknown")
     symbol   = token.get("symbol", "???")
     mint     = token.get("mint",   "")
@@ -421,6 +441,12 @@ def format_notification(token: dict, meta: dict, sol_usd: float) -> str:
     ]
     if sol_amt > 0:
         lines.append(f"🛒 Dev buy: `{sol_amt:.2f}◎`  ({init_buy/1e6:.1f}M tokens)")
+
+    if heat and not heat.get("disqualified"):
+        label = priority_label(heat["total"])
+        lines.append(f"🌡️ Heat: *{heat['total']}/100* — {label}")
+    elif heat and heat.get("disqualified"):
+        lines.append(f"🌡️ Heat: ❌ DQ — {heat['disqualified']}")
 
     social = []
     if twitter:
@@ -488,8 +514,10 @@ async def _handle_token(bot: Bot, token: dict):
     sol_usd = await loop.run_in_executor(None, get_sol_price)
     uri     = token.get("uri", "")
     meta    = await loop.run_in_executor(None, fetch_uri_metadata, uri) if uri else {}
+    rc      = await loop.run_in_executor(None, fetch_rugcheck, mint)
+    heat    = calculate_heat_score(_build_scanner_token(token, meta, sol_usd), rc)
 
-    text = format_notification(token, meta, sol_usd)
+    text = format_notification(token, meta, sol_usd, heat)
     kb   = notification_kb(mint)
 
     for uid in active_subs:
@@ -761,7 +789,7 @@ def grad_filter_kb(uid: int) -> InlineKeyboardMarkup:
 
 # ─── Graduation notification formatting ───────────────────────────────────────
 
-def format_grad_notification(token: dict, meta: dict, sol_usd: float) -> str:
+def format_grad_notification(token: dict, meta: dict, sol_usd: float, heat: dict | None = None) -> str:
     name     = token.get("name",   "Unknown")
     symbol   = token.get("symbol", "???")
     mint     = token.get("mint",   "")
@@ -794,6 +822,12 @@ def format_grad_notification(token: dict, meta: dict, sol_usd: float) -> str:
     ]
     if sol_amt > 0:
         lines.append(f"🛒 Dev buy: `{sol_amt:.2f}◎`  ({init_buy/1e6:.1f}M tokens)")
+
+    if heat and not heat.get("disqualified"):
+        label = priority_label(heat["total"])
+        lines.append(f"🌡️ Heat: *{heat['total']}/100* — {label}")
+    elif heat and heat.get("disqualified"):
+        lines.append(f"🌡️ Heat: ❌ DQ — {heat['disqualified']}")
 
     social = []
     if twitter:
@@ -858,6 +892,7 @@ async def _handle_grad_token(bot: Bot, token: dict):
     sol_usd = await loop.run_in_executor(None, get_sol_price)
     uri     = token.get("uri", "")
     meta    = await loop.run_in_executor(None, fetch_uri_metadata, uri) if uri else {}
+    rc      = await loop.run_in_executor(None, fetch_rugcheck, mint)
 
     # If WS event is missing name/symbol, fill from DexScreener (15s wait for indexing)
     if not token.get("name") or not token.get("symbol"):
@@ -880,7 +915,8 @@ async def _handle_grad_token(bot: Bot, token: dict):
         except Exception:
             pass
 
-    text = format_grad_notification(token, meta, sol_usd)
+    heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
 
     for uid in active_subs:
@@ -903,7 +939,7 @@ async def _handle_grad_token(bot: Bot, token: dict):
                 "mint":      mint,
                 "symbol":    token.get("symbol", "?"),
                 "name":      token.get("name", "?"),
-                "total":     80,   # graduation = strong signal, use 80 as synthetic score
+                "total":     heat["total"] if heat else 80,
                 "mcap":      float(token.get("marketCapSol", 0)) * sol_usd,
                 "price_usd": 0.0,
             }
@@ -988,6 +1024,7 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
 
     loop    = asyncio.get_running_loop()
     sol_usd = await loop.run_in_executor(None, get_sol_price)
+    rc      = await loop.run_in_executor(None, fetch_rugcheck, mint)
 
     # v3 API: market_cap is in USD (bonding curve MCap at graduation ≈ $69K)
     mcap_usd = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
@@ -1011,7 +1048,8 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
         "website":     coin.get("website")  or "",
     }
 
-    text = format_grad_notification(token, meta, sol_usd)
+    heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
 
     for uid in active_subs:
@@ -1034,7 +1072,7 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
                 "mint":      mint,
                 "symbol":    token.get("symbol", "?"),
                 "name":      token.get("name", "?"),
-                "total":     80,
+                "total":     heat["total"] if heat else 80,
                 "mcap":      mcap_usd,
                 "price_usd": 0.0,
             }

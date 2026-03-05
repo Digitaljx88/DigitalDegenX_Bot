@@ -1143,7 +1143,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     daily_limit = cfg.get("daily_limit_sol", 1.0)
     spent_today = cfg.get("spent_today", 0.0)
 
-    if spent_today + sol_amount > daily_limit:
+    if daily_limit > 0 and spent_today + sol_amount > daily_limit:
         try:
             await bot.send_message(
                 uid,
@@ -1834,7 +1834,7 @@ def _autobuy_status_text(uid: int) -> str:
         f"SOL per trade: `{sol_amount} SOL`\n"
         f"Min heat score: `{min_score}/100`\n"
         f"Max MCap: `${max_mcap:,.0f}`\n"
-        f"Daily SOL limit: `{daily_limit} SOL`\n"
+        f"Daily SOL limit: `{'Unlimited ♾️' if daily_limit == 0 else str(daily_limit) + ' SOL'}`\n"
         f"Spent today: `{spent:.3f} SOL`\n"
         f"Bought today: `{len(bought)}` token(s)\n\n"
         f"_Auto-buys fire when scanner alerts a token above your min score._"
@@ -1887,15 +1887,28 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_state(uid, waiting_for="ab_sol_amount")
         await query.edit_message_text(
             "💰 *Set SOL amount per auto-buy*\n\n"
-            "Enter amount in SOL (e.g. `0.05`, `0.1`, `0.25`)\n"
+            "Choose a preset or type a custom amount (e.g. `0.5`, `2`, `10`)\n"
             f"Current: `{cfg.get('sol_amount', 0.1)} SOL`",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("0.05", callback_data="autobuy:sol_preset:0.05"),
-                InlineKeyboardButton("0.1",  callback_data="autobuy:sol_preset:0.1"),
-                InlineKeyboardButton("0.25", callback_data="autobuy:sol_preset:0.25"),
-                InlineKeyboardButton("0.5",  callback_data="autobuy:sol_preset:0.5"),
-            ], [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")]])
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("0.05", callback_data="autobuy:sol_preset:0.05"),
+                    InlineKeyboardButton("0.1",  callback_data="autobuy:sol_preset:0.1"),
+                    InlineKeyboardButton("0.25", callback_data="autobuy:sol_preset:0.25"),
+                    InlineKeyboardButton("0.5",  callback_data="autobuy:sol_preset:0.5"),
+                ],
+                [
+                    InlineKeyboardButton("1 SOL",  callback_data="autobuy:sol_preset:1.0"),
+                    InlineKeyboardButton("2 SOL",  callback_data="autobuy:sol_preset:2.0"),
+                    InlineKeyboardButton("5 SOL",  callback_data="autobuy:sol_preset:5.0"),
+                    InlineKeyboardButton("10 SOL", callback_data="autobuy:sol_preset:10.0"),
+                ],
+                [
+                    InlineKeyboardButton("25 SOL", callback_data="autobuy:sol_preset:25.0"),
+                    InlineKeyboardButton("50 SOL", callback_data="autobuy:sol_preset:50.0"),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
         )
 
     elif action == "sol_preset":
@@ -1950,18 +1963,30 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _show_autobuy(query.edit_message_text, uid)
 
     elif action == "set_daily":
+        cur_limit = cfg.get('daily_limit_sol', 1.0)
+        cur_txt = "Unlimited ♾️" if cur_limit == 0 else f"{cur_limit} SOL"
         set_state(uid, waiting_for="ab_daily_limit")
         await query.edit_message_text(
             "📅 *Set daily SOL spending limit*\n\n"
             "Auto-buy pauses when this limit is reached.\n"
-            f"Current: `{cfg.get('daily_limit_sol', 1.0)} SOL`",
+            "Set to *0* or tap *No Limit* to remove the daily cap.\n"
+            f"Current: `{cur_txt}`",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("0.5 SOL",  callback_data="autobuy:daily_preset:0.5"),
-                InlineKeyboardButton("1 SOL",    callback_data="autobuy:daily_preset:1.0"),
-                InlineKeyboardButton("2 SOL",    callback_data="autobuy:daily_preset:2.0"),
-                InlineKeyboardButton("5 SOL",    callback_data="autobuy:daily_preset:5.0"),
-            ], [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")]])
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("0.5 SOL", callback_data="autobuy:daily_preset:0.5"),
+                    InlineKeyboardButton("1 SOL",   callback_data="autobuy:daily_preset:1.0"),
+                    InlineKeyboardButton("2 SOL",   callback_data="autobuy:daily_preset:2.0"),
+                    InlineKeyboardButton("5 SOL",   callback_data="autobuy:daily_preset:5.0"),
+                ],
+                [
+                    InlineKeyboardButton("10 SOL",  callback_data="autobuy:daily_preset:10.0"),
+                    InlineKeyboardButton("25 SOL",  callback_data="autobuy:daily_preset:25.0"),
+                    InlineKeyboardButton("50 SOL",  callback_data="autobuy:daily_preset:50.0"),
+                ],
+                [InlineKeyboardButton("♾️ No Limit", callback_data="autobuy:daily_preset:0")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
         )
 
     elif action == "daily_preset":
@@ -5393,7 +5418,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif state == "ab_sol_amount":
         try:
             val = float(text)
-            if val <= 0 or val > 100:
+            if val <= 0 or val > 10000:
                 raise ValueError
         except ValueError:
             await update.message.reply_text("Enter a valid SOL amount (e.g. 0.1).")
@@ -5453,17 +5478,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif state == "ab_daily_limit":
         try:
             val = float(text)
-            if val <= 0 or val > 1000:
+            if val < 0 or val > 10000:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Enter a valid daily limit in SOL (e.g. 1.0).")
+            await update.message.reply_text("Enter a valid daily limit in SOL (e.g. 5.0), or 0 for no limit.")
             return
         cfg = get_auto_buy(uid)
         cfg["daily_limit_sol"] = val
         set_auto_buy(uid, cfg)
         clear_state(uid)
+        label = "Unlimited ♾️" if val == 0 else f"`{val} SOL`"
         await update.message.reply_text(
-            f"✅ Daily auto-buy limit set to `{val} SOL`",
+            f"✅ Daily auto-buy limit set to {label}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
