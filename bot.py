@@ -2454,6 +2454,7 @@ async def _show_wallet_menu(send_fn):
             [InlineKeyboardButton("✨ Create New Wallet", callback_data="wallet:create"),
              InlineKeyboardButton("📥 Import Wallet",     callback_data="wallet:import")],
             [InlineKeyboardButton("🔑 Export Key ⚠️",    callback_data="wallet:export")],
+            [InlineKeyboardButton("👁️ Tracked Wallets",   callback_data="wallet:tracked")],
             [InlineKeyboardButton("⬅️ Main Menu",         callback_data="menu:main")],
         ]),
         disable_web_page_preview=True,
@@ -2532,6 +2533,86 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")
             ]])
         )
+
+    elif action == "tracked":
+        try:
+            import wallet_tracker
+            watched = wallet_tracker.get_watched_wallets()
+            if not watched:
+                text = "*👁️ Tracked Wallets*\n\nNo wallets being tracked yet."
+                kb = [[InlineKeyboardButton("➕ Add Wallet", callback_data="wallet:add_tracked")],
+                      [InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]
+            else:
+                text = "*👁️ Tracked Wallets*\n\n"
+                for addr, data in watched.items():
+                    name = data.get("name", "Unknown")
+                    rep_score = data.get("reputation_score", 50)
+                    wins = data.get("wins", 0)
+                    total = data.get("entries_total", 0)
+                    text += f"• `{addr[:8]}...`\n  {name} | 🏆 {wins}/{total} | Rep: {rep_score}\n"
+                kb = [[InlineKeyboardButton("➕ Add Wallet", callback_data="wallet:add_tracked")],
+                      [InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]
+            await query.edit_message_text(
+                text, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup(kb)
+            )
+        except ImportError:
+            await query.edit_message_text(
+                "⚠️ Wallet tracker module not found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]])
+            )
+
+    elif action == "add_tracked":
+        set_state(uid, waiting_for="tracked_wallet_address")
+        await query.edit_message_text(
+            "*➕ Add Tracked Wallet*\n\n"
+            "Enter the wallet address (Solana):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="wallet:tracked")
+            ]])
+        )
+
+    elif action.startswith("remove_tracked:"):
+        wallet_addr = action.split(":")[1]
+        try:
+            import wallet_tracker
+            # In a real implementation, you'd remove from wallet_tracker here
+            # For now, just show a confirmation
+            await query.edit_message_text(
+                f"*Remove Wallet?*\n\n`{wallet_addr}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✅ Remove", callback_data=f"wallet:confirm_remove:{wallet_addr}")],
+                    [InlineKeyboardButton("❌ Keep", callback_data="wallet:tracked")]
+                ])
+            )
+        except ImportError:
+            await query.edit_message_text(
+                "⚠️ Wallet tracker module not found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
+
+    elif action.startswith("confirm_remove:"):
+        wallet_addr = action.split(":")[1]
+        try:
+            import wallet_tracker
+            removed = wallet_tracker.remove_watched_wallet(wallet_addr)
+            if removed:
+                await query.edit_message_text(
+                    "✅ Wallet removed from tracking.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+                )
+            else:
+                await query.edit_message_text(
+                    "⚠️ Wallet not found in tracking list.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+                )
+        except Exception as e:
+            await query.edit_message_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
 
 
 # ─── Pump Live feed ────────────────────────────────────────────────────────────
@@ -5059,6 +5140,74 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]]),
             disable_web_page_preview=True,
         )
+
+    elif state == "tracked_wallet_address":
+        clear_state(uid)
+        wallet_addr = text.strip()
+        # Basic validation: should be 44 chars, alphanumeric
+        if not wallet_addr or len(wallet_addr) != 44:
+            await update.message.reply_text(
+                "❌ Invalid wallet address. Solana addresses are 44 characters.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:add_tracked")
+                ]])
+            )
+            return
+        try:
+            import wallet_tracker
+            # Prompt for name (next step)
+            set_state(uid, waiting_for="tracked_wallet_name")
+            set_state(uid, pending_tracked_wallet=wallet_addr)
+            await update.message.reply_text(
+                f"*✅ Address saved*\n\n"
+                f"`{wallet_addr}`\n\n"
+                f"Now give this wallet a name (e.g., 'Alpha Trader', 'Dev Wallet'):",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="wallet:tracked")
+                ]])
+            )
+        except ImportError:
+            await update.message.reply_text(
+                "⚠️ Wallet tracker module not found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
+
+    elif state == "tracked_wallet_name":
+        wallet_addr = get_state(uid, "pending_tracked_wallet")
+        clear_state(uid)
+        wallet_name = text.strip()
+        if not wallet_name:
+            await update.message.reply_text(
+                "❌ Name cannot be empty.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("↩️ Try Again", callback_data="wallet:add_tracked")
+                ]])
+            )
+            return
+        try:
+            import wallet_tracker
+            if not wallet_addr:
+                await update.message.reply_text("❌ Wallet address not found. Please try again.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+                )
+                return
+            wallet_tracker.add_watched_wallet(wallet_addr, wallet_name)
+            await update.message.reply_text(
+                f"✅ *Wallet tracked!*\n\n"
+                f"Name: {wallet_name}\n"
+                f"Address: `{wallet_addr}`\n\n"
+                f"Waiting for wallet activity...",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⬅️ Tracked Wallets", callback_data="wallet:tracked")
+                ]])
+            )
+        except Exception as e:
+            await update.message.reply_text(
+                f"❌ Error: {str(e)}",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
 
     elif state == "pf_mcap":
         clear_state(uid)

@@ -14,6 +14,7 @@ import requests
 import websockets
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from scanner import calculate_heat_score, fetch_rugcheck, priority_label
+import wallet_tracker
 
 DATA_DIR   = os.path.join(os.path.dirname(__file__), "data")
 STATE_FILE = os.path.join(DATA_DIR, "pumpfeed_state.json")
@@ -515,6 +516,14 @@ async def _handle_token(bot: Bot, token: dict):
     uri     = token.get("uri", "")
     meta    = await loop.run_in_executor(None, fetch_uri_metadata, uri) if uri else {}
     rc      = await loop.run_in_executor(None, fetch_rugcheck, mint)
+
+    # Record wallet activity if creator is a tracked wallet
+    creator = (token.get("traderPublicKey") or "").strip()
+    if creator and wallet_tracker.is_wallet_tracked(creator):
+        sol_amount = float(token.get("solAmount", 0) or 0)
+        buy_usd = sol_amount * sol_usd
+        wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
+
     heat    = calculate_heat_score(_build_scanner_token(token, meta, sol_usd), rc)
 
     text = format_notification(token, meta, sol_usd, heat)
@@ -894,6 +903,13 @@ async def _handle_grad_token(bot: Bot, token: dict):
     meta    = await loop.run_in_executor(None, fetch_uri_metadata, uri) if uri else {}
     rc      = await loop.run_in_executor(None, fetch_rugcheck, mint)
 
+    # Record wallet activity if creator is a tracked wallet
+    creator = (token.get("traderPublicKey") or "").strip()
+    if creator and wallet_tracker.is_wallet_tracked(creator):
+        sol_amount = float(token.get("solAmount", 0) or 0)
+        buy_usd = sol_amount * sol_usd
+        wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
+
     # If WS event is missing name/symbol, fill from DexScreener (15s wait for indexing)
     if not token.get("name") or not token.get("symbol"):
         await asyncio.sleep(15)
@@ -914,6 +930,13 @@ async def _handle_grad_token(bot: Bot, token: dict):
                         token["marketCapSol"] = mcap_usd / sol_usd
         except Exception:
             pass
+
+    # Record wallet activity if creator is a tracked wallet
+    creator = (token.get("traderPublicKey") or "").strip()
+    if creator and wallet_tracker.is_wallet_tracked(creator):
+        sol_amount = float(token.get("solAmount", 0) or 0)
+        buy_usd = sol_amount * sol_usd
+        wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
 
     heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
     text = format_grad_notification(token, meta, sol_usd, heat)
@@ -1047,6 +1070,13 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
         "telegram":    coin.get("telegram") or "",
         "website":     coin.get("website")  or "",
     }
+
+    # Record wallet activity if creator is a tracked wallet
+    creator = token.get("traderPublicKey", "")
+    if creator and wallet_tracker.is_wallet_tracked(creator):
+        sol_amount = float(token.get("solAmount", 0) or 0)
+        buy_usd = sol_amount * sol_usd
+        wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
 
     heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
     text = format_grad_notification(token, meta, sol_usd, heat)
