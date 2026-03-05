@@ -2,6 +2,7 @@
 Heat Score Scanner — per ALERTS.md + AGENTS.md
 Scores new Solana tokens and fires Telegram alerts when score >= 70.
 """
+from __future__ import annotations
 
 import json
 import os

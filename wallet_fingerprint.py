@@ -15,6 +15,7 @@ Bundle detection logic:
 Uses SOLANA_RPC from config. Results are cached in data/fingerprint_cache.json
 to minimize expensive RPC calls (cache TTL: 24h per wallet).
 """
+from __future__ import annotations
 
 import json
 import os

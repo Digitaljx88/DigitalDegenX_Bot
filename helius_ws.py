@@ -6,6 +6,7 @@ to the configured feed channels (via feed.py) seconds after the on-chain event.
 Dedup is handled by feed.py (86400s TTL), so double-posts are impossible even
 when the polling scanner also catches the same token.
 """
+from __future__ import annotations
 
 import asyncio
 import json

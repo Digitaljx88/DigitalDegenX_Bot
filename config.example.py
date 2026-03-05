@@ -8,3 +8,4 @@ ADMIN_IDS = []   # e.g. [123456789]
 
 PAPER_START_SOL    = 10.0
 ALERT_CHECK_SECS   = 60     # how often to poll prices for alerts
+HELIUS_API_KEY     = ""     # Helius API key for WebSocket feeds (optional)

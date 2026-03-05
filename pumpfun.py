@@ -4,6 +4,7 @@ Handles tokens that are still on the bonding curve (pre-graduation).
 After graduation the buy_pumpfun() returns "GRADUATED" so the caller
 can fall back to Jupiter.
 """
+from __future__ import annotations
 
 import struct
 import base64

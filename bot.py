@@ -4,6 +4,7 @@ Features: menu UI + slash commands, paper/live trading, AI analysis,
           price alerts, live wallet portfolio, persistent storage,
           auto-sell (2x/4x/custom), mcap milestone alerts.
 """
+from __future__ import annotations
 
 import asyncio
 import importlib

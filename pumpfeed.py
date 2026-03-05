@@ -5,6 +5,7 @@ the PumpPortal WebSocket (wss://pumpportal.fun/api/data).
 Supports per-user filters: MCap, dev buy, socials, keywords,
 blocked words, tracked wallets, and blocked wallets.
 """
+from __future__ import annotations
 
 import asyncio
 import json

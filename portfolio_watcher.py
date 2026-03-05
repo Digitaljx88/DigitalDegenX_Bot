@@ -3,12 +3,12 @@ Portfolio Distribution Watcher
 Monitors held tokens for crash signals (5-signal system with weighted confidence scoring).
 Sends alerts to main channel when high-risk conditions detected.
 """
+from __future__ import annotations
 
 import json
 import time
 import os
 import requests
-from typing import dict, list, tuple
 
 WATCHER_STATE_FILE = os.path.join("data", "portfolio_watcher_state.json")
 

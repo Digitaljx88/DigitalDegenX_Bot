@@ -11,6 +11,7 @@ Discovery pipeline:
   4. Score wallets by: number of winning tokens entered early + avg MCap reached
   5. Surface top wallets via /discoverwallet command
 """
+from __future__ import annotations
 
 import json
 import os

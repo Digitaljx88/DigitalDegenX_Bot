@@ -28,7 +28,6 @@ def validate_username(username):
     """
     Validates a username: between 3 to 16 characters, only letters and digits allowed.
     """
-    """
     pattern = r'^[a-zA-Z0-9]{3,16}$'
     return re.match(pattern, username) is not None
 
@@ -45,7 +44,6 @@ def validate_password(password):
 def validate_date(date_string):
     """
     Validates a date string in YYYY-MM-DD format.
-    """
     """
     pattern = r'^(\d{4})-(\d{2})-(\d{2})$'
     if re.match(pattern, date_string):
