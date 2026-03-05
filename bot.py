@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 import scanner as sc
 import pumpfun
 import pumpfeed as pf
+import intelligence_tracker as intel
 
 import config as _cfg
 from config import (
@@ -2172,6 +2173,86 @@ async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # ─── Scanner commands ──────────────────────────────────────────────────────────
+
+
+# ─── Intelligence commands ────────────────────────────────────────────────────
+
+async def cmd_wallets_intel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show auto-tracked wallet intelligence."""
+    msg = intel.format_wallet_intelligence(page=0)
+    wallets = intel.get_auto_tracked_wallets()
+    total   = len(wallets)
+    pages   = max(1, (total - 1) // 10 + 1)
+
+    kb_rows = []
+    if pages > 1:
+        kb_rows.append([
+            InlineKeyboardButton("◀", callback_data="intel:wallets:0"),
+            InlineKeyboardButton(f"1/{pages}", callback_data="noop"),
+            InlineKeyboardButton("▶", callback_data="intel:wallets:1"),
+        ])
+    kb_rows.append([InlineKeyboardButton("🔄 Refresh", callback_data="intel:wallets:0")])
+    kb_rows.append([InlineKeyboardButton("📊 Narratives", callback_data="intel:narratives")])
+    await update.message.reply_text(
+        msg,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(kb_rows),
+    )
+
+
+async def cmd_narratives_intel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show narrative intelligence stats."""
+    msg = intel.format_narrative_intelligence()
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton("🔄 Refresh", callback_data="intel:narratives"),
+         InlineKeyboardButton("🤖 Wallets",  callback_data="intel:wallets:0")],
+    ])
+    await update.message.reply_text(msg, parse_mode="Markdown", reply_markup=kb)
+
+
+async def intel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle intelligence panel callbacks."""
+    q    = update.callback_query
+    data = q.data  # e.g. "intel:wallets:0" or "intel:narratives"
+    await q.answer()
+
+    parts = data.split(":")
+    subtype = parts[1] if len(parts) > 1 else ""
+
+    if subtype == "narratives":
+        msg = intel.format_narrative_intelligence()
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔄 Refresh", callback_data="intel:narratives"),
+             InlineKeyboardButton("🤖 Wallets",  callback_data="intel:wallets:0")],
+        ])
+        try:
+            await q.edit_message_text(msg, parse_mode="Markdown", reply_markup=kb)
+        except Exception:
+            pass
+
+    elif subtype == "wallets":
+        page    = int(parts[2]) if len(parts) > 2 else 0
+        wallets = intel.get_auto_tracked_wallets()
+        total   = len(wallets)
+        pages   = max(1, (total - 1) // 10 + 1)
+        page    = max(0, min(page, pages - 1))
+        msg     = intel.format_wallet_intelligence(page=page)
+
+        kb_rows = []
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("◀", callback_data=f"intel:wallets:{page-1}"))
+        nav.append(InlineKeyboardButton(f"{page+1}/{pages}", callback_data="noop"))
+        if page < pages - 1:
+            nav.append(InlineKeyboardButton("▶", callback_data=f"intel:wallets:{page+1}"))
+        if len(nav) > 1:
+            kb_rows.append(nav)
+        kb_rows.append([InlineKeyboardButton("🔄 Refresh", callback_data=f"intel:wallets:{page}")])
+        kb_rows.append([InlineKeyboardButton("📊 Narratives", callback_data="intel:narratives")])
+        try:
+            await q.edit_message_text(msg, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb_rows))
+        except Exception:
+            pass
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
@@ -7461,6 +7542,8 @@ async def post_init(app):
         BotCommand("cluster",    "Co-investment cluster map for a token"),
         BotCommand("clustertop", "Top co-investing wallet pairs ever"),
         BotCommand("playbook",   "Predictive launch archetype win rates"),
+        BotCommand("wallets",    "Auto-tracked wallet intelligence & win rates"),
+        BotCommand("narratives", "Narrative performance stats & trending themes"),
     ])
 
 
@@ -7510,6 +7593,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))
     app.add_handler(CommandHandler("stoploss",   cmd_stoploss))
+    app.add_handler(CommandHandler("wallets",    cmd_wallets_intel))
+    app.add_handler(CommandHandler("narratives", cmd_narratives_intel))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
@@ -7541,6 +7626,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))
     app.add_handler(CallbackQueryHandler(pnl_callback,                 pattern=r"^pnl:"))
     app.add_handler(CallbackQueryHandler(gsl_callback,                 pattern=r"^gsl:"))
+    app.add_handler(CallbackQueryHandler(intel_callback,               pattern=r"^intel:"))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

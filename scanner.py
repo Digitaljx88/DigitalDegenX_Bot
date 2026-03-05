@@ -12,6 +12,7 @@ import wallet_tracker
 import wallet_fingerprint
 import wallet_cluster
 import launch_predictor
+import intelligence_tracker
 
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 SCANNER_STATE_FILE = os.path.join(DATA_DIR, "scanner_state.json")
@@ -589,9 +590,26 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     elif rc.get("rugged"):
         disqualified = "Flagged as rugged by RugCheck"
 
-    # Total: 120 pts base + cluster boost + bundle penalty + prediction boost
+    # Intelligence boosts from tracked wallet reputation + trending narratives
+    try:
+        top_holder_addrs = [
+            h.get("address") or h.get("owner", "")
+            for h in (rc.get("topHolders") or [])
+        ]
+        intel_wallet_boost = intelligence_tracker.get_wallet_score_boost(top_holder_addrs)
+
+        _narr_text = f"{token.get('name','')} {token.get('symbol','')} {token.get('description','')}"
+        _matched_narratives = intelligence_tracker.detect_narratives(
+            token.get("name", ""), token.get("symbol", ""), token.get("description", "")
+        )
+        intel_narrative_boost = intelligence_tracker.get_narrative_score_boost(_matched_narratives)
+    except Exception:
+        intel_wallet_boost    = 0.0
+        intel_narrative_boost = 0.0
+
+    # Total: 120 pts base + cluster boost + bundle penalty + prediction boost + intelligence boosts
     base_total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
-    total = max(0, base_total + clus_pts + bund_pts + pred_pts)
+    total = max(0, int(base_total + clus_pts + bund_pts + pred_pts + intel_wallet_boost + intel_narrative_boost))
 
     # Risk level (adjusted for 120pt scale)
     red_flags = []
@@ -636,6 +654,8 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
             "age":        (age_pts,  age_reason),
             "bundle":     (bund_pts, bund_reason),
             "predict":    (pred_pts, pred_reason),
+            "intel_wallet":    (int(intel_wallet_boost),    f"Smart wallet boost ({intel_wallet_boost:.1f}pts)"),
+            "intel_narrative": (int(intel_narrative_boost), f"Trending narrative boost ({intel_narrative_boost:.1f}pts)"),
         },
         "archetype":     pred_arch,
         "archetype_conf": pred_conf,
@@ -768,6 +788,13 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         rc     = fetch_rugcheck(mint)
         result = calculate_heat_score(token, rc)
 
+        # Intelligence tracking: update narrative stats + auto-track wallets
+        score = result["total"]
+        try:
+            intelligence_tracker.process_scored_token(token, rc, score)
+        except Exception:
+            pass
+
         # Log every scored token
         narr_reason = result["breakdown"]["narrative"][1]
         matched_narrative = next((n for n in NARRATIVES if n in narr_reason), "Other")
@@ -784,8 +811,6 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             "alerted":   False,
             "dq":        result.get("disqualified"),
         })
-
-        score = result["total"]
 
         if result["disqualified"]:
             continue
