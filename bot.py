@@ -2245,6 +2245,190 @@ async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _show_wallet_menu(update.message.reply_text)
 
 
+async def cmd_whalebuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /whalebuy [mins]
+    Shows tokens where tracked wallets entered recently.
+    """
+    try:
+        import wallet_tracker
+        
+        age_mins = int(context.args[0]) if context.args else 15
+        if age_mins < 1 or age_mins > 120:
+            age_mins = 15
+        
+        entries = wallet_tracker.get_recent_entries(age_mins)
+        
+        if not entries:
+            await update.message.reply_text(
+                f"🦣 No tracked wallet activity in the last {age_mins} minutes.\n\n"
+                f"Use /addwallet to start tracking smart traders!",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Group by mint, show top 10
+        by_mint = {}
+        for entry in entries:
+            mint = entry["mint"]
+            if mint not in by_mint:
+                by_mint[mint] = []
+            by_mint[mint].append(entry)
+        
+        lines = [f"🦣 *Whale Buys (Last {age_mins} min)*\n"]
+        count = 0
+        for mint, wallet_entries in list(by_mint.items())[:10]:
+            wallets = [e["wallet_name"] for e in wallet_entries]
+            unique_wallets = len(set(e["wallet"] for e in wallet_entries))
+            timestamp = wallet_entries[0]["entry_ts"]
+            mins_ago = (time.time() - timestamp) / 60
+            
+            lines.append(f"• `{mint[:8]}...` ({unique_wallets} wallets, {mins_ago:.1f}m ago)")
+            count += 1
+        
+        if len(by_mint) > 10:
+            lines.append(f"... and {len(by_mint) - 10} more")
+        
+        lines.append(f"\n🔍 Use /contract <mint> for full details")
+        
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+    
+    except ImportError:
+        await update.message.reply_text("⚠️ Wallet tracking not initialized")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def cmd_momentum(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /momentum [ratio]
+    Shows tokens with rapid volume acceleration (m5→h1 ratio).
+    """
+    try:
+        from scanner import get_todays_alerts, format_heat_score_card
+        
+        ratio_threshold = float(context.args[0]) if context.args else 2.0
+        if ratio_threshold < 1.0 or ratio_threshold > 10.0:
+            ratio_threshold = 2.0
+        
+        alerts = get_todays_alerts()
+        
+        if not alerts:
+            await update.message.reply_text(
+                "📊 No tokens scanned today yet.\n\n"
+                "Use /scan to start watching for momentum plays.",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Filter for high momentum (check breakdown for momentum score)
+        momentum_tokens = []
+        for token in alerts:
+            bd = token.get("breakdown", {})
+            mom_pts, mom_reason = bd.get("momentum", (0, ""))
+            if mom_pts >= 12:  # High momentum threshold
+                momentum_tokens.append((token, mom_pts))
+        
+        if not momentum_tokens:
+            await update.message.reply_text(
+                f"📊 No tokens with {ratio_threshold}x+ momentum today.\n\n"
+                "Check back soon!",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Sort by momentum score desc, show top 5
+        momentum_tokens.sort(key=lambda x: -x[1])
+        
+        lines = ["🚀 *High Momentum Tokens*\n"]
+        for token, score in momentum_tokens[:5]:
+            name = token.get("name", "?")
+            symbol = token.get("symbol", "?")
+            heat = token.get("total", "?")
+            lines.append(f"• ${symbol} {name}")
+            lines.append(f"  Heat: {heat}/120")
+            bd = token.get("breakdown", {})
+            _, mom_reason = bd.get("momentum", ("", ""))
+            if mom_reason:
+                lines.append(f"  {mom_reason}")
+            lines.append("")
+        
+        if len(momentum_tokens) > 5:
+            lines.append(f"... and {len(momentum_tokens) - 5} more")
+        
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
+async def cmd_contract(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /contract <mint>
+    Full snapshot: liquidity, age, volume ramp, heat breakdown.
+    """
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "📋 Usage: /contract <mint>\n\n"
+                "Shows full token snapshot (liquidity, age, volume, heat).",
+                parse_mode="Markdown"
+            )
+            return
+        
+        mint = context.args[0].strip()
+        
+        # Fetch from scanner's daily log or live scan
+        from scanner import load_log
+        log = load_log()
+        
+        token_entry = None
+        for entry in reversed(log):
+            if entry.get("mint") == mint:
+                token_entry = entry
+                break
+        
+        if not token_entry:
+            await update.message.reply_text(
+                f"🔍 Token not found in recent scans.\n\n"
+                f"Try: /heatscore {mint}",
+                parse_mode="Markdown"
+            )
+            return
+        
+        # Format snapshot
+        lines = [
+            f"📋 *Token Snapshot*\n",
+            f"𝘈𝘭𝘵 𝘱𝘳𝘪𝘭𝘭𝘪𝘱𝘶𝘴 *{token_entry.get('name', '?')}* (${token_entry.get('symbol', '?')})",
+            f"",
+            f"Mint: `{mint}`",
+            f"Narrative: {token_entry.get('narrative', 'Unknown')}",
+            f"Score: {token_entry.get('score', '?')}/120",
+            f"MCap: ${token_entry.get('mcap', 0):,.0f}",
+            f"",
+            f"📊 [Chart](https://dexscreener.com/solana/{mint})  "
+            f"[Pump](https://pump.fun/{mint})  "
+            f"[RugCheck](https://rugcheck.xyz/tokens/{mint})",
+        ]
+        
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+    
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
+
+
 async def _show_wallet_menu(send_fn):
     from solders.keypair import Keypair as _KP
     if WALLET_PRIVATE_KEY:
@@ -6077,6 +6261,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("wallet",     cmd_wallet))
     app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
+    app.add_handler(CommandHandler("whalebuy",   cmd_whalebuy))
+    app.add_handler(CommandHandler("momentum",   cmd_momentum))
+    app.add_handler(CommandHandler("contract",   cmd_contract))
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))
