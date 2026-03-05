@@ -1147,39 +1147,13 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
 
 
 async def run_gradwatch(bot: Bot):
-    """Poll pump.fun API every 30s for graduated tokens and DM subscribers.
-
-    On the first poll, all currently-graduated tokens in the fetch window are
-    silently recorded in grad_seen (no alerts).  Only tokens that graduate
-    *after* the bot starts will trigger notifications — so the 11:30 token
-    alerts before anything that graduated earlier.
+    """Graduation alerts are delivered in real-time via the WebSocket feed
+    (run_pumpfeed → _handle_grad_token).  This coroutine is kept as a stub so
+    callers don't need to be changed, but it does nothing — REST polling is
+    intentionally disabled to prevent stale/historical graduation alerts.
     """
-    seeded = False
     while True:
-        try:
-            s = load_state()
-            has_subs    = any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values())
-            has_channel = bool(s.get("pumpgrad_channel"))
-            if has_subs or has_channel:
-                loop  = asyncio.get_running_loop()
-                coins = await loop.run_in_executor(None, _fetch_pumpfun_graduated)
-                if not seeded:
-                    # First pass: silently mark every current grad as seen so
-                    # only brand-new graduations fire alerts going forward.
-                    s2 = load_state()
-                    _prune_grad_seen(s2)
-                    for coin in coins:
-                        mint = coin.get("mint", "")
-                        if mint:
-                            s2.setdefault("grad_seen", {})[mint] = time.time()
-                    save_state(s2)
-                    seeded = True
-                else:
-                    for coin in coins:
-                        asyncio.create_task(_handle_grad_from_pumpfun(bot, coin))
-        except Exception:
-            pass
-        await asyncio.sleep(GRADWATCH_SECS)
+        await asyncio.sleep(3600)  # sleep forever; real alerts come from WS
 
 
 # ─── Persistent WebSocket listener ────────────────────────────────────────────
