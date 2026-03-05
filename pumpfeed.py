@@ -1151,13 +1151,38 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
 
 
 async def run_gradwatch(bot: Bot):
-    """Graduation alerts are delivered in real-time via the WebSocket feed
-    (run_pumpfeed → _handle_grad_token).  This coroutine is kept as a stub so
-    callers don't need to be changed, but it does nothing — REST polling is
-    intentionally disabled to prevent stale/historical graduation alerts.
+    """Poll pump.fun API as a fallback for graduation alerts.
+
+    Primary path is still WebSocket migrations, but this catches misses.
+    To avoid historical spam, the first poll only seeds `grad_seen` and does
+    not notify. Subsequent polls only notify for newly seen mints.
     """
+    seeded = False
     while True:
-        await asyncio.sleep(3600)  # sleep forever; real alerts come from WS
+        try:
+            s = load_state()
+            has_subs = any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values())
+            has_channel = bool(s.get("pumpgrad_channel"))
+            if has_subs or has_channel:
+                loop = asyncio.get_running_loop()
+                coins = await loop.run_in_executor(None, _fetch_pumpfun_graduated)
+                if not seeded:
+                    s2 = load_state()
+                    _prune_grad_seen(s2)
+                    now_ts = time.time()
+                    for coin in coins:
+                        mint = coin.get("mint", "")
+                        if mint:
+                            s2.setdefault("grad_seen", {})[mint] = now_ts
+                    save_state(s2)
+                    seeded = True
+                    print(f"[GRAD WATCH] seeded {len(coins)} mints", flush=True)
+                else:
+                    for coin in coins:
+                        asyncio.create_task(_handle_grad_from_pumpfun(bot, coin))
+        except Exception as e:
+            print(f"[GRAD WATCH] error: {e}", flush=True)
+        await asyncio.sleep(GRADWATCH_SECS)
 
 
 # ─── Persistent WebSocket listener ────────────────────────────────────────────
