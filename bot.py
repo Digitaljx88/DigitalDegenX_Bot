@@ -6477,6 +6477,58 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
+    elif state == "alert_channel_main":
+        # Set main alert channel
+        ch = text.strip()
+        if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
+            await update.message.reply_text(
+                "Enter channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+                parse_mode="Markdown"
+            )
+            return
+        try:
+            ch_id = int(ch) if ch.lstrip("-").isdigit() else ch
+            set_alert_channel("main", ch_id)
+            clear_state(uid)
+            await update.message.reply_text(
+                f"✅ <b>Main Channel Set</b>\n\n"
+                f"Channel: <code>{ch}</code>\n\n"
+                f"Portfolio and Pumpfun alerts will be sent here.\n"
+                f"Make sure the bot is an admin.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Channel Settings", callback_data="channels:menu"),
+                ]])
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+
+    elif state == "alert_channel_launches":
+        # Set launch alert channel
+        ch = text.strip()
+        if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
+            await update.message.reply_text(
+                "Enter channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+                parse_mode="Markdown"
+            )
+            return
+        try:
+            ch_id = int(ch) if ch.lstrip("-").isdigit() else ch
+            set_alert_channel("launches", ch_id)
+            clear_state(uid)
+            await update.message.reply_text(
+                f"✅ <b>Launch Channel Set</b>\n\n"
+                f"Channel: <code>{ch}</code>\n\n"
+                f"Early token launch alerts will be sent here.\n"
+                f"Make sure the bot is an admin.",
+                parse_mode="HTML",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("⚙️ Channel Settings", callback_data="channels:menu"),
+                ]])
+            )
+        except Exception as e:
+            await update.message.reply_text(f"❌ Error: {str(e)}")
+
     elif state == "pumplive_channel":
         ch = text.strip()
         if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
@@ -7075,6 +7127,167 @@ async def launches_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ─── Alert Channel Configuration ──────────────────────────────────────────────
+
+def get_alert_channels() -> dict:
+    """Get all configured alert channels from global settings or config."""
+    import config
+    gs = load_global_settings()
+    return {
+        "main": gs.get("main_alert_channel_id", getattr(config, 'MAIN_CHANNEL_ID', None)),
+        "launches": gs.get("launch_alert_channel_id", getattr(config, 'LAUNCH_ALERT_CHANNEL_ID', None)),
+    }
+
+def set_alert_channel(channel_type: str, channel_id: int) -> bool:
+    """Save alert channel ID to global settings."""
+    gs = load_global_settings()
+    if channel_type == "main":
+        gs["main_alert_channel_id"] = channel_id
+    elif channel_type == "launches":
+        gs["launch_alert_channel_id"] = channel_id
+    else:
+        return False
+    save_global_settings(gs)
+    return True
+
+def format_channel_id(channel_id) -> str:
+    """Format channel ID for display."""
+    if not channel_id:
+        return "❌ Not configured"
+    return f"`{channel_id}`"
+
+async def cmd_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show and manage alert channels."""
+    uid = update.effective_user.id
+    channels = get_alert_channels()
+    
+    main_status = format_channel_id(channels.get("main"))
+    launches_status = format_channel_id(channels.get("launches"))
+    
+    await update.message.reply_text(
+        "⚙️ <b>Alert Channel Settings</b>\n\n"
+        f"📊 <b>Main Channel</b> (portfolio/pumpfun alerts)\n"
+        f"   Status: {main_status}\n\n"
+        f"🚀 <b>Launch Channel</b> (early token launches)\n"
+        f"   Status: {launches_status}\n\n"
+        f"<i>Click below to configure channels</i>",
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 Set Main Channel", callback_data="channels:set:main")],
+            [InlineKeyboardButton("🚀 Set Launch Channel", callback_data="channels:set:launches")],
+            [InlineKeyboardButton("🧪 Test Channels", callback_data="channels:test")],
+            [InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")],
+        ])
+    )
+
+
+async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle alert channel configuration."""
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    channel_type = parts[2] if len(parts) > 2 else ""
+    await query.answer()
+    
+    if action == "set":
+        set_state(uid, waiting_for=f"alert_channel_{channel_type}")
+        
+        channel_names = {
+            "main": "📊 Main Channel (portfolio alerts)",
+            "launches": "🚀 Launch Channel (new tokens)"
+        }
+        
+        await query.edit_message_text(
+            f"⚙️ <b>Set {channel_names.get(channel_type, 'Alert')} Channel</b>\n\n"
+            f"Send the <b>channel ID</b> (e.g. <code>-1001234567890</code>)\n\n"
+            f"<i>Steps:</i>\n"
+            f"1. Create a private Telegram channel\n"
+            f"2. Add this bot as admin\n"
+            f"3. Get the channel ID:\n"
+            f"   • Use /getid command\n"
+            f"   • Or forward message to @userinfobot\n"
+            f"4. Paste the ID below",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="channels:menu"),
+            ]])
+        )
+    
+    elif action == "test":
+        import config
+        channels = get_alert_channels()
+        
+        msg = "🧪 <b>Testing Alert Channels</b>\n\n"
+        
+        try:
+            main_id = channels.get("main")
+            if main_id:
+                await context.bot.send_message(
+                    chat_id=main_id,
+                    text="✅ <b>Main Channel Test</b>\n\nThis channel is configured correctly!",
+                    parse_mode="HTML"
+                )
+                msg += "✅ Main channel working\n"
+            else:
+                msg += "⚠️ Main channel not set\n"
+        except Exception as e:
+            msg += f"❌ Main channel error: {str(e)[:50]}\n"
+        
+        try:
+            launch_id = channels.get("launches")
+            if launch_id:
+                await context.bot.send_message(
+                    chat_id=launch_id,
+                    text="✅ <b>Launch Channel Test</b>\n\nThis channel is configured correctly!",
+                    parse_mode="HTML"
+                )
+                msg += "✅ Launch channel working\n"
+            else:
+                msg += "⚠️ Launch channel not set\n"
+        except Exception as e:
+            msg += f"❌ Launch channel error: {str(e)[:50]}\n"
+        
+        channels_obj = get_alert_channels()
+        main_status = format_channel_id(channels_obj.get("main"))
+        launches_status = format_channel_id(channels_obj.get("launches"))
+        
+        msg += f"\n<b>Current Configuration:</b>\n"
+        msg += f"📊 Main: {main_status}\n"
+        msg += f"🚀 Launch: {launches_status}"
+        
+        await query.edit_message_text(
+            msg,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Set Main", callback_data="channels:set:main")],
+                [InlineKeyboardButton("🚀 Set Launch", callback_data="channels:set:launches")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="channels:menu")],
+            ])
+        )
+    
+    elif action == "menu":
+        channels_obj = get_alert_channels()
+        main_status = format_channel_id(channels_obj.get("main"))
+        launches_status = format_channel_id(channels_obj.get("launches"))
+        
+        await query.edit_message_text(
+            "⚙️ <b>Alert Channel Settings</b>\n\n"
+            f"📊 <b>Main Channel</b> (portfolio/pumpfun alerts)\n"
+            f"   Status: {main_status}\n\n"
+            f"🚀 <b>Launch Channel</b> (early token launches)\n"
+            f"   Status: {launches_status}\n\n"
+            f"<i>Click below to configure channels</i>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Set Main Channel", callback_data="channels:set:main")],
+                [InlineKeyboardButton("🚀 Set Launch Channel", callback_data="channels:set:launches")],
+                [InlineKeyboardButton("🧪 Test Channels", callback_data="channels:test")],
+                [InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")],
+            ])
+        )
+
+
 # ─── Global Stop-Loss callback ────────────────────────────────────────────────
 
 def _gsl_menu_kb(gsl: dict) -> InlineKeyboardMarkup:
@@ -7262,6 +7475,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
     app.add_handler(CommandHandler("watch",      cmd_portfolio_watch))
     app.add_handler(CommandHandler("launches",   cmd_launches))
+    app.add_handler(CommandHandler("channels",   cmd_channels))
     app.add_handler(CommandHandler("whalebuy",        cmd_whalebuy))
     app.add_handler(CommandHandler("momentum",        cmd_momentum))
     app.add_handler(CommandHandler("contract",        cmd_contract))
@@ -7299,6 +7513,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(pumpgrad_callback,            pattern=r"^pumpgrad:"))
     app.add_handler(CallbackQueryHandler(watch_callback,               pattern=r"^watch:"))
     app.add_handler(CallbackQueryHandler(launches_callback,            pattern=r"^launches:"))
+    app.add_handler(CallbackQueryHandler(channels_callback,            pattern=r"^channels:"))
     app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
     app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
     app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))

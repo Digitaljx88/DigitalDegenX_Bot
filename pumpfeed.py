@@ -95,6 +95,38 @@ def save_state(s: dict):
         json.dump(s, f, indent=2)
 
 
+def get_alert_channel(channel_type: str = "main"):
+    """Get alert channel ID from global settings with fallback to config.
+    
+    Args:
+        channel_type: "main" or "launches"
+    
+    Returns:
+        Channel ID (int or str) or None if not configured
+    """
+    try:
+        from bot import load_global_settings
+        import config
+        
+        gs = load_global_settings()
+        
+        if channel_type == "main":
+            return gs.get("main_alert_channel_id", getattr(config, 'MAIN_CHANNEL_ID', None))
+        elif channel_type == "launches":
+            return gs.get("launch_alert_channel_id", getattr(config, 'LAUNCH_ALERT_CHANNEL_ID', None))
+    except:
+        pass
+    
+    # Fallback to config if anything fails
+    import config
+    if channel_type == "main":
+        return getattr(config, 'MAIN_CHANNEL_ID', None)
+    elif channel_type == "launches":
+        return getattr(config, 'LAUNCH_ALERT_CHANNEL_ID', None)
+    
+    return None
+
+
 def _prune_seen(s: dict):
     cutoff = time.time() - DEDUP_TTL
     s["seen"] = {m: t for m, t in s.get("seen", {}).items() if t > cutoff}
@@ -1241,12 +1273,13 @@ async def run_portfolio_watch(bot: Bot):
         print("[WATCH] Portfolio watcher disabled in config", flush=True)
         return
     
-    if not config.MAIN_CHANNEL_ID:
-        print("[WATCH] MAIN_CHANNEL_ID not configured", flush=True)
+    main_channel = get_alert_channel("main")
+    if not main_channel:
+        print("[WATCH] Main alert channel not configured", flush=True)
         return
     
     interval = config.PORTFOLIO_WATCHER_INTERVAL_SECS
-    print(f"[WATCH] Starting portfolio watcher (interval={interval}s)", flush=True)
+    print(f"[WATCH] Starting portfolio watcher (interval={interval}s, channel={main_channel})", flush=True)
     
     while True:
         try:
@@ -1270,7 +1303,7 @@ async def run_portfolio_watch(bot: Bot):
                     for mint, symbol, signals, score, risk_level, message in alerts:
                         try:
                             await bot.send_message(
-                                chat_id=config.MAIN_CHANNEL_ID,
+                                chat_id=main_channel,
                                 text=message,
                                 parse_mode="Markdown"
                             )
@@ -1298,19 +1331,20 @@ async def run_launch_hunter(bot: Bot):
         print("[LAUNCH] Launch hunter disabled in config", flush=True)
         return
     
-    if not config.LAUNCH_ALERT_CHANNEL_ID:
-        print("[LAUNCH] LAUNCH_ALERT_CHANNEL_ID not configured", flush=True)
+    launch_channel = get_alert_channel("launches")
+    if not launch_channel:
+        print("[LAUNCH] Launch alert channel not configured", flush=True)
         return
     
     interval = config.LAUNCH_HUNTER_INTERVAL_SECS
-    print(f"[LAUNCH] Starting launch hunter (interval={interval}s)", flush=True)
+    print(f"[LAUNCH] Starting launch hunter (interval={interval}s, channel={launch_channel})", flush=True)
     
     while True:
         try:
             # Check for new launches
             alerts = await check_for_new_launches(
                 bot=bot,
-                launch_channel_id=config.LAUNCH_ALERT_CHANNEL_ID,
+                launch_channel_id=launch_channel,
                 min_liquidity=config.LAUNCH_HUNTER_MIN_LIQUIDITY_USD,
                 max_age_minutes=config.LAUNCH_HUNTER_MAX_AGE_MINUTES
             )
