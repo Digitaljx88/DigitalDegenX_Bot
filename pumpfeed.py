@@ -26,7 +26,7 @@ DEDUP_TTL      = 86400
 GRAD_SOL       = 85.0
 VIRT_OFFSET    = 30.0
 GRADWATCH_SECS = 30          # poll every 30s for faster detection
-GRAD_MAX_AGE_H = 72          # only alert on tokens created within last 72h
+GRAD_MAX_AGE_H = 4           # only fetch tokens graduated within last 4 hours
 
 # Injected by bot.py at startup to avoid circular import
 _grad_autobuy_fn = None
@@ -1147,7 +1147,14 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
 
 
 async def run_gradwatch(bot: Bot):
-    """Poll pump.fun API every 60s for graduated tokens and DM subscribers."""
+    """Poll pump.fun API every 30s for graduated tokens and DM subscribers.
+
+    On the first poll, all currently-graduated tokens in the fetch window are
+    silently recorded in grad_seen (no alerts).  Only tokens that graduate
+    *after* the bot starts will trigger notifications — so the 11:30 token
+    alerts before anything that graduated earlier.
+    """
+    seeded = False
     while True:
         try:
             s = load_state()
@@ -1156,8 +1163,20 @@ async def run_gradwatch(bot: Bot):
             if has_subs or has_channel:
                 loop  = asyncio.get_running_loop()
                 coins = await loop.run_in_executor(None, _fetch_pumpfun_graduated)
-                for coin in coins:
-                    asyncio.create_task(_handle_grad_from_pumpfun(bot, coin))
+                if not seeded:
+                    # First pass: silently mark every current grad as seen so
+                    # only brand-new graduations fire alerts going forward.
+                    s2 = load_state()
+                    _prune_grad_seen(s2)
+                    for coin in coins:
+                        mint = coin.get("mint", "")
+                        if mint:
+                            s2.setdefault("grad_seen", {})[mint] = time.time()
+                    save_state(s2)
+                    seeded = True
+                else:
+                    for coin in coins:
+                        asyncio.create_task(_handle_grad_from_pumpfun(bot, coin))
         except Exception:
             pass
         await asyncio.sleep(GRADWATCH_SECS)
