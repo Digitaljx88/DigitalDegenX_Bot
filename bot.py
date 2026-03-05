@@ -546,6 +546,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     pg_lbl    = "🟢 Pump Grad: ON" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad: OFF"
     ab_cfg    = get_auto_buy(uid)
     ab_lbl    = "🟢 Auto-Buy: ON" if ab_cfg.get("enabled") else "🔴 Auto-Buy: OFF"
+    gsl       = get_global_sl()
+    gsl_lbl   = "🟢 SL: ON" if gsl.get("enabled") else "🔴 SL: OFF"
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
          InlineKeyboardButton("💰 Trade",        callback_data="menu:trade"),
@@ -563,7 +565,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:toggle"),
          InlineKeyboardButton("⚙️ Grad Settings", callback_data="pumpgrad:menu")],
         [InlineKeyboardButton("👛 Wallet",        callback_data="wallet:menu"),
-         InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
+         InlineKeyboardButton(gsl_lbl,            callback_data="gsl:menu")],
+        [InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
     ])
 
 
@@ -2149,6 +2152,23 @@ async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_autosell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Loading auto-sell...")
     await _show_autosell(msg.edit_text, update.effective_user.id)
+
+
+async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick access to global stop-loss settings."""
+    uid = update.effective_user.id
+    gsl = get_global_sl()
+    on = gsl.get("enabled", False)
+    status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+    await update.message.reply_text(
+        f"*🌍 Global Stop-Loss*\n\n"
+        f"Status: {status_txt}\n"
+        f"Trigger: price drops `{gsl.get('pct', 50)}%` from buy price\n"
+        f"Action: sell `{gsl.get('sell_pct', 100)}%` of position\n\n"
+        f"Applies to ALL tracked positions as a safety net.",
+        parse_mode="Markdown",
+        reply_markup=_gsl_menu_kb(gsl)
+    )
 
 
 # ─── Scanner commands ──────────────────────────────────────────────────────────
@@ -7423,6 +7443,7 @@ async def post_init(app):
         BotCommand("sell",       "Sell a token from your portfolio"),
         BotCommand("portfolio",  "View your holdings & balances"),
         BotCommand("autosell",   "Configure auto-sell targets per token"),
+        BotCommand("stoploss",   "Global stop-loss settings (safety net)"),
         BotCommand("mode",       "Switch between paper and live trading"),
         BotCommand("alert",      "Set a price alert for a token"),
         BotCommand("alerts",     "View & manage your active alerts"),
@@ -7488,6 +7509,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))
+    app.add_handler(CommandHandler("stoploss",   cmd_stoploss))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
