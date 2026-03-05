@@ -1285,3 +1285,43 @@ async def run_portfolio_watch(bot: Bot):
             print(f"[WATCH] Error in main loop: {e}", flush=True)
         
         await asyncio.sleep(interval)
+
+
+async def run_launch_hunter(bot: Bot):
+    """Monitor blockchain for brand new token launches with liquidity.
+    Sends instant alerts to launch channel when tokens appear.
+    """
+    from launch_hunter import check_for_new_launches
+    import config
+    
+    if not config.LAUNCH_HUNTER_ENABLED:
+        print("[LAUNCH] Launch hunter disabled in config", flush=True)
+        return
+    
+    if not config.LAUNCH_ALERT_CHANNEL_ID:
+        print("[LAUNCH] LAUNCH_ALERT_CHANNEL_ID not configured", flush=True)
+        return
+    
+    interval = config.LAUNCH_HUNTER_INTERVAL_SECS
+    print(f"[LAUNCH] Starting launch hunter (interval={interval}s)", flush=True)
+    
+    while True:
+        try:
+            # Check for new launches
+            alerts = await check_for_new_launches(
+                bot=bot,
+                launch_channel_id=config.LAUNCH_ALERT_CHANNEL_ID,
+                min_liquidity=config.LAUNCH_HUNTER_MIN_LIQUIDITY_USD,
+                max_age_minutes=config.LAUNCH_HUNTER_MAX_AGE_MINUTES
+            )
+            
+            if alerts:
+                print(f"[LAUNCH] Detected {len(alerts)} new launches", flush=True)
+                for mint, symbol in alerts:
+                    print(f"[LAUNCH] 🚀 Alerted: ${symbol}", flush=True)
+            
+        except Exception as e:
+            print(f"[LAUNCH] Error in detection loop: {e}", flush=True)
+        
+        await asyncio.sleep(interval)
+

@@ -6982,6 +6982,99 @@ async def watch_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+# ─── Early Launch Hunter ──────────────────────────────────────────────────────
+
+async def cmd_launches(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show recent token launches detected by the hunt."""
+    from launch_hunter import get_launch_stats, format_launch_stats_message
+    
+    message = format_launch_stats_message()
+    
+    await update.message.reply_text(
+        message,
+        parse_mode="HTML",
+        reply_markup=InlineKeyboardMarkup([[
+            InlineKeyboardButton("🔄 Refresh", callback_data="launches:refresh"),
+            InlineKeyboardButton("⚙️ Settings", callback_data="launches:settings"),
+            InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+        ]])
+    )
+
+
+async def launches_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle launch hunter callbacks."""
+    from launch_hunter import get_launch_stats, format_launch_stats_message
+    
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    await query.answer()
+    
+    if action == "refresh":
+        message = format_launch_stats_message()
+        
+        await query.edit_message_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data="launches:refresh"),
+                InlineKeyboardButton("⚙️ Settings", callback_data="launches:settings"),
+                InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+            ]])
+        )
+    
+    elif action == "settings":
+        gs = load_global_settings()
+        hunter_enabled = gs.get(f"launch_hunter_enabled_{uid}", True)
+        status = "🟢 Enabled" if hunter_enabled else "🔴 Disabled"
+        
+        await query.edit_message_text(
+            f"⚙️ <b>Launch Hunter Settings</b>\n\n"
+            f"Status: {status}\n\n"
+            f"The launch hunter watches for:\n"
+            f"• 🚀 Brand new token launches\n"
+            f"• 💧 Liquidity being added\n"
+            f"• ⏱️ Smart detection (seconds old)\n"
+            f"• 🎯 Configurable minimum liquidity\n\n"
+            f"Alerts sent to launch channel instantly when tokens appear.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔄 Toggle", callback_data="launches:toggle")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="launches:back")],
+            ])
+        )
+    
+    elif action == "toggle":
+        gs = load_global_settings()
+        hunter_enabled = gs.get(f"launch_hunter_enabled_{uid}", True)
+        gs[f"launch_hunter_enabled_{uid}"] = not hunter_enabled
+        save_global_settings(gs)
+        
+        new_status = "🟢 Enabled" if not hunter_enabled else "🔴 Disabled"
+        await query.edit_message_text(
+            f"✅ <b>Launch Hunter {new_status}</b>",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Settings", callback_data="launches:settings"),
+                InlineKeyboardButton("⬅️ Back", callback_data="launches:back"),
+            ]])
+        )
+    
+    elif action == "back":
+        message = format_launch_stats_message()
+        
+        await query.edit_message_text(
+            message,
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔄 Refresh", callback_data="launches:refresh"),
+                InlineKeyboardButton("⚙️ Settings", callback_data="launches:settings"),
+                InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+            ]])
+        )
+
+
 # ─── Global Stop-Loss callback ────────────────────────────────────────────────
 
 def _gsl_menu_kb(gsl: dict) -> InlineKeyboardMarkup:
@@ -7105,6 +7198,8 @@ async def post_init(app):
     asyncio.create_task(pf.run_gradwatch(app.bot))
     # Monitor portfolio tokens for crash signals (distribution watcher)
     asyncio.create_task(pf.run_portfolio_watch(app.bot))
+    # Monitor blockchain for brand new token launches (early hunter)
+    asyncio.create_task(pf.run_launch_hunter(app.bot))
 
     await app.bot.set_my_commands([
         BotCommand("start",      "Launch the bot"),
@@ -7166,6 +7261,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
     app.add_handler(CommandHandler("watch",      cmd_portfolio_watch))
+    app.add_handler(CommandHandler("launches",   cmd_launches))
     app.add_handler(CommandHandler("whalebuy",        cmd_whalebuy))
     app.add_handler(CommandHandler("momentum",        cmd_momentum))
     app.add_handler(CommandHandler("contract",        cmd_contract))
@@ -7202,6 +7298,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(pumplive_callback,            pattern=r"^pumplive:"))
     app.add_handler(CallbackQueryHandler(pumpgrad_callback,            pattern=r"^pumpgrad:"))
     app.add_handler(CallbackQueryHandler(watch_callback,               pattern=r"^watch:"))
+    app.add_handler(CallbackQueryHandler(launches_callback,            pattern=r"^launches:"))
     app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
     app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
     app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))
