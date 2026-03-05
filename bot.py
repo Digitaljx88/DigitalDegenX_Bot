@@ -2429,6 +2429,93 @@ async def cmd_contract(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:100]}")
 
 
+async def cmd_discoverwallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /discoverwallet [force]
+    Scan pump.fun graduation history and surface smart wallets that consistently
+    entered winning tokens early. Shows top 10 discovered wallets.
+    Optional 'force' arg bypasses the 6-hour cache and rescans immediately.
+    """
+    try:
+        import wallet_discovery
+
+        force = bool(context.args and context.args[0].lower() == "force")
+        age   = wallet_discovery.last_scan_age_secs()
+
+        if force or age > wallet_discovery.DISCOVERY_CACHE_TTL:
+            await update.message.reply_text(
+                "🔍 *Scanning pump.fun history...*\n\n"
+                "_Fetching top graduated tokens and analysing early buyers._\n"
+                "_This may take 30–60 seconds._",
+                parse_mode="Markdown"
+            )
+            import asyncio
+            loop = asyncio.get_event_loop()
+            discovered = await loop.run_in_executor(
+                None, lambda: wallet_discovery.run_discovery(force=True)
+            )
+        else:
+            mins_ago = int(age / 60)
+            await update.message.reply_text(
+                f"📋 _Using cached scan from {mins_ago}m ago_\n_Use /discoverwallet force to rescan_",
+                parse_mode="Markdown"
+            )
+            discovered = wallet_discovery.get_top_discovered()
+            # get_top_discovered returns list not dict — normalise
+            if isinstance(discovered, list):
+                top = discovered
+            else:
+                top = []
+
+        if not isinstance(discovered, list):
+            top = wallet_discovery.get_top_discovered()
+        else:
+            top = discovered
+
+        if not top:
+            await update.message.reply_text(
+                "😶 *No smart wallets discovered yet.*\n\n"
+                "Discovery requires pump.fun API access and graduated tokens with $300k+ MCap.\n"
+                "Try again in a few minutes or use `/discoverwallet force`.",
+                parse_mode="Markdown"
+            )
+            return
+
+        lines = ["🧠 *Auto-Discovered Smart Wallets*\n"]
+        for i, w in enumerate(top[:10], 1):
+            addr        = w.get("address", "")
+            score       = w.get("discovery_score", 0)
+            wins        = w.get("tokens_won", 0)
+            avg_mcap    = w.get("avg_mcap_usd", 0)
+            avg_entry   = w.get("avg_entry_secs", 0)
+            top_tokens  = w.get("top_tokens", [])
+            top_mcap    = top_tokens[0].get("mcap_usd", 0) if top_tokens else 0
+
+            # Format avg mcap
+            if avg_mcap >= 1_000_000:
+                mcap_str = f"${avg_mcap / 1_000_000:.1f}M"
+            else:
+                mcap_str = f"${avg_mcap / 1_000:.0f}K"
+
+            top_mcap_str = f"${top_mcap / 1_000_000:.1f}M" if top_mcap >= 1_000_000 else f"${top_mcap / 1_000:.0f}K"
+
+            lines.append(
+                f"{i}. `{addr[:8]}...{addr[-4:]}`\n"
+                f"   Score: {score}/100 | {wins} wins | Avg {mcap_str} | Best {top_mcap_str}\n"
+                f"   Avg entry: {avg_entry}s after launch\n"
+            )
+
+        lines.append("\n_Tap 👁️ Tracked Wallets → ➕ Add Wallet to start tracking any of these._")
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
 async def _show_wallet_menu(send_fn):
     from solders.keypair import Keypair as _KP
     if WALLET_PRIVATE_KEY:
@@ -2540,8 +2627,9 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             watched = wallet_tracker.get_watched_wallets()
             if not watched:
                 text = "*👁️ Tracked Wallets*\n\nNo wallets being tracked yet."
-                kb = [[InlineKeyboardButton("➕ Add Wallet", callback_data="wallet:add_tracked")],
-                      [InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]
+                kb = [[InlineKeyboardButton("➕ Add Wallet",   callback_data="wallet:add_tracked"),
+                       InlineKeyboardButton("🧠 Discover",     callback_data="wallet:discover")],
+                      [InlineKeyboardButton("⬅️ Back",         callback_data="wallet:menu")]]
             else:
                 text = "*👁️ Tracked Wallets*\n\n"
                 for addr, data in watched.items():
@@ -2550,8 +2638,9 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     wins = data.get("wins", 0)
                     total = data.get("entries_total", 0)
                     text += f"• `{addr[:8]}...`\n  {name} | 🏆 {wins}/{total} | Rep: {rep_score}\n"
-                kb = [[InlineKeyboardButton("➕ Add Wallet", callback_data="wallet:add_tracked")],
-                      [InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]
+                kb = [[InlineKeyboardButton("➕ Add Wallet",   callback_data="wallet:add_tracked"),
+                       InlineKeyboardButton("🧠 Discover",     callback_data="wallet:discover")],
+                      [InlineKeyboardButton("⬅️ Back",         callback_data="wallet:menu")]]
             await query.edit_message_text(
                 text, parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
@@ -2560,6 +2649,46 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 "⚠️ Wallet tracker module not found.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]])
+            )
+
+    elif action == "discover":
+        try:
+            import wallet_discovery
+            age = wallet_discovery.last_scan_age_secs()
+            top = wallet_discovery.get_top_discovered()
+
+            if not top or age > wallet_discovery.DISCOVERY_CACHE_TTL:
+                await query.edit_message_text(
+                    "*🧠 Discover Smart Wallets*\n\n"
+                    "No cached scan available.\n\n"
+                    "Use /discoverwallet to run a full discovery scan\n"
+                    "_(takes 30–60 seconds)_",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+                )
+                return
+
+            mins_ago = int(age / 60)
+            lines = [f"*🧠 Discovered Wallets* _(scan {mins_ago}m ago)_\n"]
+            for i, w in enumerate(top[:8], 1):
+                addr     = w.get("address", "")
+                score    = w.get("discovery_score", 0)
+                wins     = w.get("tokens_won", 0)
+                avg_mcap = w.get("avg_mcap_usd", 0)
+                mcap_str = f"${avg_mcap / 1_000_000:.1f}M" if avg_mcap >= 1_000_000 else f"${avg_mcap / 1_000:.0f}K"
+                lines.append(f"{i}. `{addr[:8]}...` | Score:{score} | {wins}W | {mcap_str} avg")
+
+            lines.append("\n_Use /discoverwallet to see full list & rescan_")
+
+            await query.edit_message_text(
+                "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
+        except ImportError:
+            await query.edit_message_text(
+                "⚠️ Discovery module not found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
             )
 
     elif action == "add_tracked":
@@ -6410,9 +6539,10 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("wallet",     cmd_wallet))
     app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
-    app.add_handler(CommandHandler("whalebuy",   cmd_whalebuy))
-    app.add_handler(CommandHandler("momentum",   cmd_momentum))
-    app.add_handler(CommandHandler("contract",   cmd_contract))
+    app.add_handler(CommandHandler("whalebuy",        cmd_whalebuy))
+    app.add_handler(CommandHandler("momentum",        cmd_momentum))
+    app.add_handler(CommandHandler("contract",        cmd_contract))
+    app.add_handler(CommandHandler("discoverwallet",  cmd_discoverwallet))
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))
