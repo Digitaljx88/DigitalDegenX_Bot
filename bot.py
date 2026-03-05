@@ -2516,6 +2516,160 @@ async def cmd_discoverwallet(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
+async def cmd_bundle(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /bundle <mint>
+    Analyse a token's early buyers for coordinated bundle (same-funder) patterns.
+    """
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "📋 Usage: /bundle <mint>\n\n"
+                "Analyses the token's early buyers to detect coordinated wallet clusters.",
+                parse_mode="Markdown"
+            )
+            return
+
+        mint = context.args[0].strip()
+        await update.message.reply_text(
+            "🔍 *Analysing wallet funding lineage...*\n_This may take 15–30 seconds._",
+            parse_mode="Markdown"
+        )
+
+        import wallet_fingerprint
+        from scanner import fetch_rugcheck
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        rc   = await loop.run_in_executor(None, fetch_rugcheck, mint)
+
+        early_buyers = [h["address"] for h in (rc.get("topHolders") or [])[:10] if h.get("address")]
+        if not early_buyers:
+            await update.message.reply_text(
+                f"⚠️ No holder data found for `{mint[:16]}...`\n"
+                f"token may be too new or not indexed yet.",
+                parse_mode="Markdown"
+            )
+            return
+
+        result = await loop.run_in_executor(
+            None, wallet_fingerprint.score_bundle_risk, mint, early_buyers
+        )
+
+        risk       = result.get("bundle_risk", 0)
+        reason     = result.get("reason", "")
+        clusters   = result.get("clusters", [])
+
+        if risk == 0:
+            emoji = "✅"
+            label = "CLEAN"
+        elif risk <= 3:
+            emoji = "🟡"
+            label = "LOW BUNDLE RISK"
+        elif risk <= 6:
+            emoji = "🟠"
+            label = "MODERATE BUNDLE RISK"
+        else:
+            emoji = "🔴"
+            label = "HIGH BUNDLE RISK"
+
+        lines = [
+            f"🔬 *Bundle Analysis*",
+            f"Mint: `{mint}`\n",
+            f"{emoji} *{label}* (Risk: {risk}/10)",
+            f"_{reason}_\n",
+        ]
+
+        if clusters:
+            lines.append(f"*Clusters detected: {len(clusters)}*")
+            for c in clusters[:3]:
+                funder  = c.get("funder", "")
+                wallets = c.get("wallets", [])
+                count   = c.get("count", len(wallets))
+                funder_short = f"`{funder[:8]}...{funder[-4:]}`" if funder else "unknown"
+                wallet_addrs = ", ".join(f"`{w[:6]}..`" for w in wallets[:4])
+                lines.append(
+                    f"• Funder: {funder_short} → {count} wallets\n"
+                    f"  _({wallet_addrs})_"
+                )
+
+        lines.append(f"\n_Top {len(early_buyers)} holders analysed_")
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
+async def cmd_fingerprint(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /fingerprint <wallet>
+    Show the funding lineage of a wallet address (who funded it?).
+    """
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "📋 Usage: /fingerprint <wallet_address>\n\n"
+                "Shows which wallet funded this address with its initial SOL.",
+                parse_mode="Markdown"
+            )
+            return
+
+        wallet = context.args[0].strip()
+        if len(wallet) < 32:
+            await update.message.reply_text("❌ Invalid wallet address.")
+            return
+
+        await update.message.reply_text(
+            "🔍 *Looking up funding lineage...*\n_Checking Solana RPC._",
+            parse_mode="Markdown"
+        )
+
+        import wallet_fingerprint
+        import asyncio
+
+        loop   = asyncio.get_event_loop()
+        record = await loop.run_in_executor(None, wallet_fingerprint.get_funding_wallet, wallet)
+
+        funder      = record.get("funder")
+        amount      = record.get("fund_amount_sol", 0)
+        ts          = record.get("fund_ts", 0)
+        cached      = record.get("cached", False)
+
+        cache_note = " _(cached)_" if cached else ""
+
+        if funder:
+            import datetime
+            fund_date = datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "unknown"
+            lines = [
+                f"🔗 *Wallet Fingerprint*{cache_note}\n",
+                f"Address: `{wallet}`\n",
+                f"*Funded by:* `{funder}`",
+                f"Amount: `{amount:.4f} SOL`",
+                f"Date: `{fund_date}`\n",
+                f"[View Funder](https://solscan.io/account/{funder})",
+            ]
+        else:
+            lines = [
+                f"🔗 *Wallet Fingerprint*{cache_note}\n",
+                f"Address: `{wallet}`\n",
+                f"⚠️ Could not determine funding source.\n"
+                f"_Wallet may be funded by CEX, have no early activity, or RPC data unavailable._",
+            ]
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
 async def _show_wallet_menu(send_fn):
     from solders.keypair import Keypair as _KP
     if WALLET_PRIVATE_KEY:
@@ -6543,6 +6697,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("momentum",        cmd_momentum))
     app.add_handler(CommandHandler("contract",        cmd_contract))
     app.add_handler(CommandHandler("discoverwallet",  cmd_discoverwallet))
+    app.add_handler(CommandHandler("bundle",          cmd_bundle))
+    app.add_handler(CommandHandler("fingerprint",     cmd_fingerprint))
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))

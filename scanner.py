@@ -9,6 +9,7 @@ import time
 import requests
 from datetime import datetime, timezone
 import wallet_tracker
+import wallet_fingerprint
 
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 SCANNER_STATE_FILE = os.path.join(DATA_DIR, "scanner_state.json")
@@ -487,9 +488,31 @@ def score_watched_wallet_entry(token_mint: str) -> tuple[int, str]:
         return 0, "Wallet tracking unavailable"
 
 
+def score_bundle_risk(token_mint: str, rc: dict) -> tuple[int, str]:
+    """0 pts (penalty only) — detect coordinated wallet clusters (bundles).
+    Returns a negative modifier: 0 = clean, up to -15 = heavy bundle.
+    """
+    try:
+        # Get early buyers from rugcheck top holders as proxy
+        early_buyers = [h["address"] for h in (rc.get("topHolders") or [])[:8] if h.get("address")]
+        if not early_buyers:
+            return 0, "No holder data for bundle check"
+        result = wallet_fingerprint.score_bundle_risk(token_mint, early_buyers)
+        risk = result.get("bundle_risk", 0)
+        if risk >= 8:
+            return -15, f"🚨 {result.get('reason', 'Heavy bundle detected')}"
+        if risk >= 5:
+            return -8, f"⚠️ {result.get('reason', 'Bundle cluster found')}"
+        if risk >= 3:
+            return -3, f"🟡 {result.get('reason', 'Mild bundle pattern')}"
+        return 0, "No bundle pattern detected"
+    except Exception:
+        return 0, "Bundle check unavailable"
+
+
 def calculate_heat_score(token: dict, rc: dict) -> dict:
     """
-    Run 11 scoring categories (120 pts max).
+    Run 11 scoring categories + bundle risk penalty (120 pts max).
     Returns full score breakdown dict. Returns disqualified flag if instantly DQ.
     """
     # New scoring order: momentum first, then liquidity, then wallet, then rest
@@ -505,6 +528,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     dev_pts,  dev_reason, dev_dq  = score_dev_wallet(rc)
     hold_pts, hold_reason, hold_dq = score_top_holders(rc)
     age_pts,  age_reason  = score_age(token)
+    bund_pts, bund_reason = score_bundle_risk(mid_mint, rc)
 
     # Instant disqualifiers
     disqualified = None
@@ -515,10 +539,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     elif rc.get("rugged"):
         disqualified = "Flagged as rugged by RugCheck"
 
-    # New total: 120 pts (up from 100)
-    # momentum(20) + liquidity(10) + wallets_reputation(15) + wallets(15) + twitter(15) + 
-    # narrative(15) + migration(10) + dev(10) + holders(10) + age(5) = 115 base + slack = 120
-    total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
+    # Total: 120 pts base + bundle penalty (negative modifier)
+    base_total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
+    total = max(0, base_total + bund_pts)
 
     # Risk level (adjusted for 120pt scale)
     red_flags = []
@@ -550,16 +573,17 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         "risk":          risk,
         "red_flags":     red_flags,
         "breakdown": {
-            "momentum":  (mom_pts,  mom_reason),
-            "liquidity": (liq_pts,  liq_reason),
-            "wallet_rep": (wal_pts, wal_reason),
-            "wallets":   (wall_pts, wall_reason),
-            "twitter":   (twit_pts, twit_reason),
-            "narrative": (narr_pts, narr_reason),
-            "migration": (migr_pts, migr_reason),
-            "dev":       (dev_pts,  dev_reason),
-            "holders":   (hold_pts, hold_reason),
-            "age":       (age_pts,  age_reason),
+            "momentum":   (mom_pts,  mom_reason),
+            "liquidity":  (liq_pts,  liq_reason),
+            "wallet_rep": (wal_pts,  wal_reason),
+            "wallets":    (wall_pts, wall_reason),
+            "twitter":    (twit_pts, twit_reason),
+            "narrative":  (narr_pts, narr_reason),
+            "migration":  (migr_pts, migr_reason),
+            "dev":        (dev_pts,  dev_reason),
+            "holders":    (hold_pts, hold_reason),
+            "age":        (age_pts,  age_reason),
+            "bundle":     (bund_pts, bund_reason),
         },
     }
 
