@@ -530,6 +530,8 @@ async def _handle_token(bot: Bot, token: dict):
         except Exception:
             pass
 
+    heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="pumpfun"), rc)
+    print(f"[NEW TOKEN] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_notification(token, meta, sol_usd, heat)
     kb   = notification_kb(mint)
 
@@ -949,6 +951,7 @@ async def _handle_grad_token(bot: Bot, token: dict):
             pass
 
     heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    print(f"[GRAD WS] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
 
@@ -1097,6 +1100,7 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
             pass
 
     heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    print(f"[GRAD REST] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
 
@@ -1182,14 +1186,17 @@ async def run_pumpfeed(bot: Bot):
                         s = load_state()
                         has_subs    = any(cfg.get("active") for cfg in s.get("subscribers", {}).values())
                         has_channel = bool(s.get("pumplive_channel"))
+                        print(f"[PUMPFEED] new token {data.get('mint','?')} subs={has_subs} ch={has_channel}", flush=True)
                         if has_subs or has_channel:
                             asyncio.create_task(_handle_token(bot, data))
                     elif tx_type in ("complete", "migration", "migrate"):
                         s = load_state()
                         has_subs    = any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values())
                         has_channel = bool(s.get("pumpgrad_channel"))
+                        print(f"[PUMPFEED] graduation {data.get('mint','?')} subs={has_subs} ch={has_channel}", flush=True)
                         if has_subs or has_channel:
                             asyncio.create_task(_handle_grad_token(bot, data))
 
-        except Exception:
+        except Exception as e:
+            print(f"[PUMPFEED] WS error: {e}", flush=True)
             await asyncio.sleep(5)
