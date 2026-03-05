@@ -1923,14 +1923,23 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🌡️ *Set minimum heat score for auto-buy*\n\n"
             "Higher = fewer but better trades.\n"
-            f"Current: `{cfg.get('min_score', 70)}/100`",
+            f"Current: `{cfg.get('min_score', 70)}/120`",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("55", callback_data="autobuy:score_preset:55"),
-                InlineKeyboardButton("65", callback_data="autobuy:score_preset:65"),
-                InlineKeyboardButton("70", callback_data="autobuy:score_preset:70"),
-                InlineKeyboardButton("80", callback_data="autobuy:score_preset:80"),
-            ], [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("35", callback_data="autobuy:score_preset:35"),
+                 InlineKeyboardButton("40", callback_data="autobuy:score_preset:40"),
+                 InlineKeyboardButton("45", callback_data="autobuy:score_preset:45"),
+                 InlineKeyboardButton("50", callback_data="autobuy:score_preset:50")],
+                [InlineKeyboardButton("55", callback_data="autobuy:score_preset:55"),
+                 InlineKeyboardButton("60", callback_data="autobuy:score_preset:60"),
+                 InlineKeyboardButton("65", callback_data="autobuy:score_preset:65"),
+                 InlineKeyboardButton("70", callback_data="autobuy:score_preset:70")],
+                [InlineKeyboardButton("75", callback_data="autobuy:score_preset:75"),
+                 InlineKeyboardButton("80", callback_data="autobuy:score_preset:80"),
+                 InlineKeyboardButton("90", callback_data="autobuy:score_preset:90"),
+                 InlineKeyboardButton("100", callback_data="autobuy:score_preset:100")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
         )
 
     elif action == "score_preset":
@@ -6323,17 +6332,17 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif state == "ab_min_score":
         try:
             val = int(float(text))
-            if val < 1 or val > 100:
+            if val < 35 or val > 100:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Enter a score between 1 and 100.")
+            await update.message.reply_text("Enter a score between 35 and 100.")
             return
         cfg = get_auto_buy(uid)
         cfg["min_score"] = val
         set_auto_buy(uid, cfg)
         clear_state(uid)
         await update.message.reply_text(
-            f"✅ Auto-buy min score set to `{val}/100`",
+            f"✅ Auto-buy min score set to `{val}/120`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
