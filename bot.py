@@ -2516,6 +2516,152 @@ async def cmd_discoverwallet(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
+async def cmd_cluster(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /cluster <mint>
+    Show the co-investment cluster map for a token — which tracked wallets
+    entered together and how strong the cluster signal is.
+    """
+    try:
+        if not context.args:
+            await update.message.reply_text(
+                "📋 *Usage:* `/cluster <token_mint>`\n\n"
+                "Shows the cluster of wallets that co-invested in this token "
+                "and their historical relationship strength.\n\n"
+                "Also try: `/clustertop` — top co-investing wallet pairs.",
+                parse_mode="Markdown"
+            )
+            return
+
+        mint = context.args[0].strip()
+        if len(mint) < 32:
+            await update.message.reply_text("❌ Invalid token mint address.")
+            return
+
+        await update.message.reply_text(
+            "🕸️ *Building cluster map...*",
+            parse_mode="Markdown"
+        )
+
+        import wallet_cluster
+        import asyncio
+
+        loop    = asyncio.get_event_loop()
+        cm      = await loop.run_in_executor(None, wallet_cluster.get_token_cluster_map, mint)
+
+        total_w = cm.get("total_wallets", 0)
+        total_e = cm.get("total_edges", 0)
+        score   = cm.get("cluster_score", 0)
+        boost   = cm.get("boost", 0)
+        reason  = cm.get("reason", "No cluster pattern")
+
+        if total_w == 0:
+            await update.message.reply_text(
+                f"⚪ *No cluster data for this token yet.*\n\n"
+                f"`{mint}`\n\n"
+                "_Cluster data builds as tracked wallets enter tokens during live scanning._",
+                parse_mode="Markdown"
+            )
+            return
+
+        # Header
+        if score >= 70:
+            header = "🔥 *Strong Cluster Detected*"
+        elif score >= 40:
+            header = "🟠 *Moderate Cluster*"
+        elif score >= 10:
+            header = "🟡 *Weak Cluster Signal*"
+        else:
+            header = "⚪ *Minimal Cluster*"
+
+        lines = [
+            f"{header}\n",
+            f"Token: `{mint[:20]}...`\n",
+            f"Cluster Score: *{score}/100*   Heat Boost: *+{boost} pts*",
+            f"Signal: _{reason}_\n",
+            f"Wallets: {total_w}   Co-invest pairs: {total_e}\n",
+        ]
+
+        # Wallet list
+        wallets = cm.get("wallets", [])
+        if wallets:
+            lines.append("*Wallets (by connectivity):*")
+            for w in wallets[:10]:
+                addr    = w["wallet"]
+                degree  = w.get("degree", 0)
+                ts      = w.get("ts", 0)
+                import datetime
+                ts_str  = datetime.datetime.fromtimestamp(ts).strftime("%H:%M:%S") if ts else "?"
+                lines.append(f"  `{addr[:12]}...`  edges={degree}  at {ts_str}")
+
+        lines.append("")
+
+        # Edge list (top 5)
+        edges = cm.get("edges", [])
+        if edges:
+            lines.append("*Top Co-investment Links:*")
+            for e in sorted(edges, key=lambda x: -x.get("historical", 0))[:5]:
+                a = e["a"][:10]
+                b = e["b"][:10]
+                hist = e.get("historical", 0)
+                dt   = e.get("dt_secs", 0)
+                lines.append(f"  `{a}` ↔ `{b}`  Δ{dt}s  (history: {hist}x)")
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
+async def cmd_clustertop(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /clustertop
+    Show the most active co-investing wallet pairs across all tokens.
+    """
+    try:
+        await update.message.reply_text(
+            "🏆 *Loading top co-investor pairs...*",
+            parse_mode="Markdown"
+        )
+
+        import wallet_cluster
+        import asyncio
+
+        loop = asyncio.get_event_loop()
+        top  = await loop.run_in_executor(None, wallet_cluster.get_global_top_clusters, 10)
+
+        if not top:
+            await update.message.reply_text(
+                "⚪ *No co-investment data yet.*\n\n"
+                "_This builds automatically as tracked wallets co-invest in tokens during scanning._",
+                parse_mode="Markdown"
+            )
+            return
+
+        lines = ["🕸️ *Top Co-Investing Wallet Pairs*\n"]
+        for i, pair in enumerate(top, 1):
+            a    = pair["wallet_a"][:12]
+            b    = pair["wallet_b"][:12]
+            cnt  = pair["co_investments"]
+            import datetime
+            last = datetime.datetime.fromtimestamp(pair["last_ts"]).strftime("%Y-%m-%d") if pair.get("last_ts") else "?"
+            tokens_list = pair.get("tokens", [])
+            tok_str = f"  Tokens: {', '.join(t[:8] for t in tokens_list[:3])}" if tokens_list else ""
+            lines.append(f"{i}. `{a}...` ↔ `{b}...`")
+            lines.append(f"   Co-investments: *{cnt}*  Last: {last}{tok_str}")
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
 async def cmd_bundle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /bundle <mint>
@@ -2783,7 +2929,8 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 text = "*👁️ Tracked Wallets*\n\nNo wallets being tracked yet."
                 kb = [[InlineKeyboardButton("➕ Add Wallet",   callback_data="wallet:add_tracked"),
                        InlineKeyboardButton("🧠 Discover",     callback_data="wallet:discover")],
-                      [InlineKeyboardButton("⬅️ Back",         callback_data="wallet:menu")]]
+                      [InlineKeyboardButton("🕸️ Cluster Top",  callback_data="wallet:clustertop"),
+                       InlineKeyboardButton("⬅️ Back",         callback_data="wallet:menu")]]
             else:
                 text = "*👁️ Tracked Wallets*\n\n"
                 for addr, data in watched.items():
@@ -2794,7 +2941,8 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     text += f"• `{addr[:8]}...`\n  {name} | 🏆 {wins}/{total} | Rep: {rep_score}\n"
                 kb = [[InlineKeyboardButton("➕ Add Wallet",   callback_data="wallet:add_tracked"),
                        InlineKeyboardButton("🧠 Discover",     callback_data="wallet:discover")],
-                      [InlineKeyboardButton("⬅️ Back",         callback_data="wallet:menu")]]
+                      [InlineKeyboardButton("🕸️ Cluster Top",  callback_data="wallet:clustertop"),
+                       InlineKeyboardButton("⬅️ Back",         callback_data="wallet:menu")]]
             await query.edit_message_text(
                 text, parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup(kb)
@@ -2842,6 +2990,42 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except ImportError:
             await query.edit_message_text(
                 "⚠️ Discovery module not found.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
+
+    elif action == "clustertop":
+        try:
+            import wallet_cluster
+            top = wallet_cluster.get_global_top_clusters(10)
+
+            if not top:
+                await query.edit_message_text(
+                    "🕸️ *Cluster Network*\n\n"
+                    "No co-investment data yet.\n\n"
+                    "_Cluster relationships build as tracked wallets enter the same tokens during live scanning._",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+                )
+                return
+
+            import datetime
+            lines = ["🕸️ *Top Co-Investing Wallet Pairs*\n"]
+            for i, pair in enumerate(top, 1):
+                a   = pair["wallet_a"][:10]
+                b   = pair["wallet_b"][:10]
+                cnt = pair["co_investments"]
+                last = datetime.datetime.fromtimestamp(pair["last_ts"]).strftime("%m/%d") if pair.get("last_ts") else "?"
+                lines.append(f"{i}. `{a}...` ↔ `{b}...`  ×{cnt}  ({last})")
+
+            lines.append("\n_Use /clustertop for full details_")
+            await query.edit_message_text(
+                "\n".join(lines),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
+        except ImportError:
+            await query.edit_message_text(
+                "⚠️ Cluster module not found.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
             )
 
@@ -6660,6 +6844,8 @@ async def post_init(app):
         BotCommand("pumpgrad",   "Alerts when pump.fun tokens hit 100% bonding curve"),
         BotCommand("autobuy",    "Auto-buy tokens when scanner fires alerts"),
         BotCommand("pnl",        "View realized & unrealized P&L summary"),
+        BotCommand("cluster",    "Co-investment cluster map for a token"),
+        BotCommand("clustertop", "Top co-investing wallet pairs ever"),
     ])
 
 
@@ -6699,6 +6885,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("discoverwallet",  cmd_discoverwallet))
     app.add_handler(CommandHandler("bundle",          cmd_bundle))
     app.add_handler(CommandHandler("fingerprint",     cmd_fingerprint))
+    app.add_handler(CommandHandler("cluster",         cmd_cluster))
+    app.add_handler(CommandHandler("clustertop",      cmd_clustertop))
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))

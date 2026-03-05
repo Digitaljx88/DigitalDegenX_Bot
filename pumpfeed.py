@@ -523,8 +523,12 @@ async def _handle_token(bot: Bot, token: dict):
         sol_amount = float(token.get("solAmount", 0) or 0)
         buy_usd = sol_amount * sol_usd
         wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
-
-    heat    = calculate_heat_score(_build_scanner_token(token, meta, sol_usd), rc)
+        # Phase 4: feed co-investment edge into cluster graph
+        try:
+            import wallet_cluster
+            wallet_cluster.record_token_entries(mint, [{"wallet": creator, "ts": time.time()}])
+        except Exception:
+            pass
 
     text = format_notification(token, meta, sol_usd, heat)
     kb   = notification_kb(mint)
@@ -937,6 +941,12 @@ async def _handle_grad_token(bot: Bot, token: dict):
         sol_amount = float(token.get("solAmount", 0) or 0)
         buy_usd = sol_amount * sol_usd
         wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
+        # Phase 4: feed co-investment edge into cluster graph
+        try:
+            import wallet_cluster
+            wallet_cluster.record_token_entries(mint, [{"wallet": creator, "ts": time.time()}])
+        except Exception:
+            pass
 
     heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
     text = format_grad_notification(token, meta, sol_usd, heat)
@@ -1077,6 +1087,12 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
         sol_amount = float(token.get("solAmount", 0) or 0)
         buy_usd = sol_amount * sol_usd
         wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
+        # Phase 4: feed co-investment edge into cluster graph
+        try:
+            import wallet_cluster
+            wallet_cluster.record_token_entries(mint, [{"wallet": creator, "ts": time.time()}])
+        except Exception:
+            pass
 
     heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
     text = format_grad_notification(token, meta, sol_usd, heat)

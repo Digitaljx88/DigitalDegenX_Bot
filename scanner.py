@@ -10,6 +10,7 @@ import requests
 from datetime import datetime, timezone
 import wallet_tracker
 import wallet_fingerprint
+import wallet_cluster
 
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 SCANNER_STATE_FILE = os.path.join(DATA_DIR, "scanner_state.json")
@@ -488,6 +489,30 @@ def score_watched_wallet_entry(token_mint: str) -> tuple[int, str]:
         return 0, "Wallet tracking unavailable"
 
 
+def score_cluster_boost(token_mint: str) -> tuple[int, str]:
+    """Phase 4 cluster boost (+0/+5/+10/+15) — reward co-investing smart wallet clusters."""
+    try:
+        entries = wallet_tracker.detect_wallet_entry(token_mint, time_window_secs=120)
+        if not entries:
+            return 0, "No cluster signal"
+
+        # Build cluster entries for scoring
+        cluster_entries = [
+            {"wallet": e["wallet"], "ts": e["entry_ts"], "reputation": e.get("reputation", 50)}
+            for e in entries
+        ]
+
+        # Persist new co-investment edges
+        wallet_cluster.record_token_entries(token_mint, cluster_entries)
+
+        result = wallet_cluster.score_cluster_strength(token_mint, cluster_entries)
+        boost  = result.get("boost", 0)
+        reason = result.get("reason", "No cluster pattern")
+        return boost, reason
+    except Exception:
+        return 0, "Cluster scoring unavailable"
+
+
 def score_bundle_risk(token_mint: str, rc: dict) -> tuple[int, str]:
     """0 pts (penalty only) — detect coordinated wallet clusters (bundles).
     Returns a negative modifier: 0 = clean, up to -15 = heavy bundle.
@@ -520,7 +545,8 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     liq_pts,  liq_reason  = score_liquidity_strength(token, rc)
     mid_mint = token.get("mint", "")
     wal_pts,  wal_reason  = score_watched_wallet_entry(mid_mint)
-    
+    clus_pts, clus_reason = score_cluster_boost(mid_mint)
+
     wall_pts, wall_reason = score_wallets(rc)
     twit_pts, twit_reason = score_twitter(token)
     narr_pts, narr_reason = score_narrative(token)
@@ -539,9 +565,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     elif rc.get("rugged"):
         disqualified = "Flagged as rugged by RugCheck"
 
-    # Total: 120 pts base + bundle penalty (negative modifier)
+    # Total: 120 pts base + cluster boost + bundle penalty
     base_total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
-    total = max(0, base_total + bund_pts)
+    total = max(0, base_total + clus_pts + bund_pts)
 
     # Risk level (adjusted for 120pt scale)
     red_flags = []
@@ -576,6 +602,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
             "momentum":   (mom_pts,  mom_reason),
             "liquidity":  (liq_pts,  liq_reason),
             "wallet_rep": (wal_pts,  wal_reason),
+            "cluster":    (clus_pts, clus_reason),
             "wallets":    (wall_pts, wall_reason),
             "twitter":    (twit_pts, twit_reason),
             "narrative":  (narr_pts, narr_reason),
