@@ -163,6 +163,26 @@ def remove_auto_sell(uid: int, mint: str):
         save_auto_sell(a)
 
 
+def _apply_presets_to_open_positions(uid: int, presets: list) -> int:
+    """Apply updated preset targets to all existing open auto-sell positions.
+    Replaces mult_targets in every open position with the new presets (all triggered=False).
+    Returns the count of positions updated.
+    """
+    a = load_auto_sell()
+    user_configs = a.get(str(uid), {})
+    if not user_configs:
+        return 0
+    new_targets = [
+        {"mult": p["mult"], "sell_pct": p["sell_pct"], "triggered": False, "label": f"{p['mult']:.1f}x"}
+        for p in presets
+    ]
+    for cfg in user_configs.values():
+        cfg["mult_targets"] = [dict(t) for t in new_targets]  # fresh copy per position
+    a[str(uid)] = user_configs
+    save_auto_sell(a)
+    return len(user_configs)
+
+
 # ── Global settings ───────────────────────────────────────────────────────────
 
 def load_global_settings() -> dict:   return _load(GLOBAL_SETTINGS_FILE)
@@ -192,10 +212,12 @@ def get_user_as_presets(uid: int) -> list:
 def set_user_as_presets(uid: int, presets: list):
     """Set user's custom auto-sell multiplier presets.
     presets: list of dicts [{"mult": X, "sell_pct": Y}, ...]
+    Also immediately applies the new presets to all existing open positions.
     """
     gs = load_global_settings()
     gs[f"as_presets_{uid}"] = presets
     save_global_settings(gs)
+    _apply_presets_to_open_positions(uid, presets)
 
 def format_as_presets(presets: list) -> str:
     """Format auto-sell presets into readable string like '2x→50%, 4x→50%'"""
@@ -5067,11 +5089,13 @@ async def as_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             [InlineKeyboardButton("⬅️ Back", callback_data="as_preset:edit")],
         ]
         
+        open_count = _apply_presets_to_open_positions(uid, user_presets)
+        pos_note = f" Applied to {open_count} open position(s)." if open_count else ""
         await query.edit_message_text(
             f"📈 *Edit Target {target_idx + 1}*\n\n"
             f"Multiplier: `{target['mult']:.1f}x`\n"
             f"Sell %: `{target['sell_pct']}%`\n\n"
-            f"✅ Updated!",
+            f"✅ Updated!{pos_note}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup(kb)
         )
@@ -5087,9 +5111,10 @@ async def as_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 user_presets = [{"mult": 2.0, "sell_pct": 50}]
             set_user_as_presets(uid, user_presets)
         
+        open_count = _apply_presets_to_open_positions(uid, user_presets)
+        pos_note = f"\nApplied to {open_count} open position(s)." if open_count else ""
         await query.edit_message_text(
-            "🗑️ *Target deleted!*\n\n"
-            "Your presets have been updated.",
+            f"🗑️ *Target deleted!*\n\nYour presets have been updated.{pos_note}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="as_preset:edit")]])
         )
@@ -5117,10 +5142,11 @@ async def as_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         user_presets.append({"mult": mult, "sell_pct": sell_pct})
         set_user_as_presets(uid, user_presets)
         
+        open_count = _apply_presets_to_open_positions(uid, user_presets)
+        pos_note = f"\nApplied to {open_count} open position(s)." if open_count else ""
         await query.edit_message_text(
             f"✅ *Target Added!*\n\n"
-            f"{mult:.1f}x → Sell {sell_pct}%\n\n"
-            f"Your presets will apply to the next trade.",
+            f"{mult:.1f}x → Sell {sell_pct}%{pos_note}",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="as_preset:edit")]])
         )
