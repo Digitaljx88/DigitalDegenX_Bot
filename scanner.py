@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 import wallet_tracker
 import wallet_fingerprint
 import wallet_cluster
+import launch_predictor
 
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 SCANNER_STATE_FILE = os.path.join(DATA_DIR, "scanner_state.json")
@@ -556,7 +557,29 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     age_pts,  age_reason  = score_age(token)
     bund_pts, bund_reason = score_bundle_risk(mid_mint, rc)
 
-    # Instant disqualifiers
+    # Phase 5: run prediction AFTER all base scores are computed so breakdown is available
+    _pre_breakdown = {
+        "momentum":   (mom_pts,  mom_reason),
+        "liquidity":  (liq_pts,  liq_reason),
+        "wallet_rep": (wal_pts,  wal_reason),
+        "cluster":    (clus_pts, clus_reason),
+        "wallets":    (wall_pts, wall_reason),
+        "twitter":    (twit_pts, twit_reason),
+        "narrative":  (narr_pts, narr_reason),
+        "migration":  (migr_pts, migr_reason),
+        "dev":        (dev_pts,  dev_reason),
+        "holders":    (hold_pts, hold_reason),
+        "age":        (age_pts,  age_reason),
+        "bundle":     (bund_pts, bund_reason),
+    }
+    try:
+        pred = launch_predictor.predict_launch(token, rc, _pre_breakdown)
+        pred_pts    = pred.get("boost", 0)
+        pred_reason = pred.get("reason", "No archetype match")
+        pred_arch   = pred.get("archetype", "NONE")
+        pred_conf   = pred.get("confidence", 0)
+    except Exception:
+        pred_pts, pred_reason, pred_arch, pred_conf = 0, "Prediction unavailable", "NONE", 0
     disqualified = None
     if dev_dq:
         disqualified = dev_reason
@@ -565,9 +588,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     elif rc.get("rugged"):
         disqualified = "Flagged as rugged by RugCheck"
 
-    # Total: 120 pts base + cluster boost + bundle penalty
+    # Total: 120 pts base + cluster boost + bundle penalty + prediction boost
     base_total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
-    total = max(0, base_total + clus_pts + bund_pts)
+    total = max(0, base_total + clus_pts + bund_pts + pred_pts)
 
     # Risk level (adjusted for 120pt scale)
     red_flags = []
@@ -611,7 +634,10 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
             "holders":    (hold_pts, hold_reason),
             "age":        (age_pts,  age_reason),
             "bundle":     (bund_pts, bund_reason),
+            "predict":    (pred_pts, pred_reason),
         },
+        "archetype":     pred_arch,
+        "archetype_conf": pred_conf,
     }
 
 
@@ -648,6 +674,16 @@ def format_alert(r: dict) -> str:
     price_usd  = r.get("price_usd", 0)
     price_str  = f"${price_usd:.8f}" if price_usd and price_usd < 0.01 else (f"${price_usd:.4f}" if price_usd else "N/A")
 
+    # Archetype tag line
+    arch      = r.get("archetype", "NONE")
+    arch_conf = r.get("archetype_conf", 0)
+    arch_line = ""
+    if arch and arch != "NONE" and arch_conf >= 50:
+        from launch_predictor import ARCHETYPES as _ARCH
+        arch_emoji = _ARCH.get(arch, {}).get("emoji", "📖")
+        arch_desc  = _ARCH.get(arch, {}).get("description", arch)
+        arch_line  = f"📖 Playbook: *{arch_emoji} {arch_desc}* ({arch_conf}%)\n"
+
     # Build signal lines dynamically from breakdown
     signal_lines = "\n".join(line(cat) for cat in bd.keys())
 
@@ -658,6 +694,7 @@ def format_alert(r: dict) -> str:
         f"🪙 *{r['name']}* (${r['symbol']})\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🌡️ Heat Score: *{r['total']}/120*\n"
+        f"{arch_line}"
         f"💵 Price: `{price_str}`\n"
         f"🏦 MCap: `${r['mcap']:,.0f}`\n"
         f"📊 Vol (1h): `${r['volume_h1']:,.0f}`\n"
@@ -742,6 +779,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             "score":     result["total"],
             "mcap":      mcap,
             "narrative": matched_narrative,
+            "archetype": result.get("archetype", "NONE"),
             "alerted":   False,
             "dq":        result.get("disqualified"),
         })

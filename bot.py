@@ -2662,6 +2662,85 @@ async def cmd_clustertop(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
 
 
+async def cmd_playbook(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /playbook
+    Show the current predictive launch playbook — which archetypes are winning,
+    historical win rates, and recent high-confidence predictions.
+    """
+    try:
+        await update.message.reply_text(
+            "📖 *Loading playbook...*",
+            parse_mode="Markdown"
+        )
+
+        import launch_predictor
+        import asyncio
+        import datetime as dt
+
+        loop    = asyncio.get_event_loop()
+        summary = await loop.run_in_executor(None, launch_predictor.get_playbook_summary)
+
+        ranked  = summary.get("ranked_archetypes", [])
+        recent  = summary.get("recent_predictions", [])
+        best    = summary.get("best_bet")
+        built   = summary.get("stats_last_built", 0)
+
+        built_str = dt.datetime.fromtimestamp(built).strftime("%H:%M") if built else "never"
+
+        lines = [f"📖 *Launch Playbook* _(stats built {built_str})_\n"]
+
+        # Best bet callout
+        if best and best.get("rank_score", 0) > 0:
+            lines.append(
+                f"🎯 *Current Best Bet:* {best['emoji']} {best['description']}\n"
+                f"   Win rate: *{best.get('win_rate', 0):.0%}* "
+                f"from {best.get('total', 0)} signals\n"
+            )
+
+        # Archetype leaderboard
+        lines.append("*Archetype Win Rates:*")
+        for arch in ranked:
+            emoji     = arch.get("emoji", "⚪")
+            desc      = arch.get("description", arch["key"])[:35]
+            win_rate  = arch.get("win_rate", 0.0)
+            total     = arch.get("total", 0)
+            avg_score = arch.get("avg_score", 0.0)
+            bar       = "▓" * int(win_rate * 10) + "░" * (10 - int(win_rate * 10))
+            if total == 0:
+                lines.append(f"{emoji} `{bar}` {desc} — no data yet")
+            else:
+                lines.append(
+                    f"{emoji} `{bar}` *{win_rate:.0%}* win  _{desc}_\n"
+                    f"   {total} signals · avg score {avg_score:.0f}"
+                )
+
+        # Recent predictions
+        if recent:
+            lines.append("\n*Recent Predictions:*")
+            for p in recent[:6]:
+                ts    = p.get("ts", 0)
+                name  = p.get("name", p.get("mint", "?")[:10])
+                arch  = p.get("archetype", "NONE")
+                conf  = p.get("confidence", 0)
+                boost = p.get("boost", 0)
+                time_str = dt.datetime.fromtimestamp(ts).strftime("%H:%M") if ts else "?"
+                if arch == "NONE":
+                    continue
+                boost_str = f"+{boost}pts" if boost else "0pts"
+                lines.append(f"  `{time_str}` {name} → *{arch}* conf={conf}% {boost_str}")
+
+        lines.append("\n_Use /playbook to refresh · rebuilds stats every 2h_")
+
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown"
+        )
+
+    except Exception as e:
+        await update.message.reply_text(f"❌ Error: {str(e)[:200]}")
+
+
 async def cmd_bundle(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     /bundle <mint>
@@ -6846,6 +6925,7 @@ async def post_init(app):
         BotCommand("pnl",        "View realized & unrealized P&L summary"),
         BotCommand("cluster",    "Co-investment cluster map for a token"),
         BotCommand("clustertop", "Top co-investing wallet pairs ever"),
+        BotCommand("playbook",   "Predictive launch archetype win rates"),
     ])
 
 
@@ -6887,6 +6967,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("fingerprint",     cmd_fingerprint))
     app.add_handler(CommandHandler("cluster",         cmd_cluster))
     app.add_handler(CommandHandler("clustertop",      cmd_clustertop))
+    app.add_handler(CommandHandler("playbook",        cmd_playbook))
     app.add_handler(CommandHandler("analytics",  cmd_analytics))
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))
