@@ -87,9 +87,16 @@ def update_portfolio(uid: int, portfolio: dict):
     save_portfolios(p)
 
 def reset_portfolio(uid: int):
+    """Reset paper portfolio to starting balance and clear all auto-sell configs."""
+    # Reset portfolio
     p = load_portfolios()
     p[str(uid)] = {"SOL": PAPER_START_SOL}
     save_portfolios(p)
+    # Clear all auto-sell entries for this user
+    a = load_auto_sell()
+    if str(uid) in a:
+        del a[str(uid)]
+        save_auto_sell(a)
 
 
 # ── Wallet key persistence ─────────────────────────────────────────────────────
@@ -171,6 +178,36 @@ def set_global_sl(data: dict):
     gs["stop_loss"] = data
     save_global_settings(gs)
 
+def get_user_as_presets(uid: int) -> list:
+    """Get user's custom auto-sell multiplier presets.
+    Returns list of dicts: [{"mult": 2.0, "sell_pct": 50}, {"mult": 4.0, "sell_pct": 50}]
+    """
+    gs = load_global_settings()
+    defaults = [
+        {"mult": 2.0, "sell_pct": 50},
+        {"mult": 4.0, "sell_pct": 50},
+    ]
+    return gs.get(f"as_presets_{uid}", defaults)
+
+def set_user_as_presets(uid: int, presets: list):
+    """Set user's custom auto-sell multiplier presets.
+    presets: list of dicts [{"mult": X, "sell_pct": Y}, ...]
+    """
+    gs = load_global_settings()
+    gs[f"as_presets_{uid}"] = presets
+    save_global_settings(gs)
+
+def format_as_presets(presets: list) -> str:
+    """Format auto-sell presets into readable string like '2x→50%, 4x→50%'"""
+    if not presets:
+        return "No targets configured"
+    formatted = []
+    for p in presets:
+        mult = p.get("mult", 0)
+        pct = p.get("sell_pct", 0)
+        formatted.append(f"{mult:.1f}x→{pct}%")
+    return ", ".join(formatted)
+
 
 STRATEGIES = {
     "scalp": {
@@ -206,19 +243,28 @@ STRATEGIES = {
 
 def setup_auto_sell(uid: int, mint: str, symbol: str,
                     buy_price_usd: float, raw_amount: int, decimals: int):
-    """Called after every buy to create default auto-sell config."""
+    """Called after every buy to create default auto-sell config using user presets."""
     existing = get_auto_sell(uid, mint)
+    # Get user's preset multipliers (defaults to 2x→50%, 4x→50%)
+    user_presets = get_user_as_presets(uid)
+    # Build mult_targets with triggered=False and labels
+    mult_targets = []
+    for preset in user_presets:
+        mult_targets.append({
+            "mult": preset["mult"],
+            "sell_pct": preset["sell_pct"],
+            "triggered": False,
+            "label": f"{preset['mult']:.1f}x"
+        })
+    
     config = {
         "symbol":        symbol,
         "buy_price_usd": buy_price_usd,
         "initial_raw":   raw_amount,
         "decimals":      decimals,
         "enabled":       True,
-        # Multiplier targets: sell_pct of current holdings when triggered
-        "mult_targets": [
-            {"mult": 2.0,  "sell_pct": 50, "triggered": False, "label": "2x"},
-            {"mult": 4.0,  "sell_pct": 50, "triggered": False, "label": "4x"},
-        ],
+        # Multiplier targets: sell_pct of current holdings when triggered (from user presets)
+        "mult_targets":  mult_targets,
         # Market cap milestone alerts (USD)
         "mcap_alerts": [
             {"mcap": 100_000,   "triggered": False, "label": "100K"},
@@ -835,6 +881,15 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
             if not buy_price:
                 continue
 
+            # Safeguard: Check if user still holds this token (prevent stale auto-sell entries)
+            portfolio = get_portfolio(uid)
+            if mint not in portfolio or portfolio[mint] <= 0:
+                # Token sold or removed from portfolio — clean up auto-sell config
+                remove_auto_sell(uid, mint)
+                # Log for debugging
+                print(f"[AUTO-SELL] Cleaned up stale entry: uid={uid}, mint={mint[:8]}")
+                continue
+
             price, mcap = fetch_token_price(mint)
             if price is None:
                 continue
@@ -931,8 +986,8 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                 if price >= buy_price * be.get("activate_mult", 2.0):
                     sl = cfg.setdefault("stop_loss", {"enabled": True, "pct": 0, "sell_pct": 100, "triggered": False})
                     sl["enabled"] = True
-                    sl["pct"] = 0   # trigger at or below buy price
-                    sl["triggered"] = False  # reset if previously triggered
+                    sl["pct"] = 0   # trigger at or below buy price (breakeven)
+                    # NOTE: Do NOT reset triggered flag - if already triggered, don't retrigger
                     be["triggered"] = True
                     changed = True
                     try:
@@ -1300,6 +1355,9 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                       price_usd=price_usd, mcap=mcap)
             # Set up auto-sell monitoring
             setup_auto_sell(uid, token_mint, symbol, price_usd, out_amount, decimals)
+            # Get user's preset targets for display
+            user_presets = get_user_as_presets(uid)
+            presets_str = format_as_presets(user_presets)
             await msg.edit_text(
                 f"📄 *Paper Buy Done*\n"
                 f"Spent: `{amount} SOL`\n"
@@ -1307,12 +1365,14 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                 f"Buy Price: `${price_usd:.8f}`\n"
                 f"Price Impact: `{price_impact}%`\n"
                 f"SOL left: `{portfolio['SOL']:.4f}`\n\n"
-                f"🤖 Auto-sell configured: 2x→50%, 4x→50%\n"
+                f"🤖 Auto-sell configured: {presets_str}\n"
                 f"🎯 MCap alerts: 100K / 500K / 1M",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
                     [InlineKeyboardButton("⚙️ Auto-Sell Settings",
                                          callback_data=f"as:view:{token_mint}")],
+                    [InlineKeyboardButton("🔧 Customize Presets",
+                                         callback_data="as_preset:menu")],
                     [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
                 ])
             )
@@ -4035,6 +4095,174 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def as_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle auto-sell preset customization (as_preset:* pattern)"""
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+    await query.answer()
+
+    if action == "menu":
+        # Show current presets and options to edit
+        user_presets = get_user_as_presets(uid)
+        presets_str = format_as_presets(user_presets)
+        
+        # Build display of current presets
+        presets_display = "📊 *Current Auto-Sell Presets:*\n"
+        for i, p in enumerate(user_presets):
+            presets_display += f"{i+1}. {p['mult']:.1f}x → Sell {p['sell_pct']}%\n"
+        
+        await query.edit_message_text(
+            presets_display + 
+            f"\nThese will apply to your next trades.\n\n"
+            f"Choose an option:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Edit Presets", callback_data="as_preset:edit")],
+                [InlineKeyboardButton("↩️ Back", callback_data="menu:main")],
+            ])
+        )
+    
+    elif action == "edit":
+        # Show UI to edit presets
+        user_presets = get_user_as_presets(uid)
+        
+        # For simplicity, build inline buttons to adjust each target
+        # Format: as_preset:adjust:target_index:direction (where direction is +mult, -mult, +pct, -pct)
+        kb = []
+        for i, p in enumerate(user_presets):
+            kb.append([
+                InlineKeyboardButton(f"Edit {p['mult']:.1f}x", callback_data=f"as_preset:target:{i}")
+            ])
+        kb.append([InlineKeyboardButton("➕ Add Target", callback_data="as_preset:add")])
+        kb.append([InlineKeyboardButton("⬅️ Back", callback_data="as_preset:menu")])
+        
+        await query.edit_message_text(
+            "🔧 *Customize Your Auto-Sell Presets*\n\n"
+            "Select a target to edit, or add a new one:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    
+    elif action == "target":
+        # Edit specific target
+        target_idx = int(parts[2])
+        user_presets = get_user_as_presets(uid)
+        if target_idx >= len(user_presets):
+            await query.edit_message_text("Invalid target.", reply_markup=back_kb("as_preset:edit"))
+            return
+        
+        target = user_presets[target_idx]
+        kb = [
+            [InlineKeyboardButton(f"Mult: {target['mult']:.1f}x 🔺", callback_data=f"as_preset:adj:{target_idx}:mult_up"),
+             InlineKeyboardButton("🔻", callback_data=f"as_preset:adj:{target_idx}:mult_down")],
+            [InlineKeyboardButton(f"Pct: {target['sell_pct']}% 🔺", callback_data=f"as_preset:adj:{target_idx}:pct_up"),
+             InlineKeyboardButton("🔻", callback_data=f"as_preset:adj:{target_idx}:pct_down")],
+            [InlineKeyboardButton("🗑️ Delete", callback_data=f"as_preset:del:{target_idx}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="as_preset:edit")],
+        ]
+        
+        await query.edit_message_text(
+            f"📈 *Edit Target {target_idx + 1}*\n\n"
+            f"Multiplier: `{target['mult']:.1f}x`\n"
+            f"Sell %: `{target['sell_pct']}%`\n\n"
+            f"Use buttons to adjust values.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    
+    elif action == "adj":
+        # Adjust multiplier or percentage
+        target_idx = int(parts[2])
+        adj_type = parts[3]
+        user_presets = get_user_as_presets(uid)
+        if target_idx >= len(user_presets):
+            await query.edit_message_text("Invalid target.", reply_markup=back_kb("as_preset:edit"))
+            return
+        
+        target = user_presets[target_idx]
+        
+        if adj_type == "mult_up":
+            target["mult"] = round(target["mult"] + 0.5, 1)
+        elif adj_type == "mult_down":
+            target["mult"] = max(0.5, round(target["mult"] - 0.5, 1))
+        elif adj_type == "pct_up":
+            target["sell_pct"] = min(100, target["sell_pct"] + 5)
+        elif adj_type == "pct_down":
+            target["sell_pct"] = max(5, target["sell_pct"] - 5)
+        
+        set_user_as_presets(uid, user_presets)
+        
+        # Show updated config
+        kb = [
+            [InlineKeyboardButton(f"Mult: {target['mult']:.1f}x 🔺", callback_data=f"as_preset:adj:{target_idx}:mult_up"),
+             InlineKeyboardButton("🔻", callback_data=f"as_preset:adj:{target_idx}:mult_down")],
+            [InlineKeyboardButton(f"Pct: {target['sell_pct']}% 🔺", callback_data=f"as_preset:adj:{target_idx}:pct_up"),
+             InlineKeyboardButton("🔻", callback_data=f"as_preset:adj:{target_idx}:pct_down")],
+            [InlineKeyboardButton("🗑️ Delete", callback_data=f"as_preset:del:{target_idx}")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="as_preset:edit")],
+        ]
+        
+        await query.edit_message_text(
+            f"📈 *Edit Target {target_idx + 1}*\n\n"
+            f"Multiplier: `{target['mult']:.1f}x`\n"
+            f"Sell %: `{target['sell_pct']}%`\n\n"
+            f"✅ Updated!",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(kb)
+        )
+    
+    elif action == "del":
+        # Delete a preset target
+        target_idx = int(parts[2])
+        user_presets = get_user_as_presets(uid)
+        if target_idx < len(user_presets):
+            user_presets.pop(target_idx)
+            # Ensure at least one target exists
+            if not user_presets:
+                user_presets = [{"mult": 2.0, "sell_pct": 50}]
+            set_user_as_presets(uid, user_presets)
+        
+        await query.edit_message_text(
+            "🗑️ *Target deleted!*\n\n"
+            "Your presets have been updated.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="as_preset:edit")]])
+        )
+    
+    elif action == "add":
+        # Add new preset - show input menu or preset options
+        await query.edit_message_text(
+            "➕ *Add New Target*\n\n"
+            "Choose a preset or customize:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("1.5x (scalp)", callback_data="as_preset:add_preset:1.5:75")],
+                [InlineKeyboardButton("2x (standard)", callback_data="as_preset:add_preset:2.0:50")],
+                [InlineKeyboardButton("3x (dca)", callback_data="as_preset:add_preset:3.0:33")],
+                [InlineKeyboardButton("5x (moon)", callback_data="as_preset:add_preset:5.0:50")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="as_preset:edit")],
+            ])
+        )
+    
+    elif action == "add_preset":
+        # Add a preset target
+        mult = float(parts[2])
+        sell_pct = int(parts[3])
+        user_presets = get_user_as_presets(uid)
+        user_presets.append({"mult": mult, "sell_pct": sell_pct})
+        set_user_as_presets(uid, user_presets)
+        
+        await query.edit_message_text(
+            f"✅ *Target Added!*\n\n"
+            f"{mult:.1f}x → Sell {sell_pct}%\n\n"
+            f"Your presets will apply to the next trade.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="as_preset:edit")]])
+        )
+
+
 async def custom_target_type_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query   = update.callback_query
     uid     = query.from_user.id
@@ -5824,6 +6052,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(alert_callback,               pattern=r"^alert:"))
     app.add_handler(CallbackQueryHandler(alert_dir_callback,           pattern=r"^alert_dir:"))
     app.add_handler(CallbackQueryHandler(autosell_callback,            pattern=r"^as:"))
+    app.add_handler(CallbackQueryHandler(as_preset_callback,           pattern=r"^as_preset:"))
     app.add_handler(CallbackQueryHandler(custom_target_type_callback,  pattern=r"^ct_type:"))
     app.add_handler(CallbackQueryHandler(portfolio_callback,           pattern=r"^portfolio:"))
     app.add_handler(CallbackQueryHandler(qt_callback,                  pattern=r"^qt:"))
