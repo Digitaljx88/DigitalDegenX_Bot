@@ -98,13 +98,14 @@ def mark_alerted(mint: str):
 
 
 def get_user_min_score(uid: int) -> int:
-    """Per-user alert score threshold, defaults to 55."""
+    """Per-user alert score threshold, defaults to 55 (range 40–100)."""
     s = load_state()
     return s.get("user_min_score", {}).get(str(uid), 55)
 
 
 def set_user_min_score(uid: int, score: int):
     s = load_state()
+    score = max(40, min(100, score))  # clamp to valid range
     s.setdefault("user_min_score", {})[str(uid)] = score
     save_state(s)
 

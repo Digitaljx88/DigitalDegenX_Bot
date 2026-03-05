@@ -3677,7 +3677,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"🟢 *Live alerts resumed!*\n\n"
                 f"Scanning every 15 seconds.\n"
-                f"Alerts fire when Heat Score ≥ {sc.get_user_min_score(uid)}/100.",
+                f"Alerts fire when Heat Score ≥ {sc.get_user_min_score(uid)}/120.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔕 Pause Alerts", callback_data="scanner:toggle"),
@@ -3741,17 +3741,23 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = sc.get_user_min_score(uid)
         await query.edit_message_text(
             f"*🌡️ Alert Score Threshold*\n\n"
-            f"Current: `{cur}/100`\n\n"
+            f"Current: `{cur}/120`\n\n"
             f"You'll only receive alerts for tokens scoring at or above this value.\n"
             f"Lower = more alerts · Higher = fewer but stronger signals.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("50", callback_data="scanner:threshold:50"),
-                 InlineKeyboardButton("55", callback_data="scanner:threshold:55"),
-                 InlineKeyboardButton("60", callback_data="scanner:threshold:60")],
-                [InlineKeyboardButton("65", callback_data="scanner:threshold:65"),
+                [InlineKeyboardButton("40", callback_data="scanner:threshold:40"),
+                 InlineKeyboardButton("45", callback_data="scanner:threshold:45"),
+                 InlineKeyboardButton("50", callback_data="scanner:threshold:50"),
+                 InlineKeyboardButton("55", callback_data="scanner:threshold:55")],
+                [InlineKeyboardButton("60", callback_data="scanner:threshold:60"),
+                 InlineKeyboardButton("65", callback_data="scanner:threshold:65"),
                  InlineKeyboardButton("70", callback_data="scanner:threshold:70"),
-                 InlineKeyboardButton("80", callback_data="scanner:threshold:80")],
+                 InlineKeyboardButton("75", callback_data="scanner:threshold:75")],
+                [InlineKeyboardButton("80", callback_data="scanner:threshold:80"),
+                 InlineKeyboardButton("85", callback_data="scanner:threshold:85"),
+                 InlineKeyboardButton("90", callback_data="scanner:threshold:90"),
+                 InlineKeyboardButton("100", callback_data="scanner:threshold:100")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
             ])
         )
@@ -3760,7 +3766,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(query.data.split(":")[2])
         sc.set_user_min_score(uid, val)
         await query.edit_message_text(
-            f"✅ Alert threshold set to `{val}/100`\n\nYou'll receive alerts for tokens scoring ≥ {val}.",
+            f"✅ Alert threshold set to `{val}/120`\n\nYou'll receive alerts for tokens scoring ≥ {val}.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main"),

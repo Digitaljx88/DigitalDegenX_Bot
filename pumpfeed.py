@@ -1003,16 +1003,17 @@ async def _handle_grad_token(bot: Bot, token: dict):
 def _fetch_pumpfun_graduated() -> list[dict]:
     """Return recently graduated pump.fun tokens.
 
-    Strategy: ask the API to filter complete=true server-side so all 50 results
-    are graduated tokens, sorted by last_trade_timestamp (= graduation time).
-    Then drop tokens whose graduation was more than GRAD_MAX_AGE_H hours ago.
+    Strategy: sort by created_timestamp DESC (same as new-token alerts) so the
+    most recently *created* completed tokens come first.  last_trade_timestamp
+    is updated every time someone trades on Raydium, causing old grads to
+    appear at the top — created_timestamp is immutable and reliable.
     """
     cutoff_ms = (time.time() - GRAD_MAX_AGE_H * 3600) * 1000
     results = []
     try:
         r = requests.get(
             f"{PUMPFUN_API}/coins",
-            params={"offset": "0", "limit": "50", "sort": "last_trade_timestamp",
+            params={"offset": "0", "limit": "50", "sort": "created_timestamp",
                     "order": "DESC", "includeNsfw": "false", "complete": "true"},
             headers={"User-Agent": "Mozilla/5.0"},
             timeout=10,
@@ -1022,12 +1023,13 @@ def _fetch_pumpfun_graduated() -> list[dict]:
         for c in coins:
             if not c.get("complete"):
                 continue
-            # Use last_trade_timestamp as graduation time (last bonding-curve trade = grad tx)
-            grad_ts = c.get("last_trade_timestamp") or c.get("created_timestamp") or 0
-            if grad_ts >= cutoff_ms:
+            created_ts = c.get("created_timestamp") or 0
+            if created_ts >= cutoff_ms:
                 results.append(c)
     except Exception:
         pass
+    # Ensure newest-created first
+    results.sort(key=lambda c: c.get("created_timestamp", 0), reverse=True)
     return results
 
 
