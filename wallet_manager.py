@@ -14,6 +14,7 @@ import json
 import os
 import time
 import base64
+import base58
 import hashlib
 import hmac
 from typing import Optional
@@ -71,19 +72,17 @@ def mnemonic_to_keypair(mnemonic: str) -> dict:
     
     mnemo = Mnemonic("english")
     seed = mnemo.to_seed(mnemonic)
+    derivation_path = "m/44'/501'/0'/0'"
     
     try:
-        I = hmac.new(b"ed25519 seed", seed, hashlib.sha512).digest()
-        parse = I[:32]
-        
-        kp = Keypair.from_secret_key(parse)
+        kp = Keypair.from_seed_and_derivation_path(seed[:32], derivation_path)
         pubkey_str = str(kp.pubkey())
-        privkey_b58 = kp.to_base58_string()
+        privkey_b58 = base58.b58encode(bytes(kp)).decode()
         
         return {
             "public_key": pubkey_str,
             "private_key_base58": privkey_b58,
-            "path": "m/44'/501'/0'/0'",
+            "path": derivation_path,
         }
     except Exception as e:
         raise RuntimeError(f"Keypair derivation failed: {e}")

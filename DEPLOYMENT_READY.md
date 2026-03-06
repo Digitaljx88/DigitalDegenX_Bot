@@ -30,7 +30,7 @@
 ✅ PORTFOLIO_WATCHER_QUICKSTART.md — User setup  
 ✅ PORTFOLIO_WATCHER_TESTING.md — Validation steps  
 ✅ DEPLOYMENT_CHECKLIST.md — Pre-deploy verification  
-✅ DEPLOYMENT.md — VPS setup guide
+✅ DEPLOYMENT_READY.md — VPS setup guide
 
 ### Files Ready
 ✅ requirements.txt  
@@ -79,7 +79,7 @@ nano config.py
 chmod 600 config.py
 mkdir -p data
 
-# Create systemd service (copy from DEPLOYMENT.md Step 6.1)
+# Create systemd service using the commands in this file
 sudo nano /etc/systemd/system/digitaldegen-bot.service
 # Change User=YOUR_USERNAME
 
@@ -222,7 +222,7 @@ source venv/bin/activate
 python3 -c "from portfolio_watcher import score_signals; print('OK')"
 ```
 
-### Full troubleshooting: See [DEPLOYMENT.md](DEPLOYMENT.md) "Troubleshooting" section
+### Full troubleshooting: use the troubleshooting section in `DEPLOYMENT_READY.md`
 
 ---
 
@@ -280,7 +280,7 @@ sudo systemctl restart digitaldegen-bot
 |----------------|----------|
 | Feature overview | [README.md](README.md) |
 | Setting up bot | [PORTFOLIO_WATCHER_QUICKSTART.md](PORTFOLIO_WATCHER_QUICKSTART.md) |
-| Full VPS setup | [DEPLOYMENT.md](DEPLOYMENT.md) |
+| Full VPS setup | [DEPLOYMENT_READY.md](DEPLOYMENT_READY.md) |
 | Before you deploy | [DEPLOYMENT_CHECKLIST.md](DEPLOYMENT_CHECKLIST.md) |
 | Testing locally | [PORTFOLIO_WATCHER_TESTING.md](PORTFOLIO_WATCHER_TESTING.md) |
 

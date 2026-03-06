@@ -57,9 +57,19 @@ echo ""
 
 # 6. Check if we need to reinstall dependencies
 echo -e "${BLUE}📦 Checking dependencies...${NC}"
+if [ ! -d "venv" ]; then
+    python3 -m venv venv
+fi
 source venv/bin/activate
-pip install -r requirements.txt --upgrade >/dev/null 2>&1 || pip install python-telegram-bot requests solders solana
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
 echo -e "${GREEN}✅ Dependencies up to date${NC}"
+echo ""
+
+# 6.1 Validate syntax before restart
+echo -e "${BLUE}🧪 Running syntax validation...${NC}"
+python -m compileall bot.py scanner.py pumpfeed.py portfolio_watcher.py >/dev/null
+echo -e "${GREEN}✅ Syntax validation passed${NC}"
 echo ""
 
 # 7. Restart the bot service

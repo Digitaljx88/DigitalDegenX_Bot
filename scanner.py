@@ -1,6 +1,6 @@
 """
-Heat Score Scanner — per ALERTS.md + AGENTS.md
-Scores new Solana tokens and fires Telegram alerts when score >= 70.
+Heat Score Scanner — per ALERTS.md + AGENTS.md.
+Scores fresh Solana tokens on a normalized 0-100 scale and alerts at 70+.
 """
 from __future__ import annotations
 
@@ -25,8 +25,8 @@ DEXSCREENER_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_TOKEN    = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_REPORT      = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
-ALERT_COOLDOWN_SECS  = 86400  # one alert per token per day
-MCAP_MIN             = 1_000
+ALERT_COOLDOWN_SECS  = 3600   # one alert per token per hour max
+MCAP_MIN             = 10_000
 MCAP_MAX             = 10_000_000
 
 # ── Narrative keywords ────────────────────────────────────────────────────────
@@ -47,7 +47,13 @@ def load_state() -> dict:
         with open(SCANNER_STATE_FILE) as f:
             return json.load(f)
     except (FileNotFoundError, json.JSONDecodeError):
-        return {"scanning": True, "watchlist": {}, "alerted": {}, "scan_targets": []}
+        return {
+            "scanning": True,
+            "watchlist": {},
+            "alerted": {},
+            "scan_targets": [],
+            "seen_tokens": {},
+        }
 
 
 def save_state(s: dict):
@@ -132,6 +138,16 @@ def add_to_watchlist(mint: str, data: dict):
     save_state(s)
 
 
+def has_seen_token(mint: str) -> bool:
+    return mint in load_state().get("seen_tokens", {})
+
+
+def mark_seen_token(mint: str):
+    s = load_state()
+    s.setdefault("seen_tokens", {})[mint] = time.time()
+    save_state(s)
+
+
 def get_todays_alerts() -> list:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     return [e for e in load_log() if e.get("date") == today and e.get("alerted")]
@@ -139,7 +155,7 @@ def get_todays_alerts() -> list:
 
 # ─── Data fetching ────────────────────────────────────────────────────────────
 
-MAX_TOKEN_AGE_HOURS  = 24    # ignore tokens older than this
+MAX_TOKEN_AGE_HOURS  = 4     # ignore tokens older than this
 
 def _parse_pairs(pairs: list, tokens: dict):
     """Merge DexScreener pairs into the tokens dict. Skip old tokens."""
@@ -280,14 +296,12 @@ def score_volume(token: dict) -> tuple[int, str]:
 def score_wallets(rc: dict) -> tuple[int, str]:
     """15 pts — unique wallet count from RugCheck."""
     holders = rc.get("totalHolders", 0) or 0
+    if holders >= 500:
+        return 15, f"{holders} unique wallets (500+)"
     if holders >= 200:
-        return 15, f"{holders} unique wallets (200+)"
+        return 10, f"{holders} unique wallets (200-499)"
     if holders >= 100:
-        return 10, f"{holders} unique wallets (100-200)"
-    if holders >= 50:
-        return 7, f"{holders} unique wallets (50-100)"
-    if holders >= 20:
-        return 3, f"{holders} unique wallets (20-50)"
+        return 5, f"{holders} unique wallets (100-199)"
     return 0, f"Only {holders} wallets"
 
 
@@ -363,15 +377,15 @@ def score_dev_wallet(rc: dict) -> tuple[int, str, bool]:
             dev_pct = float(h.get("pct", 0))
             break
 
-    if dev_pct > 80:
-        return 0, f"Dev holds {dev_pct:.1f}% — DISQUALIFIED", True
+    if dev_pct > 50:
+        return 0, f"Dev holds {dev_pct:.1f}% (>50% - disqualified)", True
     if dev_pct == 0:
         return 10, "Dev holds 0% (sold or never held)", False
-    if dev_pct < 20:
-        return 7, f"Dev holds {dev_pct:.1f}% (<20%)", False
-    if dev_pct < 50:
-        return 3, f"Dev holds {dev_pct:.1f}% (20-50%)", False
-    return 0, f"Dev holds {dev_pct:.1f}% (>50%)", False
+    if dev_pct < 10:
+        return 5, f"Dev holds {dev_pct:.1f}% (<10%)", False
+    if dev_pct <= 20:
+        return 0, f"Dev holds {dev_pct:.1f}% (>10%)", False
+    return 0, f"Dev holds {dev_pct:.1f}% (20-50%)", False
 
 
 def score_top_holders(rc: dict) -> tuple[int, str, bool]:
@@ -383,15 +397,13 @@ def score_top_holders(rc: dict) -> tuple[int, str, bool]:
     top10_pct  = sum(float(h.get("pct", 0)) for h in holders[:10])
     max_single = max((float(h.get("pct", 0)) for h in holders), default=0)
 
-    if max_single > 50:
+    if max_single > 20:
         return 0, f"Single wallet holds {max_single:.1f}% — DISQUALIFIED", True
     if top10_pct < 30:
         return 10, f"Top 10 hold {top10_pct:.1f}% (<30% — healthy)", False
     if top10_pct < 50:
-        return 7, f"Top 10 hold {top10_pct:.1f}% (30-50%)", False
-    if top10_pct < 70:
-        return 3, f"Top 10 hold {top10_pct:.1f}% (50-70%)", False
-    return 0, f"Top 10 hold {top10_pct:.1f}% (>70% — concentrated)", False
+        return 5, f"Top 10 hold {top10_pct:.1f}% (30-50%)", False
+    return 0, f"Top 10 hold {top10_pct:.1f}% (>50% - disqualified)", True
 
 
 def score_age(token: dict) -> tuple[int, str]:
@@ -403,12 +415,10 @@ def score_age(token: dict) -> tuple[int, str]:
     age_mins = (now_ms - pair_created) / 60_000
     age_hrs  = age_mins / 60
 
+    if age_mins < 30:
+        return 2, f"{age_mins:.0f} mins old (very early)"
     if age_hrs <= 4:
         return 5, f"{age_mins:.0f} mins old (fresh)"
-    if age_hrs <= 12:
-        return 3, f"{age_hrs:.1f} hrs old (recent)"
-    if age_hrs <= 24:
-        return 1, f"{age_hrs:.1f} hrs old (aging)"
     return 0, f"{age_hrs:.0f} hrs old (too old)"
 
 
@@ -541,7 +551,7 @@ def score_bundle_risk(token_mint: str, rc: dict) -> tuple[int, str]:
 
 def calculate_heat_score(token: dict, rc: dict) -> dict:
     """
-    Run 11 scoring categories + bundle risk penalty (120 pts max).
+    Run the extended scoring model but return a normalized 0-100 heat score.
     Returns full score breakdown dict. Returns disqualified flag if instantly DQ.
     """
     # New scoring order: momentum first, then liquidity, then wallet, then rest
@@ -608,9 +618,10 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         intel_wallet_boost    = 0.0
         intel_narrative_boost = 0.0
 
-    # Total: 120 pts base + cluster boost + bundle penalty + prediction boost + intelligence boosts
+    # Convert the richer internal score into the documented 0-100 scale.
     base_total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
-    total = max(0, int(base_total + clus_pts + bund_pts + pred_pts + intel_wallet_boost + intel_narrative_boost))
+    raw_total = max(0.0, float(base_total + clus_pts + bund_pts + pred_pts + intel_wallet_boost + intel_narrative_boost))
+    total = max(0, min(100, int(round((raw_total / 120.0) * 100))))
 
     # Risk level (adjusted for 120pt scale)
     red_flags = []
@@ -619,10 +630,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     if token.get("liquidity", 0) < 5000:
         red_flags.append("Very low liquidity")
 
-    # Risk thresholds for 120pt scale
-    if total >= 100 or (total >= 80 and not red_flags):
+    if total >= 85 and not red_flags:
         risk = "LOW"
-    elif total >= 80 and red_flags:
+    elif total >= 70 or (total >= 55 and red_flags):
         risk = "MEDIUM"
     else:
         risk = "HIGH"
@@ -637,6 +647,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         "total_holders": rc.get("totalHolders", 0),
         "pair_created":  token.get("pair_created", 0),
         "dex":           token.get("dex", ""),
+        "raw_total":     raw_total,
         "total":         total,
         "disqualified":  disqualified,
         "risk":          risk,
@@ -664,8 +675,8 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
 
 
 def priority_label(score: int) -> str:
-    """Priority label for heat score (0–120 scale)."""
-    if score >= 95: return "🔴 ULTRA HOT"
+    """Priority label for heat score (0-100 scale)."""
+    if score >= 90: return "🔴 ULTRA HOT"
     if score >= 80: return "🟠 HOT"
     if score >= 70: return "🟡 WARM"
     if score >= 50: return "⚪ WATCH"
@@ -682,7 +693,7 @@ def age_str(pair_created_ms: int) -> str:
 
 
 def format_alert(r: dict) -> str:
-    """Format the Telegram alert message per ALERTS.md spec (updated for 120pt scale)."""
+    """Format the Telegram alert message per ALERTS.md spec."""
     bd    = r["breakdown"]
     mint  = r["mint"]
     label = priority_label(r["total"])
@@ -715,7 +726,7 @@ def format_alert(r: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{r['name']}* (${r['symbol']})\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🌡️ Heat Score: *{r['total']}/120*\n"
+        f"🌡️ Heat Score: *{r['total']}/100*\n"
         f"{arch_line}"
         f"💵 Price: `{price_str}`\n"
         f"🏦 MCap: `${r['mcap']:,.0f}`\n"
@@ -734,7 +745,7 @@ def format_alert(r: dict) -> str:
 
 
 def format_heat_score_card(r: dict) -> str:
-    """Shorter card for manual /heatscore lookups (120pt scale)."""
+    """Shorter card for manual /heatscore lookups."""
     bd        = r["breakdown"]
     label     = priority_label(r["total"])
     mint      = r["mint"]
@@ -742,7 +753,7 @@ def format_heat_score_card(r: dict) -> str:
     price_str = f"${price_usd:.8f}" if price_usd and price_usd < 0.01 else (f"${price_usd:.4f}" if price_usd else "N/A")
 
     lines = [
-        f"🌡️ *Heat Score: {r['total']}/120* — {label}\n",
+        f"🌡️ *Heat Score: {r['total']}/100* — {label}\n",
         f"*{r['name']}* (${r['symbol']})",
         f"💵 Price: `{price_str}`",
         f"🏦 MCap: `${r['mcap']:,.0f}` | 📊 Vol 1h: `${r['volume_h1']:,.0f}`",
@@ -778,6 +789,8 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
     for token in tokens:
         mint = token.get("mint", "")
         if not mint:
+            continue
+        if has_seen_token(mint):
             continue
 
         # Quick pre-filter: skip if mcap out of range
@@ -816,8 +829,10 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         if result["disqualified"]:
             continue
 
-        # Watchlist (30-54)
-        if 30 <= score < 55:
+        mark_seen_token(mint)
+
+        # Watchlist (50-69)
+        if 50 <= score < 70:
             add_to_watchlist(mint, {
                 "name": result["name"], "symbol": result["symbol"],
                 "score": score, "mcap": mcap, "mint": mint,

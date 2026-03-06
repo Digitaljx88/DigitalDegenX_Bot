@@ -266,7 +266,7 @@ chmod 600 config.py
 4. **Start as systemd service**
 ```bash
 sudo nano /etc/systemd/system/digitaldegen-bot.service
-# Copy config from DEPLOYMENT.md Step 6.1
+# Create the systemd service using the commands in DEPLOYMENT_READY.md
 sudo systemctl daemon-reload
 sudo systemctl enable digitaldegen-bot
 sudo systemctl start digitaldegen-bot
@@ -279,7 +279,7 @@ sudo journalctl -u digitaldegen-bot -f
 # Look for: "[WATCH] Portfolio watcher started"
 ```
 
-See [DEPLOYMENT.md](DEPLOYMENT.md) for complete VPS setup guide.
+See `DEPLOYMENT_READY.md` and `update-vps.sh` for the current VPS setup flow.
 
 ---
 
@@ -390,7 +390,7 @@ Potential additions (not yet implemented):
 For issues or questions:
 1. Check `PORTFOLIO_WATCHER_TESTING.md` for detailed test procedures
 2. Review logs: `sudo journalctl -u digitaldegen-bot -f`
-3. Check `DEPLOYMENT.md` for VPS setup issues
+3. Check `DEPLOYMENT_READY.md` and `update-vps.sh` for VPS setup issues
 4. Verify imports: `python3 test_imports.py`
 
 ---

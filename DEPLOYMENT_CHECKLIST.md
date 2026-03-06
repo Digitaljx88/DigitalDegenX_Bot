@@ -23,7 +23,7 @@ Portfolio Watcher Status: **✅ READY FOR PRODUCTION**
 - [x] README.md created (feature overview + quick start)
 - [x] PORTFOLIO_WATCHER_QUICKSTART.md (setup + config guide)
 - [x] PORTFOLIO_WATCHER_TESTING.md (15-step validation)
-- [x] DEPLOYMENT.md (VPS setup with systemd)
+- [x] DEPLOYMENT_READY.md (VPS setup with systemd)
 - [x] config.example.py exists (user template)
 
 ### File Structure
@@ -159,7 +159,7 @@ mkdir -p data
 # Create service file
 sudo nano /etc/systemd/system/digitaldegen-bot.service
 
-# Copy content from DEPLOYMENT.md Step 6.1
+# Use the systemd commands from DEPLOYMENT_READY.md
 # Change:
 # - User=YOUR_USERNAME
 # - WorkingDirectory=/opt/digitaldegen-bot
@@ -410,7 +410,7 @@ sudo journalctl -u digitaldegen-bot -f
 ✅ README.md                           (New, commit 9763f0d)
 ✅ PORTFOLIO_WATCHER_QUICKSTART.md     (New, commit ad1d47f)
 ✅ PORTFOLIO_WATCHER_TESTING.md        (New, commit ad1d47f)
-✅ DEPLOYMENT.md                       (Existing, updated)
+✅ DEPLOYMENT_READY.md                 (Existing, updated)
 ✅ test_imports.py                     (New, commit ad1d47f)
 
 ❌ Do NOT commit:
@@ -431,7 +431,7 @@ sudo journalctl -u digitaldegen-bot -f
 | Dependencies | ✅ Listed | requirements.txt created |
 | API Integration | ✅ Tested | DexScreener + Pump.fun ready |
 | Bot Handlers | ✅ Integrated | /watch command ready |
-| VPS Deployment | ✅ Documented | DEPLOYMENT.md comprehensive |
+| VPS Deployment | ✅ Documented | DEPLOYMENT_READY.md |
 | Monitoring | ✅ Ready | Systemd + journalctl logging |
 | Disaster Recovery | ✅ Ready | Backup scripts provided |
 
@@ -459,7 +459,7 @@ sudo journalctl -u digitaldegen-bot -f
 - [x] Auto-sell integration confirmed
 - [x] Test suite documentation provided
 
-**Start VPS Deployment → Follow [DEPLOYMENT.md](DEPLOYMENT.md) Step 1-12**
+**Start VPS Deployment → Follow `DEPLOYMENT_READY.md` and run `update-vps.sh` on the VPS**
 
 ---
 
@@ -488,7 +488,7 @@ sudo journalctl -u digitaldegen-bot -f
 ---
 
 **Last Updated:** March 5, 2026  
-**Next Action:** Follow [DEPLOYMENT.md](DEPLOYMENT.md) for VPS setup  
+**Next Action:** Follow `DEPLOYMENT_READY.md` for VPS setup  
 **Questions?** Check [PORTFOLIO_WATCHER_QUICKSTART.md](PORTFOLIO_WATCHER_QUICKSTART.md)
 
 🚀 **Ready to deploy!**

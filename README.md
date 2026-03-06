@@ -240,7 +240,7 @@ sudo systemctl start digitaldegen-bot
 sudo journalctl -u digitaldegen-bot -f
 ```
 
-**Full VPS guide:** [DEPLOYMENT.md](DEPLOYMENT.md)
+**VPS runbook:** `DEPLOYMENT_READY.md` and `update-vps.sh`
 
 ---
 
@@ -251,13 +251,13 @@ DigitalDegenX_Bot/
 ├── bot.py                              # Main Telegram bot handler
 ├── pumpfeed.py                         # API polling & updates
 ├── portfolio_watcher.py                # ⭐ Crash detection engine
-├── auto_sell_v2.py                     # Auto-sell execution
+├── bot.py                              # Main bot + auto-sell execution
 ├── scanner.py                          # Token scanner
 ├── config.py                           # Configuration (user-specific)
 ├── config.example.py                   # Config template
 ├── requirements.txt                    # Python dependencies
 │
-├── DEPLOYMENT.md                       # VPS setup guide
+├── DEPLOYMENT_READY.md                 # VPS setup guide
 ├── PORTFOLIO_WATCHER_QUICKSTART.md     # Watcher feature guide
 ├── PORTFOLIO_WATCHER_TESTING.md        # Testing procedures
 ├── ALERTS.md                           # Alert configuration
@@ -372,7 +372,7 @@ sudo journalctl -u digitaldegen-bot -f
 3. Run validation: `python3 test_imports.py`
 
 ### VPS deployment issues?
-See [DEPLOYMENT.md](DEPLOYMENT.md) troubleshooting section
+See `DEPLOYMENT_READY.md` and `update-vps.sh`
 
 ---
 
@@ -381,7 +381,7 @@ See [DEPLOYMENT.md](DEPLOYMENT.md) troubleshooting section
 - **Getting Started:** This README
 - **Portfolio Watcher Feature:** [PORTFOLIO_WATCHER_QUICKSTART.md](PORTFOLIO_WATCHER_QUICKSTART.md)
 - **Testing Guide:** [PORTFOLIO_WATCHER_TESTING.md](PORTFOLIO_WATCHER_TESTING.md)
-- **VPS Deployment:** [DEPLOYMENT.md](DEPLOYMENT.md)
+- **VPS Deployment:** `DEPLOYMENT_READY.md`
 - **Alert Configuration:** [ALERTS.md](ALERTS.md)
 - **API Reference:** [TOOLS.md](TOOLS.md)
 

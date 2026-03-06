@@ -1979,7 +1979,7 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "🌡️ *Set minimum heat score for auto-buy*\n\n"
             "Higher = fewer but better trades.\n"
-            f"Current: `{cfg.get('min_score', 70)}/120`",
+            f"Current: `{cfg.get('min_score', 70)}/100`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("35", callback_data="autobuy:score_preset:35"),
@@ -2361,7 +2361,7 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🟢 *Live Scanner Active!*\n\n"
         "Scanning pump.fun + DexScreener every 15 seconds.\n"
-        "You'll be alerted instantly when Heat Score ≥ 55/100.\n\n"
+        "You'll be alerted instantly when Heat Score ≥ 70/100 by default.\n\n"
         "Use /stopscan to pause your alerts.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
@@ -2577,7 +2577,7 @@ async def cmd_momentum(update: Update, context: ContextTypes.DEFAULT_TYPE):
             symbol = token.get("symbol", "?")
             heat = token.get("total", "?")
             lines.append(f"• ${symbol} {name}")
-            lines.append(f"  Heat: {heat}/120")
+            lines.append(f"  Heat: {heat}/100")
             bd = token.get("breakdown", {})
             _, mom_reason = bd.get("momentum", ("", ""))
             if mom_reason:
@@ -2638,7 +2638,7 @@ async def cmd_contract(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"",
             f"Mint: `{mint}`",
             f"Narrative: {token_entry.get('narrative', 'Unknown')}",
-            f"Score: {token_entry.get('score', '?')}/120",
+            f"Score: {token_entry.get('score', '?')}/100",
             f"MCap: ${token_entry.get('mcap', 0):,.0f}",
             f"",
             f"📊 [Chart](https://dexscreener.com/solana/{mint})  "
@@ -3995,7 +3995,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"🟢 *Live alerts resumed!*\n\n"
                 f"Scanning every 15 seconds.\n"
-                f"Alerts fire when Heat Score ≥ {sc.get_user_min_score(uid)}/120.",
+                f"Alerts fire when Heat Score ≥ {sc.get_user_min_score(uid)}/100.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔕 Pause Alerts", callback_data="scanner:toggle"),
@@ -4059,7 +4059,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cur = sc.get_user_min_score(uid)
         await query.edit_message_text(
             f"*🌡️ Alert Score Threshold*\n\n"
-            f"Current: `{cur}/120`\n\n"
+            f"Current: `{cur}/100`\n\n"
             f"You'll only receive alerts for tokens scoring at or above this value.\n"
             f"Lower = more alerts · Higher = fewer but stronger signals.",
             parse_mode="Markdown",
@@ -4084,7 +4084,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(query.data.split(":")[2])
         sc.set_user_min_score(uid, val)
         await query.edit_message_text(
-            f"✅ Alert threshold set to `{val}/120`\n\nYou'll receive alerts for tokens scoring ≥ {val}.",
+            f"✅ Alert threshold set to `{val}/100`\n\nYou'll receive alerts for tokens scoring ≥ {val}.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main"),
@@ -6787,7 +6787,7 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_auto_buy(uid, cfg)
         clear_state(uid)
         await update.message.reply_text(
-            f"✅ Auto-buy min score set to `{val}/120`",
+            f"✅ Auto-buy min score set to `{val}/100`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
