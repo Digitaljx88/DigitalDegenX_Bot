@@ -7937,20 +7937,16 @@ async def cmd_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Show and manage alert channels."""
     uid = update.effective_user.id
     channels = get_alert_channels()
-    
-    main_status = format_channel_id(channels.get("main"))
+
     launches_status = format_channel_id(channels.get("launches"))
-    
+
     await update.message.reply_text(
         "⚙️ <b>Alert Channel Settings</b>\n\n"
-        f"📊 <b>Main Channel</b> (portfolio/pumpfun alerts)\n"
-        f"   Status: {main_status}\n\n"
         f"🚀 <b>Launch Channel</b> (early token launches)\n"
         f"   Status: {launches_status}\n\n"
         f"<i>Click below to configure channels</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Set Main Channel", callback_data="channels:set:main")],
             [InlineKeyboardButton("🚀 Set Launch Channel", callback_data="channels:set:launches")],
             [InlineKeyboardButton("🧪 Test Channels", callback_data="channels:test")],
             [InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")],
@@ -7996,21 +7992,7 @@ async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         channels = get_alert_channels()
         
         msg = "🧪 <b>Testing Alert Channels</b>\n\n"
-        
-        try:
-            main_id = channels.get("main")
-            if main_id:
-                await context.bot.send_message(
-                    chat_id=main_id,
-                    text="✅ <b>Main Channel Test</b>\n\nThis channel is configured correctly!",
-                    parse_mode="HTML"
-                )
-                msg += "✅ Main channel working\n"
-            else:
-                msg += "⚠️ Main channel not set\n"
-        except Exception as e:
-            msg += f"❌ Main channel error: {str(e)[:50]}\n"
-        
+
         try:
             launch_id = channels.get("launches")
             if launch_id:
@@ -8024,20 +8006,17 @@ async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 msg += "⚠️ Launch channel not set\n"
         except Exception as e:
             msg += f"❌ Launch channel error: {str(e)[:50]}\n"
-        
+
         channels_obj = get_alert_channels()
-        main_status = format_channel_id(channels_obj.get("main"))
         launches_status = format_channel_id(channels_obj.get("launches"))
-        
+
         msg += f"\n<b>Current Configuration:</b>\n"
-        msg += f"📊 Main: {main_status}\n"
         msg += f"🚀 Launch: {launches_status}"
-        
+
         await query.edit_message_text(
             msg,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Set Main", callback_data="channels:set:main")],
                 [InlineKeyboardButton("🚀 Set Launch", callback_data="channels:set:launches")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="channels:menu")],
             ])
@@ -8045,19 +8024,15 @@ async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     elif action == "menu":
         channels_obj = get_alert_channels()
-        main_status = format_channel_id(channels_obj.get("main"))
         launches_status = format_channel_id(channels_obj.get("launches"))
-        
+
         await query.edit_message_text(
             "⚙️ <b>Alert Channel Settings</b>\n\n"
-            f"📊 <b>Main Channel</b> (portfolio/pumpfun alerts)\n"
-            f"   Status: {main_status}\n\n"
             f"🚀 <b>Launch Channel</b> (early token launches)\n"
             f"   Status: {launches_status}\n\n"
             f"<i>Click below to configure channels</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📊 Set Main Channel", callback_data="channels:set:main")],
                 [InlineKeyboardButton("🚀 Set Launch Channel", callback_data="channels:set:launches")],
                 [InlineKeyboardButton("🧪 Test Channels", callback_data="channels:test")],
                 [InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")],

@@ -113,7 +113,7 @@ def get_user_min_score(uid: int) -> int:
 
 def set_user_min_score(uid: int, score: int):
     s = load_state()
-    score = max(40, min(100, score))  # clamp to valid range
+    score = max(1, min(100, score))  # clamp to valid range
     s.setdefault("user_min_score", {})[str(uid)] = score
     save_state(s)
 
@@ -781,7 +781,8 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
     chat_ids: list of user IDs to send alerts to.
     on_alert: optional async callback(bot, result) called when a token fires an alert.
     """
-    if not chat_ids:
+    alert_channel = get_alert_channel()
+    if not chat_ids and not alert_channel:
         return
 
     tokens = fetch_new_tokens()
@@ -842,7 +843,6 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         # Alert threshold — check per-user min score, respect global cooldown
         # Find which users this token qualifies for
         eligible_uids = [uid for uid in chat_ids if score >= get_user_min_score(uid)]
-        alert_channel = get_alert_channel()
 
         should_alert = (eligible_uids or alert_channel) and cooldown_ok(mint)
 
