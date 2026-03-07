@@ -12,12 +12,125 @@ import logging
 from typing import Optional, Dict, Any
 from pathlib import Path
 
-import config
-
 logger = logging.getLogger(__name__)
 
 SETTINGS_FILE = "global_settings.json"
 HEAT_SCORE_SETTINGS_KEY = "heat_score_v2"
+
+# ─── Embedded defaults (not dependent on config.py) ──────────────────────────
+
+HEAT_SCORE_V2_DEFAULTS = {
+    # ─── Momentum Factor (0-20 pts)
+    "momentum_weight_usd_vol": 50,
+    "momentum_weight_creation_momentum": 50,
+    "momentum_min_vol": 5000.0,
+    # ─── Liquidity Factor (0-20 pts)
+    "liquidity_min_usd": 50000.0,
+    "liquidity_good_usd": 10000.0,
+    "liquidity_fair_usd": 2000.0,
+    # ─── Risk Safety Factor (0-25 pts)
+    "risk_dev_sell_threshold_pct": 50,
+    "risk_top_holder_threshold_pct": 20,
+    "risk_bundle_severity": 50,
+    # ─── Social/Narrative Factor (0-15 pts)
+    "social_twitter_follower_min": 1000,
+    "social_narrative_trending_boost": 50,
+    # ─── Wallet Behavior Factor (0-15 pts)
+    "wallet_cluster_boost_pts": 5,
+    "wallet_known_seed_boost_pts": 8,
+    # ─── Migration Status Factor (0-10 pts)
+    "migration_new_boost_pts": 8,
+    "migration_grad_boost_pts": 6,
+    "migration_migrated_penalty_pts": 2,
+    # ─── Directional Bias Factor (0-10 pts)
+    "bias_buy_threshold_pct": 70,
+    "bias_buy_good_threshold_pct": 60,
+    # ─── Volume Trend Factor (0-5 pts)
+    "trend_explosive_threshold": 5,
+    "trend_strong_threshold": 3,
+    # ─── Scout Tier Thresholds
+    "scout_tier_brewing_threshold": 50,
+    "scout_tier_warm_threshold": 60,
+    "scout_tier_hot_threshold": 80,
+    # ─── Alert Notification Thresholds
+    "alert_ultra_hot_threshold": 90,
+    "alert_hot_threshold": 80,
+    "alert_warm_threshold": 70,
+    "alert_scouted_threshold": 50,
+}
+
+SCOUT_PRESETS = {
+    "conservative": {
+        "name": "🛡️ Conservative",
+        "description": "High threshold, low false positives, best for risk-averse traders",
+        "overrides": {
+            "alert_ultra_hot_threshold": 95,
+            "alert_hot_threshold": 90,
+            "alert_warm_threshold": 80,
+            "alert_scouted_threshold": 70,
+            "risk_dev_sell_threshold_pct": 30,
+            "risk_top_holder_threshold_pct": 10,
+            "liquidity_min_usd": 100000.0,
+        }
+    },
+    "balanced": {
+        "name": "⚖️ Balanced",
+        "description": "Standard thresholds, good balance of signals and accuracy",
+        "overrides": {
+            "alert_ultra_hot_threshold": 90,
+            "alert_hot_threshold": 80,
+            "alert_warm_threshold": 70,
+            "alert_scouted_threshold": 50,
+            "risk_dev_sell_threshold_pct": 50,
+            "risk_top_holder_threshold_pct": 20,
+            "liquidity_min_usd": 50000.0,
+        }
+    },
+    "aggressive": {
+        "name": "🚀 Aggressive",
+        "description": "Lower thresholds, more signals, best for active traders",
+        "overrides": {
+            "alert_ultra_hot_threshold": 85,
+            "alert_hot_threshold": 70,
+            "alert_warm_threshold": 55,
+            "alert_scouted_threshold": 40,
+            "risk_dev_sell_threshold_pct": 70,
+            "risk_top_holder_threshold_pct": 30,
+            "liquidity_min_usd": 10000.0,
+        }
+    },
+    "whale-mode": {
+        "name": "🐋 Whale Mode",
+        "description": "Lowest thresholds, maximum signals, for whale hunters",
+        "overrides": {
+            "alert_ultra_hot_threshold": 80,
+            "alert_hot_threshold": 65,
+            "alert_warm_threshold": 50,
+            "alert_scouted_threshold": 30,
+            "risk_dev_sell_threshold_pct": 90,
+            "risk_top_holder_threshold_pct": 50,
+            "liquidity_min_usd": 2000.0,
+        }
+    },
+}
+
+
+def _get_defaults():
+    """Get defaults — use config.py if available, otherwise embedded defaults."""
+    try:
+        import config
+        return getattr(config, 'HEAT_SCORE_V2_DEFAULTS', HEAT_SCORE_V2_DEFAULTS)
+    except Exception:
+        return HEAT_SCORE_V2_DEFAULTS
+
+
+def _get_presets():
+    """Get presets — use config.py if available, otherwise embedded presets."""
+    try:
+        import config
+        return getattr(config, 'SCOUT_PRESETS', SCOUT_PRESETS)
+    except Exception:
+        return SCOUT_PRESETS
 
 
 def _ensure_settings_file() -> Dict[str, Any]:
@@ -58,7 +171,7 @@ def get_user_settings(user_id: int) -> Dict[str, Any]:
     user_key = f"user_{user_id}"
     
     # Start with defaults from config
-    merged_settings = config.HEAT_SCORE_V2_DEFAULTS.copy()
+    merged_settings = _get_defaults().copy()
     
     # Check for old min_score setting and migrate if needed
     if user_key not in settings_data or HEAT_SCORE_SETTINGS_KEY not in settings_data.get(user_key, {}):
@@ -273,11 +386,12 @@ def apply_preset(user_id: int, preset_name: str) -> bool:
     Returns:
         True if successful, False if preset not found
     """
-    if preset_name not in config.SCOUT_PRESETS:
+    presets = _get_presets()
+    if preset_name not in presets:
         logger.warning(f"Preset not found: {preset_name}")
         return False
     
-    preset = config.SCOUT_PRESETS[preset_name]
+    preset = presets[preset_name]
     overrides = preset.get("overrides", {})
     
     return save_user_settings(user_id, overrides)
@@ -293,10 +407,11 @@ def get_preset_info(preset_name: str) -> Optional[Dict[str, Any]]:
     Returns:
         Dict with 'name', 'description', 'overrides' or None if not found
     """
-    if preset_name not in config.SCOUT_PRESETS:
+    presets = _get_presets()
+    if preset_name not in presets:
         return None
     
-    return config.SCOUT_PRESETS[preset_name]
+    return presets[preset_name]
 
 
 def list_presets() -> Dict[str, Dict[str, Any]]:
@@ -312,8 +427,18 @@ def list_presets() -> Dict[str, Dict[str, Any]]:
             "description": preset.get("description", ""),
             "setting_count": len(preset.get("overrides", {}))
         }
-        for name, preset in config.SCOUT_PRESETS.items()
+        for name, preset in _get_presets().items()
     }
+
+
+def detect_current_preset(user_id: int) -> str:
+    """Detect which preset (if any) matches the user's current settings."""
+    user_cfg = get_user_settings(user_id)
+    for preset_name, preset_cfg in _get_presets().items():
+        overrides = preset_cfg.get("overrides", {})
+        if overrides and all(user_cfg.get(k) == v for k, v in overrides.items()):
+            return preset_cfg.get("name", preset_name)
+    return "Custom"
 
 
 def get_setting_description(setting_key: str) -> str:
@@ -390,7 +515,7 @@ def format_settings_display(user_id: int, compact: bool = False) -> str:
         Formatted string for display
     """
     current = get_user_settings(user_id)
-    defaults = config.HEAT_SCORE_V2_DEFAULTS
+    defaults = _get_defaults()
     
     lines = ["*⚙️ Current Heat Score Settings*\n"]
     

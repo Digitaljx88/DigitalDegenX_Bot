@@ -2899,12 +2899,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Get current settings
     try:
-        user_cfg = sm.get_user_settings(user_id)
-        current_preset = "Custom"
-        for preset_name, preset_cfg in _cfg.SCOUT_PRESETS.items():
-            if all(user_cfg.get(k) == v for k, v in preset_cfg.get("overrides", {}).items()):
-                current_preset = preset_cfg.get("name", preset_name)
-                break
+        current_preset = sm.detect_current_preset(user_id)
     except Exception:
         current_preset = "Default"
     

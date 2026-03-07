@@ -777,7 +777,7 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
     if user_id:
         user_cfg = settings_manager.get_user_settings(user_id)
     else:
-        user_cfg = _cfg.HEAT_SCORE_V2_DEFAULTS.copy()
+        user_cfg = settings_manager._get_defaults().copy()
     
     # Calculate v2 score
     result_v2 = heat_score_v2.calculate_heat_score_v2(token, rc, user_cfg)
