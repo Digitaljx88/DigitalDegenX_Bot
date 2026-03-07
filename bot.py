@@ -1273,7 +1273,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
 
     print(f"[AUTOBUY] uid={uid} evaluating {symbol} mint={mint[:8]}.. score={score} mcap=${mcap:,.0f}", flush=True)
 
-    if score < cfg.get("min_score", 70):
+    if not result.get("grad_buy") and score < cfg.get("min_score", 70):
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {cfg.get('min_score', 70)}", flush=True)
         return
     if mcap and mcap > cfg.get("max_mcap", 500_000):

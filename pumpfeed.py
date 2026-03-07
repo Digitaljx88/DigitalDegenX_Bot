@@ -1061,18 +1061,19 @@ async def _handle_grad_token(bot: Bot, token: dict):
             )
         except Exception as e:
             print(f"[PUMPGRAD WS] DM send error uid={uid}: {e}", flush=True)
-        # Auto-buy on graduation if enabled
-        if grad_subs[str(uid)].get("auto_buy") and _grad_autobuy_fn:
-            result = {
+        # Auto-buy on graduation if enabled — only fires if token passed user filters
+        if is_grad_autobuy(uid) and _grad_autobuy_fn:
+            ab_result = {
                 "mint":      mint,
                 "symbol":    token.get("symbol", "?"),
                 "name":      token.get("name", "?"),
-                "total":     heat["total"] if heat else 80,
+                "total":     heat["total"] if heat else 0,
                 "mcap":      float(token.get("marketCapSol", 0)) * sol_usd,
                 "price_usd": 0.0,
+                "grad_buy":  True,
             }
             try:
-                await _grad_autobuy_fn(bot, uid, result)
+                await _grad_autobuy_fn(bot, uid, ab_result)
             except Exception as e:
                 print(f"[PUMPGRAD WS] autobuy error uid={uid} mint={mint}: {e}", flush=True)
                 traceback.print_exc()
@@ -1213,18 +1214,19 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
             )
         except Exception as e:
             print(f"[PUMPGRAD REST] DM send error uid={uid}: {e}", flush=True)
-        # Auto-buy on graduation if enabled
-        if grad_subs[str(uid)].get("auto_buy") and _grad_autobuy_fn:
-            result = {
+        # Auto-buy on graduation if enabled — only fires if token passed user filters
+        if is_grad_autobuy(uid) and _grad_autobuy_fn:
+            ab_result = {
                 "mint":      mint,
                 "symbol":    token.get("symbol", "?"),
                 "name":      token.get("name", "?"),
-                "total":     heat["total"] if heat else 80,
+                "total":     heat["total"] if heat else 0,
                 "mcap":      mcap_usd,
                 "price_usd": 0.0,
+                "grad_buy":  True,
             }
             try:
-                await _grad_autobuy_fn(bot, uid, result)
+                await _grad_autobuy_fn(bot, uid, ab_result)
             except Exception as e:
                 print(f"[PUMPGRAD REST] autobuy error uid={uid} mint={mint}: {e}", flush=True)
                 traceback.print_exc()
