@@ -1761,10 +1761,12 @@ async def _show_portfolio(send_fn, uid: int):
                 pair   = fetch_sol_pair(acc["mint"])
                 sym    = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
                 price  = float(pair.get("priceUsd", 0) or 0) if pair else 0
+                mcap   = float(pair.get("marketCap", 0) or 0) if pair else 0
                 val    = price * acc["ui_amount"]
                 as_cfg = as_configs.get(acc["mint"], {})
                 as_tag = " 🤖" if as_cfg.get("enabled") else ""
-                lines.append(f"`{sym}`{as_tag}: {acc['ui_amount']:,.4f} ≈ `${val:,.4f}`")
+                mcap_str = f" · MCap `${mcap:,.0f}`" if mcap else ""
+                lines.append(f"`{sym}`{as_tag}: {acc['ui_amount']:,.4f} ≈ `${val:,.4f}`{mcap_str}")
                 token_rows.append([
                     InlineKeyboardButton(f"⚡ {sym}",  callback_data=f"qt:{acc['mint']}"),
                     InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{acc['mint']}"),
@@ -1805,6 +1807,7 @@ async def _show_portfolio(send_fn, uid: int):
             if pair:
                 sym       = pair.get("baseToken", {}).get("symbol", mint[:8])
                 price     = float(pair.get("priceUsd", 0) or 0)
+                mcap      = float(pair.get("marketCap", 0) or 0)
                 dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
                 ui        = raw_amt / (10 ** dec)
                 val       = price * ui
@@ -1812,15 +1815,7 @@ async def _show_portfolio(send_fn, uid: int):
                 buy_price = cfg.get("buy_price_usd", 0) if cfg else 0
                 entry_pct = ((price - buy_price) / buy_price * 100) if buy_price else 0
                 
-                # Calculate "since purchase" % — resets to 0% on each new buy
-                purchase_ts = cfg.get("purchase_timestamp", 0) if cfg else 0
-                since_pct = 0.0
-                if purchase_ts > 0:
-                    # For now, "since purchase" % is same as entry %
-                    # In future, could track separate purchase baselines per session
-                    since_pct = entry_pct
-                
-                # Format gain string with both percentages
+                # Format gain string
                 if entry_pct >= 100:
                     pct_str = f"(+{entry_pct:.0f}% from buy 🔥)"
                 elif entry_pct > 0:
@@ -1830,9 +1825,10 @@ async def _show_portfolio(send_fn, uid: int):
                 else:
                     pct_str = "(from buy)"
                 
-                gain_str = f" {pct_str}" if buy_price else ""
+                gain_str  = f" {pct_str}" if buy_price else ""
+                mcap_str  = f" · MCap `${mcap:,.0f}`" if mcap else ""
                 as_tag    = " 🤖" if cfg and cfg.get("enabled") else ""
-                lines.append(f"`{sym}`{as_tag}: {ui:,.4f} ≈ `${val:,.4f}`{gain_str}")
+                lines.append(f"`{sym}`{as_tag}: {ui:,.4f} ≈ `${val:,.4f}`{gain_str}{mcap_str}")
                 if cfg and cfg.get("enabled"):
                     pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
                     if pending:
