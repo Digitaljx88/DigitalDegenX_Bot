@@ -517,6 +517,17 @@ def fetch_sol_pair(query: str) -> dict | None:
         return None
 
 
+def _fetch_pumpfun_coin(mint: str) -> dict | None:
+    """Fetch token metadata from pump.fun API (name, symbol, market cap)."""
+    try:
+        r = requests.get(f"https://frontend-api-v3.pump.fun/coins/{mint}", timeout=8)
+        if r.status_code == 200:
+            return r.json()
+    except Exception:
+        pass
+    return None
+
+
 def fetch_token_price(mint: str) -> tuple[float | None, float | None]:
     """Returns (price_usd, mcap_usd)."""
     try:
@@ -1466,8 +1477,32 @@ async def do_trade_flow(msg, uid: int, context, action: str,
 
     mode = get_mode(uid)
     pair = fetch_sol_pair(token_query)
+    bc_fallback = None
+
+    # Not on DexScreener yet — try pump.fun bonding curve + API
+    if not pair and len(token_query) >= 32:
+        _bc = pumpfun.fetch_bonding_curve_data(token_query, SOLANA_RPC)
+        if _bc:
+            bc_fallback = _bc
+            coin  = _fetch_pumpfun_coin(token_query) or {}
+            _vtr  = _bc.get("virtual_token_reserves", 0)
+            _vsr  = _bc.get("virtual_sol_reserves", 0)
+            _psol = (_vsr / _vtr / 1e9) if _vtr else 0
+            pair  = {
+                "dexId": "pumpfun",
+                "baseToken": {
+                    "address":  token_query,
+                    "symbol":   coin.get("symbol", token_query[:8]),
+                    "name":     coin.get("name",   ""),
+                    "decimals": 6,
+                },
+                "priceNative": str(_psol),
+                "priceUsd":    "0",
+                "marketCap":   coin.get("usd_market_cap") or coin.get("market_cap") or 0,
+            }
+
     if not pair:
-        await msg.edit_text("Token not found on Solana.", reply_markup=back_kb())
+        await msg.edit_text("Token not found on Solana or pump.fun.", reply_markup=back_kb())
         return
 
     token_mint  = pair["baseToken"]["address"]
@@ -1479,9 +1514,20 @@ async def do_trade_flow(msg, uid: int, context, action: str,
 
     if action == "buy":
         lamports = int(amount * 1_000_000_000)
-        quote    = jupiter_quote(SOL_MINT, token_mint, lamports)
+        if bc_fallback:
+            out_tokens = pumpfun.calculate_buy_tokens(lamports, bc_fallback)
+            quote = {"outAmount": out_tokens, "priceImpactPct": "N/A"}
+        else:
+            quote = jupiter_quote(SOL_MINT, token_mint, lamports)
     else:
-        quote = jupiter_quote(token_mint, SOL_MINT, int(amount))
+        if bc_fallback:
+            _vtr = bc_fallback.get("virtual_token_reserves", 0)
+            _vsr = bc_fallback.get("virtual_sol_reserves", 0)
+            _raw = int(amount)
+            _sol_out = int((_vsr - int(_vtr * _vsr / (_vtr + _raw))) * 0.99) if _vtr else 0
+            quote = {"outAmount": _sol_out, "priceImpactPct": "N/A"}
+        else:
+            quote = jupiter_quote(token_mint, SOL_MINT, int(amount))
 
     if not quote or "error" in quote:
         await msg.edit_text(f"Quote failed: {quote}", reply_markup=back_kb())
