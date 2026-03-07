@@ -16,7 +16,7 @@ import traceback
 import requests
 import websockets
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
-from scanner import calculate_heat_score, fetch_rugcheck, priority_label
+from scanner import calculate_heat_score_with_settings, fetch_rugcheck, priority_label
 import wallet_tracker
 
 DATA_DIR   = os.path.join(os.path.dirname(__file__), "data")
@@ -28,7 +28,7 @@ PUMPFUN_API    = "https://frontend-api-v3.pump.fun"
 DEDUP_TTL      = 86400
 GRAD_SOL       = 85.0
 VIRT_OFFSET    = 30.0
-GRADWATCH_SECS = 30          # poll every 30s for faster detection
+GRADWATCH_SECS = 15          # poll every 15s for faster detection
 GRAD_MAX_AGE_H = 4           # only fetch tokens graduated within last 4 hours
 
 # Injected by bot.py at startup to avoid circular import
@@ -634,7 +634,7 @@ async def _handle_token_inner(bot: Bot, token: dict, mint: str):
         except Exception:
             pass
 
-    heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="pumpfun"), rc)
+    heat = calculate_heat_score_with_settings(_build_scanner_token(token, meta, sol_usd, dex="pumpfun"), rc)
     print(f"[NEW TOKEN] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_notification(token, meta, sol_usd, heat)
     kb   = notification_kb(mint)
@@ -1039,26 +1039,46 @@ async def _handle_grad_token_inner(bot: Bot, token: dict, mint: str):
         buy_usd = sol_amount * sol_usd
         wallet_tracker.record_wallet_activity(creator, mint, buy_usd, time.time())
 
-    # If WS event is missing name/symbol, fill from DexScreener (15s wait for indexing)
+    # If WS event is missing name/symbol, try pump.fun API first (fast), then DexScreener
     if not token.get("name") or not token.get("symbol"):
-        await asyncio.sleep(15)
+        token = dict(token)
+        # Try pump.fun API first — usually instant
         try:
-            r = requests.get(
-                f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=8
-            )
-            pairs = r.json().get("pairs") or []
-            if pairs:
-                base = pairs[0].get("baseToken", {})
-                token = dict(token)
-                token.setdefault("name",   base.get("name", "Unknown"))
-                token.setdefault("symbol", base.get("symbol", "???"))
-                # Fill MCap / price from DexScreener
+            pf_r = requests.get(f"https://frontend-api-v3.pump.fun/coins/{mint}", timeout=5)
+            if pf_r.status_code == 200:
+                pf_data = pf_r.json()
+                token.setdefault("name",   pf_data.get("name", "Unknown"))
+                token.setdefault("symbol", pf_data.get("symbol", "???"))
                 if not token.get("marketCapSol"):
-                    mcap_usd = float(pairs[0].get("marketCap") or pairs[0].get("fdv") or 0)
+                    mcap_usd = float(pf_data.get("usd_market_cap") or pf_data.get("market_cap") or 0)
                     if mcap_usd and sol_usd:
                         token["marketCapSol"] = mcap_usd / sol_usd
+                meta = {
+                    "description": (pf_data.get("description") or "").strip(),
+                    "twitter":     pf_data.get("twitter")  or meta.get("twitter", ""),
+                    "telegram":    pf_data.get("telegram") or meta.get("telegram", ""),
+                    "website":     pf_data.get("website")  or meta.get("website", ""),
+                }
         except Exception:
             pass
+        # Fallback: DexScreener with short wait
+        if not token.get("name") or not token.get("symbol"):
+            await asyncio.sleep(3)
+            try:
+                r = requests.get(
+                    f"https://api.dexscreener.com/latest/dex/tokens/{mint}", timeout=8
+                )
+                pairs = r.json().get("pairs") or []
+                if pairs:
+                    base = pairs[0].get("baseToken", {})
+                    token.setdefault("name",   base.get("name", "Unknown"))
+                    token.setdefault("symbol", base.get("symbol", "???"))
+                    if not token.get("marketCapSol"):
+                        mcap_usd = float(pairs[0].get("marketCap") or pairs[0].get("fdv") or 0)
+                        if mcap_usd and sol_usd:
+                            token["marketCapSol"] = mcap_usd / sol_usd
+            except Exception:
+                pass
 
     # Record wallet activity if creator is a tracked wallet
     creator = (token.get("traderPublicKey") or "").strip()
@@ -1073,7 +1093,7 @@ async def _handle_grad_token_inner(bot: Bot, token: dict, mint: str):
         except Exception:
             pass
 
-    heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    heat = calculate_heat_score_with_settings(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
     print(f"[GRAD WS] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
@@ -1239,7 +1259,7 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
         except Exception:
             pass
 
-    heat = calculate_heat_score(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    heat = calculate_heat_score_with_settings(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
     print(f"[GRAD REST] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
