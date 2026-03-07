@@ -14,6 +14,8 @@ import wallet_fingerprint
 import wallet_cluster
 import launch_predictor
 import intelligence_tracker
+import birdeye
+import config as _cfg
 
 def _esc(s: str) -> str:
     """Escape Telegram Markdown v1 special chars in user-supplied strings."""
@@ -561,6 +563,38 @@ def score_bundle_risk(token_mint: str, rc: dict) -> tuple[int, str]:
         return 0, "Bundle check unavailable"
 
 
+def score_buy_sell_pressure(token_mint: str) -> tuple[int, str]:
+    """0-10 pts — buy/sell directional pressure from recent trades (Birdeye).
+    
+    Scores:
+    - 10pts: 70%+ buys (strong momentum)
+    - 5pts: 60-70% buys (moderate momentum)
+    - 0pts: 40-60% buys (neutral)
+    - silent: <40% buys (sell pressure — no penalty, just no points)
+    """
+    api_key = getattr(_cfg, "BIRDEYE_API_KEY", "")
+    if not api_key:
+        return 0, "Birdeye API not configured"
+    
+    try:
+        pressure = birdeye.get_buy_sell_pressure(token_mint, api_key)
+        if pressure.get("error"):
+            return 0, f"Birdeye unavailable ({pressure['error']})"
+        
+        score = pressure.get("pressure_score", 0)
+        direction = pressure.get("direction", "NEUTRAL")
+        buy_ratio = pressure.get("buy_ratio", 0)
+        
+        reason = (
+            f"{direction} pressure ({buy_ratio*100:.0f}% buys, "
+            f"{pressure['buy_count']}B/{pressure['sell_count']}S)"
+        )
+        
+        return score, reason
+    except Exception as e:
+        return 0, f"Pressure score error: {str(e)[:40]}"
+
+
 def calculate_heat_score(token: dict, rc: dict) -> dict:
     """
     Run the extended scoring model but return a normalized 0-100 heat score.
@@ -572,6 +606,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     mid_mint = token.get("mint", "")
     wal_pts,  wal_reason  = score_watched_wallet_entry(mid_mint)
     clus_pts, clus_reason = score_cluster_boost(mid_mint)
+    pres_pts, pres_reason = score_buy_sell_pressure(mid_mint)  # ← NEW: Birdeye pressure
 
     wall_pts, wall_reason = score_wallets(rc)
     twit_pts, twit_reason = score_twitter(token)
@@ -588,6 +623,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         "liquidity":  (liq_pts,  liq_reason),
         "wallet_rep": (wal_pts,  wal_reason),
         "cluster":    (clus_pts, clus_reason),
+        "pressure":   (pres_pts, pres_reason),  # ← NEW: Birdeye buy/sell
         "wallets":    (wall_pts, wall_reason),
         "twitter":    (twit_pts, twit_reason),
         "narrative":  (narr_pts, narr_reason),
@@ -631,7 +667,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         intel_narrative_boost = 0.0
 
     # Convert the richer internal score into the documented 0-100 scale.
-    base_total = mom_pts + liq_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
+    base_total = mom_pts + liq_pts + pres_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
     raw_total = max(0.0, float(base_total + clus_pts + bund_pts + pred_pts + intel_wallet_boost + intel_narrative_boost))
     total = max(0, min(100, int(round((raw_total / 120.0) * 100))))
 
@@ -669,6 +705,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
             "liquidity":  (liq_pts,  liq_reason),
             "wallet_rep": (wal_pts,  wal_reason),
             "cluster":    (clus_pts, clus_reason),
+            "pressure":   (pres_pts, pres_reason),  # ← NEW: Birdeye
             "wallets":    (wall_pts, wall_reason),
             "twitter":    (twit_pts, twit_reason),
             "narrative":  (narr_pts, narr_reason),
