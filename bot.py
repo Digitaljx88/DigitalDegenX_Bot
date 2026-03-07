@@ -8033,6 +8033,8 @@ async def post_init(app):
         BotCommand("buy",        "Buy a token (paper or live)"),
         BotCommand("sell",       "Sell a token from your portfolio"),
         BotCommand("portfolio",  "View your holdings & balances"),
+        BotCommand("trades",     "View trade history (filter: win/loss/symbol/date)"),
+        BotCommand("research_log", "Download research log CSV for data analysis"),
         BotCommand("autosell",   "Configure auto-sell targets per token"),
         BotCommand("stoploss",   "Global stop-loss settings (safety net)"),
         BotCommand("mode",       "Switch between paper and live trading"),
