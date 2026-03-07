@@ -15,6 +15,18 @@ import wallet_cluster
 import launch_predictor
 import intelligence_tracker
 
+def _esc(s: str) -> str:
+    """Escape Telegram Markdown v1 special chars in user-supplied strings."""
+    return (
+        str(s)
+        .replace("\\", "\\\\")
+        .replace("_",  "\\_")
+        .replace("*",  "\\*")
+        .replace("`",  "\\`")
+        .replace("[",  "\\[")
+    )
+
+
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 SCANNER_STATE_FILE = os.path.join(DATA_DIR, "scanner_state.json")
 DAILY_LOG_FILE     = os.path.join(DATA_DIR, "scanner_log.json")
@@ -720,11 +732,13 @@ def format_alert(r: dict) -> str:
     # Build signal lines dynamically from breakdown
     signal_lines = "\n".join(line(cat) for cat in bd.keys())
 
+    name_e   = _esc(r['name'])
+    symbol_e = _esc(r['symbol'])
     return (
         f"{label}\n"
         f"🚨 *HOT TOKEN ALERT* 🚨\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🪙 *{r['name']}* (${r['symbol']})\n"
+        f"🪙 *{name_e}* (${symbol_e})\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🌡️ Heat Score: *{r['total']}/100*\n"
         f"{arch_line}"
@@ -754,7 +768,7 @@ def format_heat_score_card(r: dict) -> str:
 
     lines = [
         f"🌡️ *Heat Score: {r['total']}/100* — {label}\n",
-        f"*{r['name']}* (${r['symbol']})",
+        f"*{_esc(r['name'])}* (${_esc(r['symbol'])})",
         f"💵 Price: `{price_str}`",
         f"🏦 MCap: `${r['mcap']:,.0f}` | 📊 Vol 1h: `${r['volume_h1']:,.0f}`",
         f"👛 Holders: `{r['total_holders']}` | ⏰ Age: `{age_str(r['pair_created'])}`",
@@ -876,7 +890,13 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                         disable_web_page_preview=True
                     )
                 except Exception:
-                    pass
+                    try:
+                        await bot.send_message(
+                            chat_id=uid, text=msg,
+                            reply_markup=kb, disable_web_page_preview=True
+                        )
+                    except Exception as e:
+                        print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
 
             # Post to alert channel (URL buttons only — callback buttons don't work in channels)
             if alert_channel:
@@ -892,7 +912,13 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                         disable_web_page_preview=True
                     )
                 except Exception:
-                    pass
+                    try:
+                        await bot.send_message(
+                            chat_id=alert_channel, text=msg,
+                            reply_markup=channel_kb, disable_web_page_preview=True
+                        )
+                    except Exception as e:
+                        print(f"[SCANNER] channel send error ch={alert_channel}: {e}", flush=True)
 
             # Trigger auto-buy callback
             if on_alert:

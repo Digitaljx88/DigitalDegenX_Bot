@@ -587,7 +587,14 @@ async def _handle_token(bot: Bot, token: dict):
     mint = token.get("mint", "")
     if not mint:
         return
+    try:
+        await _handle_token_inner(bot, token, mint)
+    except Exception as e:
+        print(f"[PUMPLIVE] handler crashed mint={mint}: {e}", flush=True)
+        import traceback; traceback.print_exc()
 
+
+async def _handle_token_inner(bot: Bot, token: dict, mint: str):
     # Atomic dedup check + mark seen
     with _state_lock:
         s = _state_cache or load_state()
@@ -663,8 +670,14 @@ async def _handle_token(bot: Bot, token: dict):
                 parse_mode="Markdown", reply_markup=channel_kb,
                 disable_web_page_preview=True,
             )
-        except Exception as e:
-            print(f"[PUMPLIVE] channel send error ch={channel}: {e}", flush=True)
+        except Exception:
+            try:
+                await bot.send_message(
+                    chat_id=channel, text=text,
+                    reply_markup=channel_kb, disable_web_page_preview=True,
+                )
+            except Exception as e:
+                print(f"[PUMPLIVE] channel send error ch={channel}: {e}", flush=True)
 
 
 # ─── Graduation (100% bonding curve) subscriber state ─────────────────────────
@@ -984,6 +997,14 @@ async def _handle_grad_token(bot: Bot, token: dict):
     mint = token.get("mint", "")
     if not mint:
         return
+    try:
+        await _handle_grad_token_inner(bot, token, mint)
+    except Exception as e:
+        print(f"[PUMPGRAD] handler crashed mint={mint}: {e}", flush=True)
+        import traceback; traceback.print_exc()
+
+
+async def _handle_grad_token_inner(bot: Bot, token: dict, mint: str):
 
     # Atomic dedup check + mark seen
     with _state_lock:
@@ -1101,8 +1122,14 @@ async def _handle_grad_token(bot: Bot, token: dict):
                 parse_mode="Markdown", reply_markup=channel_kb,
                 disable_web_page_preview=True,
             )
-        except Exception as e:
-            print(f"[PUMPGRAD WS] channel send error ch={grad_channel}: {e}", flush=True)
+        except Exception:
+            try:
+                await bot.send_message(
+                    chat_id=grad_channel, text=text,
+                    reply_markup=channel_kb, disable_web_page_preview=True,
+                )
+            except Exception as e:
+                print(f"[PUMPGRAD WS] channel send error ch={grad_channel}: {e}", flush=True)
 
 
 # ─── Graduation polling (pump.fun API) ────────────────────────────────────────
