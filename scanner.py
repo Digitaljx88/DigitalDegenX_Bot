@@ -43,7 +43,7 @@ DEXSCREENER_TOKEN    = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_REPORT      = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
 ALERT_COOLDOWN_SECS  = 3600   # one alert per token per hour max
-MCAP_MIN             = 10_000
+MCAP_MIN             = 1_000
 MCAP_MAX             = 10_000_000
 
 # ── Narrative keywords ────────────────────────────────────────────────────────
@@ -994,6 +994,9 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         return
 
     tokens = fetch_new_tokens()
+    print(f"[SCANNER] Fetched {len(tokens)} tokens after filters", flush=True)
+    if not tokens:
+        print(f"[SCANNER] No tokens passed fetch filters (mcap {MCAP_MIN}-{MCAP_MAX}, age <{MAX_TOKEN_AGE_HOURS}h)", flush=True)
 
     for token in tokens:
         mint = token.get("mint", "")
