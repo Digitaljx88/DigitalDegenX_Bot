@@ -2729,7 +2729,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     
     # Show formatted settings
-    settings_text = settings_manager.format_settings_display(user_id, compact=False)
+    settings_text = sm.format_settings_display(user_id, compact=False)
     
     # Create keyboard with preset buttons + customize option
     keyboard = [
@@ -2753,7 +2753,7 @@ async def cmd_presets(update: Update, context: ContextTypes.DEFAULT_TYPE):
     /presets — Show and apply preset configurations.
     """
     user_id = update.effective_user.id
-    presets = settings_manager.list_presets()
+    presets = sm.list_presets()
     
     lines = ["*🎯 Scout Presets*\n", "Quick-swap configurations for different trading styles:\n"]
     
@@ -2818,7 +2818,7 @@ async def cmd_customize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     
     # Validate and save
-    if not settings_manager.validate_setting(setting_key, value):
+    if not sm.validate_setting(setting_key, value):
         await update.message.reply_text(
             f"❌ Invalid setting '{setting_key}' or value out of range.\n"
             f"Use `/settings` to see available settings.",
@@ -2826,9 +2826,9 @@ async def cmd_customize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
     
-    if settings_manager.save_user_settings(user_id, {setting_key: value}):
-        current_val = settings_manager.get_user_settings(user_id)[setting_key]
-        desc = settings_manager.get_setting_description(setting_key)
+    if sm.save_user_settings(user_id, {setting_key: value}):
+        current_val = sm.get_user_settings(user_id)[setting_key]
+        desc = sm.get_setting_description(setting_key)
         
         await update.message.reply_text(
             f"✅ *Setting Updated*\n\n"
@@ -2888,7 +2888,7 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Get current settings
     try:
-        user_cfg = settings_manager.get_user_settings(user_id)
+        user_cfg = sm.get_user_settings(user_id)
         current_preset = "Custom"
         for preset_name, preset_cfg in _cfg.SCOUT_PRESETS.items():
             if all(user_cfg.get(k) == v for k, v in preset_cfg.get("overrides", {}).items()):
@@ -4768,7 +4768,7 @@ async def heatscore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
     if action == "presets":
         # Show presets menu
-        presets = settings_manager.list_presets()
+        presets = sm.list_presets()
         lines = ["*🎯 Scout Presets*\n", "Quick-swap configurations:\n"]
         
         for preset_key, preset_info in presets.items():
@@ -4792,8 +4792,8 @@ async def heatscore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == "preset" and len(parts) > 2:
         # Apply preset
         preset_name = parts[2]
-        if settings_manager.apply_preset(uid, preset_name):
-            preset_info = settings_manager.get_preset_info(preset_name)
+        if sm.apply_preset(uid, preset_name):
+            preset_info = sm.get_preset_info(preset_name)
             await query.edit_message_text(
                 f"✅ *Preset Applied: {preset_info['name']}*\n\n"
                 f"{preset_info['description']}\n\n"
@@ -4814,7 +4814,7 @@ async def heatscore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     elif action == "show" or action == "customize":
         # Show settings display
         compact = action == "show_custom"
-        settings_text = settings_manager.format_settings_display(uid, compact=compact)
+        settings_text = sm.format_settings_display(uid, compact=compact)
         
         keyboard = [
             [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
@@ -4832,7 +4832,7 @@ async def heatscore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     elif action == "show_custom":
         # Show only non-default settings
-        settings_text = settings_manager.format_settings_display(uid, compact=True)
+        settings_text = sm.format_settings_display(uid, compact=True)
         if "no differences" in settings_text.lower() or not settings_text.strip():
             settings_text = "*📋 All Settings at Default*\n\nNo custom overrides detected."
         
@@ -4865,7 +4865,7 @@ async def heatscore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     
     elif action == "reset_execute":
         # Execute reset
-        if settings_manager.reset_user_settings(uid):
+        if sm.reset_user_settings(uid):
             await query.edit_message_text(
                 "✅ *Settings Reset*\n\nAll custom overrides have been removed.",
                 parse_mode="Markdown",
