@@ -16,6 +16,8 @@ import launch_predictor
 import intelligence_tracker
 import birdeye
 import geckoterminal
+import heat_score_v2
+import settings_manager
 import config as _cfg
 
 def _esc(s: str) -> str:
@@ -755,6 +757,76 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         },
         "archetype":     pred_arch,
         "archetype_conf": pred_conf,
+    }
+
+
+def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = None) -> dict:
+    """
+    Calculate heat score using v2 engine with user settings.
+    Falls back to v1 if user_id not provided.
+    
+    Args:
+        token: Token data dict
+        rc: RugCheck result dict
+        user_id: Telegram user ID (optional, uses defaults if not provided)
+    
+    Returns:
+        dict compatible with old format for backward compatibility
+    """
+    # Get user settings
+    if user_id:
+        user_cfg = settings_manager.get_user_settings(user_id)
+    else:
+        user_cfg = _cfg.HEAT_SCORE_V2_DEFAULTS.copy()
+    
+    # Calculate v2 score
+    result_v2 = heat_score_v2.calculate_heat_score_v2(token, rc, user_cfg)
+    
+    # Determine alert tier based on user's thresholds
+    score = result_v2["score"]
+    
+    if score >= user_cfg.get("alert_ultra_hot_threshold", 90):
+        priority = "🔴 ULTRA_HOT"
+    elif score >= user_cfg.get("alert_hot_threshold", 80):
+        priority = "🟠 HOT"
+    elif score >= user_cfg.get("alert_warm_threshold", 70):
+        priority = "🟡 WARM"
+    else:
+        priority = "⚪ SCOUTED"
+    
+    # Build breakdown dict in old format for backward compatibility
+    factors = result_v2["factors"]
+    breakdown = {
+        "momentum": (factors["momentum"]["pts"], factors["momentum"]["reason"]),
+        "liquidity": (factors["liquidity"]["pts"], factors["liquidity"]["reason"]),
+        "risk_safety": (factors["risk_safety"]["pts"], factors["risk_safety"]["reason"]),
+        "social_narrative": (factors["social_narrative"]["pts"], factors["social_narrative"]["reason"]),
+        "wallets": (factors["wallets"]["pts"], factors["wallets"]["reason"]),
+        "migration": (factors["migration"]["pts"], factors["migration"]["reason"]),
+        "directional_bias": (factors["directional_bias"]["pts"], factors["directional_bias"]["reason"]),
+        "volume_trend": (factors["volume_trend"]["pts"], factors["volume_trend"]["reason"]),
+    }
+    
+    # Return in old format for compatibility
+    return {
+        "mint": token.get("mint", ""),
+        "name": token.get("name", ""),
+        "symbol": token.get("symbol", ""),
+        "mcap": token.get("mcap", 0),
+        "price_usd": token.get("price_usd", 0),
+        "volume_h1": token.get("volume_h1", 0),
+        "total_holders": rc.get("totalHolders", 0),
+        "pair_created": token.get("pair_created", 0),
+        "dex": token.get("dex", ""),
+        "raw_total": result_v2["raw_score"],
+        "total": score,
+        "disqualified": result_v2["disqualified"],
+        "risk": result_v2["risk_level"],
+        "red_flags": [],  # Could extract from risk details
+        "breakdown": breakdown,
+        "archetype": "SCOUT_V2",
+        "archetype_conf": 100,
+        "v2_result": result_v2,  # Store full v2 result for detailed display
     }
 
 

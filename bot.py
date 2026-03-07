@@ -23,6 +23,7 @@ import intelligence_tracker as intel
 import wallet_manager as wm
 import research_logger
 import portfolio_alerts
+import settings_manager
 
 import config as _cfg
 from config import (
@@ -2712,6 +2713,134 @@ async def cmd_topalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ─── Heat Score v2 Settings Commands ──────────────────────────────────────────
+
+async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /settings — Show all current heat score settings.
+    Allows inline adjustment via buttons.
+    """
+    user_id = update.effective_user.id
+    
+    # Show formatted settings
+    settings_text = settings_manager.format_settings_display(user_id, compact=False)
+    
+    # Create keyboard with preset buttons + customize option
+    keyboard = [
+        [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
+        [InlineKeyboardButton("⚙️ Customize", callback_data="heatscore:customize")],
+        [InlineKeyboardButton("🔄 Reset to Defaults", callback_data="heatscore:reset")],
+        [InlineKeyboardButton("📊 Show Non-Defaults Only", callback_data="heatscore:show_custom")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+    ]
+    
+    await update.message.reply_text(
+        settings_text,
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True
+    )
+
+
+async def cmd_presets(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /presets — Show and apply preset configurations.
+    """
+    user_id = update.effective_user.id
+    presets = settings_manager.list_presets()
+    
+    lines = ["*🎯 Scout Presets*\n", "Quick-swap configurations for different trading styles:\n"]
+    
+    for preset_key, preset_info in presets.items():
+        lines.append(f"*{preset_info['display_name']}*")
+        lines.append(f"{preset_info['description']}")
+        lines.append(f"_Changes: {preset_info['setting_count']} settings_\n")
+    
+    # Create button for each preset
+    keyboard = [
+        [InlineKeyboardButton("🛡️ Conservative", callback_data="heatscore:preset:conservative"),
+         InlineKeyboardButton("⚖️ Balanced", callback_data="heatscore:preset:balanced")],
+        [InlineKeyboardButton("🚀 Aggressive", callback_data="heatscore:preset:aggressive"),
+         InlineKeyboardButton("🐋 Whale Mode", callback_data="heatscore:preset:whale-mode")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+    ]
+    
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        disable_web_page_preview=True
+    )
+
+
+async def cmd_customize(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /customize [factor] [value] — Adjust a specific setting (1-100).
+    Without args, shows customization menu.
+    """
+    user_id = update.effective_user.id
+    
+    if not context.args or len(context.args) < 2:
+        # Show customize menu
+        lines = [
+            "*⚙️ Customize Heat Score Settings*\n",
+            "Adjust any setting from 1-100. Examples:\n",
+            "`/customize alert_hot_threshold 75`",
+            "`/customize risk_dev_sell_threshold_pct 60`",
+            "`/customize momentum_min_vol 10000`\n",
+            "Use `/settings` to see all available settings and their descriptions.",
+        ]
+        
+        await update.message.reply_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 View All Settings", callback_data="heatscore:customize"),
+                InlineKeyboardButton("⬅️ Back", callback_data="menu:main"),
+            ]]),
+        )
+        return
+    
+    setting_key = context.args[0].lower()
+    try:
+        value = float(context.args[1]) if "." in context.args[1] or setting_key.endswith("_usd") else int(context.args[1])
+    except (ValueError, IndexError):
+        await update.message.reply_text(
+            f"❌ Invalid value. Usage: `/customize {setting_key} <1-100>`",
+            parse_mode="Markdown"
+        )
+        return
+    
+    # Validate and save
+    if not settings_manager.validate_setting(setting_key, value):
+        await update.message.reply_text(
+            f"❌ Invalid setting '{setting_key}' or value out of range.\n"
+            f"Use `/settings` to see available settings.",
+            parse_mode="Markdown"
+        )
+        return
+    
+    if settings_manager.save_user_settings(user_id, {setting_key: value}):
+        current_val = settings_manager.get_user_settings(user_id)[setting_key]
+        desc = settings_manager.get_setting_description(setting_key)
+        
+        await update.message.reply_text(
+            f"✅ *Setting Updated*\n\n"
+            f"{desc}\n"
+            f"New value: `{current_val}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📋 View Settings", callback_data="heatscore:show"),
+                InlineKeyboardButton("⬅️ Back", callback_data="menu:main"),
+            ]]),
+        )
+    else:
+        await update.message.reply_text(
+            "❌ Failed to save setting. Try again.",
+            parse_mode="Markdown"
+        )
+
+
 # ─── Wallet commands ──────────────────────────────────────────────────────────
 
 async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4521,6 +4650,152 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_portfolio(uid)
         await query.edit_message_text("🗑️ Paper portfolio reset to `10 SOL`.",
                                        parse_mode="Markdown", reply_markup=back_kb())
+
+
+async def heatscore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle heat score settings callbacks."""
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    await query.answer()
+
+    if action == "presets":
+        # Show presets menu
+        presets = settings_manager.list_presets()
+        lines = ["*🎯 Scout Presets*\n", "Quick-swap configurations:\n"]
+        
+        for preset_key, preset_info in presets.items():
+            lines.append(f"*{preset_info['display_name']}*")
+            lines.append(f"{preset_info['description']}\n")
+        
+        keyboard = [
+            [InlineKeyboardButton("🛡️ Conservative", callback_data="heatscore:preset:conservative"),
+             InlineKeyboardButton("⚖️ Balanced", callback_data="heatscore:preset:balanced")],
+            [InlineKeyboardButton("🚀 Aggressive", callback_data="heatscore:preset:aggressive"),
+             InlineKeyboardButton("🐋 Whale Mode", callback_data="heatscore:preset:whale-mode")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="heatscore:show")],
+        ]
+        
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif action == "preset" and len(parts) > 2:
+        # Apply preset
+        preset_name = parts[2]
+        if settings_manager.apply_preset(uid, preset_name):
+            preset_info = settings_manager.get_preset_info(preset_name)
+            await query.edit_message_text(
+                f"✅ *Preset Applied: {preset_info['name']}*\n\n"
+                f"{preset_info['description']}\n\n"
+                f"_Modified {len(preset_info.get('overrides', {}))} settings_",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 View Settings", callback_data="heatscore:show")],
+                    [InlineKeyboardButton("🎯 Other Presets", callback_data="heatscore:presets")],
+                    [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Failed to apply preset.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="heatscore:show")]])
+            )
+    
+    elif action == "show" or action == "customize":
+        # Show settings display
+        compact = action == "show_custom"
+        settings_text = settings_manager.format_settings_display(uid, compact=compact)
+        
+        keyboard = [
+            [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
+            [InlineKeyboardButton("✏️ Manual Customize", callback_data="heatscore:manual")],
+            [InlineKeyboardButton("🔄 Reset to Defaults", callback_data="heatscore:reset_confirm")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+        ]
+        
+        await query.edit_message_text(
+            settings_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    
+    elif action == "show_custom":
+        # Show only non-default settings
+        settings_text = settings_manager.format_settings_display(uid, compact=True)
+        if "no differences" in settings_text.lower() or not settings_text.strip():
+            settings_text = "*📋 All Settings at Default*\n\nNo custom overrides detected."
+        
+        keyboard = [
+            [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
+            [InlineKeyboardButton("📋 Show All", callback_data="heatscore:show")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+        ]
+        
+        await query.edit_message_text(
+            settings_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    
+    elif action == "reset_confirm":
+        # Confirm reset
+        keyboard = [
+            [InlineKeyboardButton("✅ Yes, Reset", callback_data="heatscore:reset_execute")],
+            [InlineKeyboardButton("❌ Cancel", callback_data="heatscore:show")],
+        ]
+        
+        await query.edit_message_text(
+            "⚠️ *Reset to Defaults?*\n\n"
+            "This will remove all your custom settings and restore system defaults.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+    
+    elif action == "reset_execute":
+        # Execute reset
+        if settings_manager.reset_user_settings(uid):
+            await query.edit_message_text(
+                "✅ *Settings Reset*\n\nAll custom overrides have been removed.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📋 View Settings", callback_data="heatscore:show")],
+                    [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+                ])
+            )
+        else:
+            await query.edit_message_text(
+                "❌ Failed to reset settings.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="heatscore:show")]])
+            )
+    
+    elif action == "manual":
+        # Show manual customize instructions
+        lines = [
+            "*⚙️ Manual Customize*\n",
+            "Use the command: `/customize [setting] [value]`\n",
+            "Examples:",
+            "`/customize alert_hot_threshold 75`",
+            "`/customize risk_dev_sell_threshold_pct 60`",
+            "`/customize liquidity_min_usd 50000`\n",
+            "_All values are 0-100 unless specified (USD values can be higher)._",
+        ]
+        
+        keyboard = [
+            [InlineKeyboardButton("📋 View Settings", callback_data="heatscore:show")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+        ]
+        
+        await query.edit_message_text(
+            "\n".join(lines),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
 
 
 async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -8765,6 +9040,9 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("watchlist",  cmd_watchlist))
     app.add_handler(CommandHandler("heatscore",  cmd_heatscore))
     app.add_handler(CommandHandler("topalerts",  cmd_topalerts))
+    app.add_handler(CommandHandler("settings",   cmd_settings))
+    app.add_handler(CommandHandler("presets",    cmd_presets))
+    app.add_handler(CommandHandler("customize",  cmd_customize))
     app.add_handler(CommandHandler("wallet",     cmd_wallet))
     app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
@@ -8793,6 +9071,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(trade_callback,               pattern=r"^trade:"))
     app.add_handler(CallbackQueryHandler(mode_callback,                pattern=r"^mode:"))
     app.add_handler(CallbackQueryHandler(settings_callback,            pattern=r"^settings:"))
+    app.add_handler(CallbackQueryHandler(heatscore_callback,           pattern=r"^heatscore:"))
     app.add_handler(CallbackQueryHandler(autosell_callback,            pattern=r"^as:"))
     app.add_handler(CallbackQueryHandler(as_preset_callback,           pattern=r"^as_preset:"))
     app.add_handler(CallbackQueryHandler(custom_target_type_callback,  pattern=r"^ct_type:"))
