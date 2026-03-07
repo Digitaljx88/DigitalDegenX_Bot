@@ -7915,6 +7915,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             await update.message.reply_text(f"❌ Error: {str(e)}")
 
+    elif state == "alert_channel_scout":
+        ch = text.strip()
+        if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
+            await update.message.reply_text(
+                "Enter channel ID (e.g. `-1001234567890`) or @username (e.g. `@mychannel`).",
+                parse_mode="Markdown"
+            )
+            return
+        sc.set_alert_channel(ch)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ <b>Scout Channel Set</b>\n\n"
+            f"Channel: <code>{ch}</code>\n\n"
+            f"Scanner alerts will be posted here.\n"
+            f"Make sure the bot is an admin.",
+            parse_mode="HTML",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Channel Settings", callback_data="channels:menu"),
+            ]])
+        )
+
     elif state == "pumplive_channel":
         ch = text.strip()
         if not (ch.startswith("@") or ch.lstrip("-").isdigit()):
@@ -8548,15 +8569,20 @@ async def cmd_channels(update: Update, context: ContextTypes.DEFAULT_TYPE):
     channels = get_alert_channels()
 
     launches_status = format_channel_id(channels.get("launches"))
+    scout_ch = sc.get_alert_channel()
+    scout_status = f"<code>{scout_ch}</code>" if scout_ch else "❌ Not configured"
 
     await update.message.reply_text(
         "⚙️ <b>Alert Channel Settings</b>\n\n"
         f"🚀 <b>Launch Channel</b> (early token launches)\n"
         f"   Status: {launches_status}\n\n"
+        f"🔍 <b>Scout Channel</b> (scanner alerts)\n"
+        f"   Status: {scout_status}\n\n"
         f"<i>Click below to configure channels</i>",
         parse_mode="HTML",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("🚀 Set Launch Channel", callback_data="channels:set:launches")],
+            [InlineKeyboardButton("🔍 Set Scout Channel", callback_data="channels:set:scout")],
             [InlineKeyboardButton("🧪 Test Channels", callback_data="channels:test")],
             [InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")],
         ])
@@ -8577,7 +8603,8 @@ async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         channel_names = {
             "main": "📊 Main Channel (portfolio alerts)",
-            "launches": "🚀 Launch Channel (new tokens)"
+            "launches": "🚀 Launch Channel (new tokens)",
+            "scout": "🔍 Scout Channel (scanner alerts)"
         }
         
         await query.edit_message_text(
@@ -8616,17 +8643,35 @@ async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except Exception as e:
             msg += f"❌ Launch channel error: {str(e)[:50]}\n"
 
+        try:
+            scout_ch = sc.get_alert_channel()
+            if scout_ch:
+                await context.bot.send_message(
+                    chat_id=scout_ch,
+                    text="✅ <b>Scout Channel Test</b>\n\nThis channel is configured correctly!",
+                    parse_mode="HTML"
+                )
+                msg += "✅ Scout channel working\n"
+            else:
+                msg += "⚠️ Scout channel not set\n"
+        except Exception as e:
+            msg += f"❌ Scout channel error: {str(e)[:50]}\n"
+
         channels_obj = get_alert_channels()
         launches_status = format_channel_id(channels_obj.get("launches"))
+        scout_ch_disp = sc.get_alert_channel()
+        scout_status = f"<code>{scout_ch_disp}</code>" if scout_ch_disp else "❌ Not set"
 
         msg += f"\n<b>Current Configuration:</b>\n"
-        msg += f"🚀 Launch: {launches_status}"
+        msg += f"🚀 Launch: {launches_status}\n"
+        msg += f"🔍 Scout: {scout_status}"
 
         await query.edit_message_text(
             msg,
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 Set Launch", callback_data="channels:set:launches")],
+                [InlineKeyboardButton("🔍 Set Scout", callback_data="channels:set:scout")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="channels:menu")],
             ])
         )
@@ -8634,15 +8679,20 @@ async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "menu":
         channels_obj = get_alert_channels()
         launches_status = format_channel_id(channels_obj.get("launches"))
+        scout_ch = sc.get_alert_channel()
+        scout_status = f"<code>{scout_ch}</code>" if scout_ch else "❌ Not configured"
 
         await query.edit_message_text(
             "⚙️ <b>Alert Channel Settings</b>\n\n"
             f"🚀 <b>Launch Channel</b> (early token launches)\n"
             f"   Status: {launches_status}\n\n"
+            f"🔍 <b>Scout Channel</b> (scanner alerts)\n"
+            f"   Status: {scout_status}\n\n"
             f"<i>Click below to configure channels</i>",
             parse_mode="HTML",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("🚀 Set Launch Channel", callback_data="channels:set:launches")],
+                [InlineKeyboardButton("🔍 Set Scout Channel", callback_data="channels:set:scout")],
                 [InlineKeyboardButton("🧪 Test Channels", callback_data="channels:test")],
                 [InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")],
             ])
