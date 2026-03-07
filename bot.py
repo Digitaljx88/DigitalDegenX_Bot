@@ -23,7 +23,7 @@ import intelligence_tracker as intel
 import wallet_manager as wm
 import research_logger
 import portfolio_alerts
-import settings_manager
+import settings_manager as sm
 
 import config as _cfg
 from config import (
