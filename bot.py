@@ -4690,7 +4690,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(toggle_lbl,      callback_data="scanner:toggle")],
-                [InlineKeyboardButton("🌡️ Min Score",  callback_data="scanner:set_threshold"),
+                [InlineKeyboardButton("🌡️ Thresholds",  callback_data="scanner:set_threshold"),
                  InlineKeyboardButton("� Channels",   callback_data="channels:menu")],
                 [InlineKeyboardButton("👀 Scouted",    callback_data="scanner:watchlist"),
                  InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts")],
