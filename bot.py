@@ -3702,6 +3702,20 @@ async def pumplive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         pf.set_filters(uid, f)
         await _refresh()
 
+    elif action == "set_heat":
+        current = pf.get_filters(uid).get("min_heat_score") or 0
+        set_state(uid, waiting_for="pf_heat")
+        await query.edit_message_text(
+            "🌡️ *Min Heat Score Filter*\n\n"
+            "Only receive pumplive alerts for tokens scoring at or above this threshold.\n\n"
+            "Enter a number from `0` to `100`. Send `0` to disable.\n\n"
+            f"_Current: {current}_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumplive:menu"),
+            ]]),
+        )
+
     elif action == "set_mcap":
         set_state(uid, waiting_for="pf_mcap")
         await query.edit_message_text(
@@ -6306,6 +6320,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"❌ Error: {str(e)}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
             )
+
+    elif state == "pf_heat":
+        clear_state(uid)
+        try:
+            v = max(0, min(100, int(float(text.strip()))))
+            f = pf.get_filters(uid)
+            f["min_heat_score"] = v
+            pf.set_filters(uid, f)
+            msg = f"✅ Min heat score set to `{v}/100`" if v > 0 else "✅ Heat score filter disabled."
+            await update.message.reply_text(
+                msg, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Enter a number 0-100, e.g. `40`.")
 
     elif state == "pf_mcap":
         clear_state(uid)

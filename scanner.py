@@ -901,6 +901,14 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 except Exception:
                     pass
 
+        # Trigger auto-buy independently for tokens that didn't fire a user alert
+        # (autobuy has its own min_score threshold checked in execute_auto_buy)
+        elif on_alert and not result.get("disqualified"):
+            try:
+                await on_alert(bot, result)
+            except Exception:
+                pass
+
 
 
 async def score_single_token(mint_or_symbol: str) -> dict | None:

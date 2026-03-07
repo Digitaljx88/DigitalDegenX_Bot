@@ -66,6 +66,7 @@ DEFAULT_FILTERS = {
     "min_dev_sol":         0.0,   # dev initial buy in SOL
     "max_dev_sol":         0.0,
     "max_token_age_mins":  0.0,   # only alert within X mins of creation (0 = any)
+    "min_heat_score":      0,     # minimum heat score (0 = any)
     "require_social":      False,
     "require_description": False,
     "keywords":            [],    # include — must match ≥1
@@ -399,12 +400,15 @@ def filter_status_text(uid: int) -> str:
     channel  = get_pumplive_channel()
     ch_str   = f"`{channel}`" if channel else "not set"
 
+    heat_str = f"≥{filters.get('min_heat_score', 0)}" if filters.get("min_heat_score") else "any"
+
     lines = [
         "📡 *PUMP LIVE — FILTER SETTINGS*",
         "",
         f"Status: {status}",
         f"📣 Channel: {ch_str}",
         "━━━━━━━━━━━━━━━━━━━",
+        f"🌡️ Min Heat Score: `{heat_str}`",
         f"💰 MCap: `{mcap_str}`",
         f"📈 SOL Vol: `{vol_str}`",
         f"🛒 Dev Buy: `{dev_str}`",
@@ -439,10 +443,16 @@ def filter_kb(uid: int) -> InlineKeyboardMarkup:
     dsc_lbl = "📝 Desc: ✅"   if filters["require_description"] else "📝 Desc: ANY"
     on_lbl  = "🔴 Turn OFF"   if active                         else "🟢 Turn ON"
 
+    hs = filters.get("min_heat_score") or 0
+    hs_lbl = f"🌡️ Heat: ≥{hs}" if hs else "🌡️ Heat: ANY"
+
     return InlineKeyboardMarkup([
         [
             InlineKeyboardButton(on_lbl,        callback_data="pumplive:toggle"),
             InlineKeyboardButton("🔄 Reset",     callback_data="pumplive:reset"),
+        ],
+        [
+            InlineKeyboardButton(hs_lbl,         callback_data="pumplive:set_heat"),
         ],
         [
             InlineKeyboardButton("💰 MCap",      callback_data="pumplive:set_mcap"),
@@ -614,6 +624,9 @@ async def _handle_token(bot: Bot, token: dict):
 
     for uid in active_subs:
         filters = {**DEFAULT_FILTERS, **subscribers[str(uid)].get("filters", {})}
+        min_hs = filters.get("min_heat_score") or 0
+        if min_hs > 0 and (not heat or heat.get("total", 0) < min_hs):
+            continue
         if not passes_filter(token, meta, filters):
             continue
         try:
