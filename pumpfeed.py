@@ -1153,7 +1153,14 @@ def _fetch_pumpfun_graduated() -> list[dict]:
             timeout=10,
         )
         r.raise_for_status()
-        coins = r.json() if isinstance(r.json(), list) else []
+        raw = r.json()
+        # pump.fun API may return a plain list or {"coins": [...]} dict
+        if isinstance(raw, list):
+            coins = raw
+        elif isinstance(raw, dict):
+            coins = raw.get("coins") or raw.get("data") or raw.get("results") or []
+        else:
+            coins = []
         for c in coins:
             if not c.get("complete"):
                 continue

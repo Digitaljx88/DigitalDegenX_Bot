@@ -758,6 +758,41 @@ def format_alert(r: dict) -> str:
     )
 
 
+def format_scouted_alert(r: dict) -> str:
+    """Lighter notification for tokens entering the scouted watchlist (50–69)."""
+    mint      = r["mint"]
+    price_usd = r.get("price_usd", 0)
+    price_str = f"${price_usd:.8f}" if price_usd and price_usd < 0.01 else (f"${price_usd:.4f}" if price_usd else "N/A")
+    name_e    = _esc(r["name"])
+    symbol_e  = _esc(r["symbol"])
+    bd        = r.get("breakdown", {})
+    flags_str = ", ".join(r.get("red_flags", [])) or "None"
+
+    best_signals = []
+    for cat, val in bd.items():
+        pts, reason = val if isinstance(val, (list, tuple)) else (val, "")
+        if pts > 0:
+            best_signals.append(f"  • {cat.replace('_', ' ').title()}: *{pts}pts* — {reason}")
+
+    signal_block = "\n".join(best_signals[:4]) if best_signals else "  • No strong signals yet"
+
+    return (
+        f"👀 *SCOUTED — ${symbol_e}*\n"
+        f"*{name_e}*\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"🌡️ Heat Score: *{r['total']}/100* — On Radar (50–69)\n"
+        f"💵 Price: `{price_str}`\n"
+        f"🏦 MCap: `${r['mcap']:,.0f}`\n"
+        f"⏰ Age: `{age_str(r['pair_created'])}`\n"
+        f"🏪 DEX: `{r.get('dex', 'N/A')}`\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"📈 *Top Signals:*\n{signal_block}\n"
+        f"━━━━━━━━━━━━━━━━━━━\n"
+        f"⚠️ Flags: {flags_str}\n"
+        f"📋 `{mint}`"
+    )
+
+
 def format_heat_score_card(r: dict) -> str:
     """Shorter card for manual /heatscore lookups."""
     bd        = r["breakdown"]
@@ -846,15 +881,71 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
 
         mark_seen_token(mint)
 
-        # Watchlist (50-69)
+        # Watchlist (50-69): add to watchlist AND send a scouted push notification
         if 50 <= score < 70:
             add_to_watchlist(mint, {
                 "name": result["name"], "symbol": result["symbol"],
                 "score": score, "mcap": mcap, "mint": mint,
                 "ts": time.time(),
             })
+            # Push a 👀 SCOUTED alert to every user who has Scout active
+            if (chat_ids or alert_channel) and cooldown_ok(mint):
+                mark_alerted(mint)
+                log = load_log()
+                for e in reversed(log):
+                    if e["mint"] == mint:
+                        e["alerted"] = True
+                        break
+                with open(DAILY_LOG_FILE, "w") as f:
+                    json.dump(log, f, indent=2)
 
-        # Alert threshold — check per-user min score, respect global cooldown
+                scout_msg = format_scouted_alert(result)[:4000]
+                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+                scout_kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
+                     InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
+                     InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
+                    [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+                     InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
+                     InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
+                ])
+                for uid in chat_ids:
+                    try:
+                        await bot.send_message(
+                            chat_id=uid, text=scout_msg,
+                            parse_mode="Markdown", reply_markup=scout_kb,
+                            disable_web_page_preview=True,
+                        )
+                    except Exception:
+                        try:
+                            await bot.send_message(
+                                chat_id=uid, text=scout_msg,
+                                reply_markup=scout_kb, disable_web_page_preview=True,
+                            )
+                        except Exception as e:
+                            print(f"[SCANNER] scouted DM error uid={uid}: {e}", flush=True)
+                if alert_channel:
+                    channel_scout_kb = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+                         InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
+                         InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
+                    ])
+                    try:
+                        await bot.send_message(
+                            chat_id=alert_channel, text=scout_msg,
+                            parse_mode="Markdown", reply_markup=channel_scout_kb,
+                            disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        print(f"[SCANNER] scouted channel error ch={alert_channel}: {e}", flush=True)
+                if on_alert:
+                    try:
+                        await on_alert(bot, result)
+                    except Exception:
+                        pass
+            continue  # scouted tokens handled; skip the 70+ hot-alert path
+
+        # Alert threshold (70+) — check per-user min score, respect global cooldown
         # Find which users this token qualifies for
         eligible_uids = [uid for uid in chat_ids if score >= get_user_min_score(uid)]
 
