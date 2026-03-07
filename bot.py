@@ -587,8 +587,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     mode      = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
     targets   = sc.load_state().get("scan_targets", [])
     scan_lbl  = "🔕 Pause Scout" if uid in targets else "🔔 Start Scout"
-    pf_lbl    = "🟢 Pump Live: ON" if pf.is_subscribed(uid) else "🔴 Pump Live: OFF"
-    pg_lbl    = "🟢 Pump Grad: ON" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad: OFF"
+    pf_lbl    = "🟢 Pump Live ⚙️" if pf.is_subscribed(uid) else "🔴 Pump Live ⚙️"
+    pg_lbl    = "🟢 Pump Grad ⚙️" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad ⚙️"
     ab_cfg    = get_auto_buy(uid)
     ab_lbl    = "🟢 Auto-Buy: ON" if ab_cfg.get("enabled") else "🔴 Auto-Buy: OFF"
     gsl       = get_global_sl()
@@ -3839,6 +3839,7 @@ async def pumplive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "channel_menu":
+        clear_state(uid)
         ch = pf.get_pumplive_channel()
         ch_str = f"`{ch}`" if ch else "not set"
         subscribed = pf.is_subscribed(uid)
@@ -4021,6 +4022,7 @@ async def pumpgrad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _refresh()
 
     elif action == "channel_menu":
+        clear_state(uid)
         ch = pf.get_pumpgrad_channel()
         ch_str = f"`{ch}`" if ch else "not set"
         subscribed = pf.is_grad_subscribed(uid)

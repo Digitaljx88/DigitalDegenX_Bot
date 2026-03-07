@@ -490,6 +490,16 @@ def _bar(pct: float, width: int = 10) -> str:
     return "█" * filled + "░" * (width - filled)
 
 
+def _esc(s: str) -> str:
+    """Escape Telegram Markdown v1 special chars from user-provided strings."""
+    return (str(s)
+        .replace("\\", "\\\\")
+        .replace("_",  "\\_")
+        .replace("*",  "\\*")
+        .replace("`",  "\\`")
+        .replace("[",  "\\["))
+
+
 def format_notification(token: dict, meta: dict, sol_usd: float, heat: dict | None = None) -> str:
     name     = token.get("name",   "Unknown")
     symbol   = token.get("symbol", "???")
@@ -517,9 +527,9 @@ def format_notification(token: dict, meta: dict, sol_usd: float, heat: dict | No
         f"`{creator[:5]}...{creator[-4:]}`" if len(creator) > 9 else f"`{creator}`"
     )
 
-    lines = [f"🆕 *NEW ON PUMP.FUN — ${symbol}*", f"*{name}*", ""]
+    lines = [f"🆕 *NEW ON PUMP.FUN — ${_esc(symbol)}*", f"*{_esc(name)}*", ""]
     if desc:
-        lines += [f"_{desc}_", ""]
+        lines += [f"_{_esc(desc)}_", ""]
 
     lines += [
         f"💰 MCap: `${mcap_usd:,.0f}` ({mcap_sol:.1f}◎)",
@@ -917,9 +927,9 @@ def format_grad_notification(token: dict, meta: dict, sol_usd: float, heat: dict
         f"`{creator[:5]}...{creator[-4:]}`" if len(creator) > 9 else f"`{creator}`"
     )
 
-    lines = [f"🎓 *GRADUATED TO RAYDIUM — ${symbol}*", f"*{name}*", ""]
+    lines = [f"🎓 *GRADUATED TO RAYDIUM — ${_esc(symbol)}*", f"*{_esc(name)}*", ""]
     if desc:
-        lines += [f"_{desc}_", ""]
+        lines += [f"_{_esc(desc)}_", ""]
 
     lines += [
         f"💰 MCap: `${mcap_usd:,.0f}` ({mcap_sol:.1f}◎)",
