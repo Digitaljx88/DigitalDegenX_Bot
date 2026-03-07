@@ -12,6 +12,7 @@ import json
 import os
 import re
 import subprocess
+import math
 import time
 import requests
 from collections import defaultdict
@@ -396,6 +397,7 @@ AUTO_BUY_DEFAULTS = {
     "min_score":       70,
     "max_mcap":        500_000,
     "daily_limit_sol": 1.0,
+    "max_positions":   0,    # 0 = unlimited; pauses when open positions >= this
     "spent_today":     0.0,
     "spent_date":      "",
     "bought":          [],   # mints purchased this session (reset each day)
@@ -1344,6 +1346,13 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             pass
         return
 
+    max_pos = cfg.get("max_positions", 0)
+    if max_pos > 0:
+        open_positions = len(load_auto_sell().get(str(uid), {}))
+        if open_positions >= max_pos:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — positions {open_positions} >= max {max_pos}", flush=True)
+            return
+
     mode = get_mode(uid)
     print(f"[AUTOBUY] uid={uid} proceeding with {symbol} in {mode} mode — {sol_amount} SOL", flush=True)
 
@@ -1811,7 +1820,8 @@ def _pct_kb(mint: str, back: str = "menu:portfolio") -> InlineKeyboardMarkup:
     ])
 
 
-async def _show_portfolio(send_fn, uid: int):
+async def _show_portfolio(send_fn, uid: int, page: int = 0):
+    PAGE_SIZE  = 5
     mode = get_mode(uid)
     as_configs = load_auto_sell().get(str(uid), {})
 
@@ -1823,17 +1833,20 @@ async def _show_portfolio(send_fn, uid: int):
                 parse_mode="Markdown", reply_markup=back_kb()
             )
             return
-        sol_bal  = get_sol_balance(pubkey)
-        accounts = get_token_accounts(pubkey)
+        sol_bal       = get_sol_balance(pubkey)
+        accounts      = get_token_accounts(pubkey)
+        total_pages   = max(1, math.ceil(len(accounts) / PAGE_SIZE)) if accounts else 1
+        page_accounts = accounts[page * PAGE_SIZE:(page + 1) * PAGE_SIZE] if accounts else []
+        page_info     = f"  •  Page {page + 1}/{total_pages}" if total_pages > 1 else ""
         lines    = [
-            f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`\n\n"
+            f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`{page_info}\n\n"
             f"SOL: `{sol_bal:.4f}`\n"
         ]
         token_rows = []
         total_sol_positions = 0.0
         if accounts:
             lines.append("*Positions — tap ⚡ to trade:*")
-            for acc in accounts[:10]:
+            for acc in page_accounts:
                 pair      = fetch_sol_pair(acc["mint"])
                 sym       = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
                 price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
@@ -1872,11 +1885,20 @@ async def _show_portfolio(send_fn, uid: int):
                     ])
             if total_sol_positions:
                 lines.append("━━━━━━━━━━━━━━━━━━")
-                lines.append(f"*Total Positions:* `{total_sol_positions:.4f}◎`")
+                page_suffix = f" _(page {page + 1}/{total_pages})_" if total_pages > 1 else ""
+                lines.append(f"*Total Positions:* `{total_sol_positions:.4f}◎`{page_suffix}")
         else:
             lines.append("No token positions found.")
 
         kb = token_rows[:]   # each entry is already a [⚡, 📊, 🪙] row
+        if total_pages > 1:
+            nav = []
+            if page > 0:
+                nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"portfolio:page:{page - 1}"))
+            if page < total_pages - 1:
+                nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"portfolio:page:{page + 1}"))
+            if nav:
+                kb.append(nav)
         kb += [
             [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
              InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
@@ -1889,16 +1911,19 @@ async def _show_portfolio(send_fn, uid: int):
         return
 
     # Paper portfolio
-    portfolio = get_portfolio(uid)
-    sol_bal   = portfolio.get("SOL", 0)
-    positions = {k: v for k, v in portfolio.items() if k != "SOL" and v > 0}
-    lines     = [f"📄 *Paper Portfolio*\n\nSOL: `{sol_bal:.4f}`\n"]
-    total_sol = 0.0
-    token_rows = []
+    portfolio      = get_portfolio(uid)
+    sol_bal        = portfolio.get("SOL", 0)
+    all_positions  = [(k, v) for k, v in portfolio.items() if k != "SOL" and v > 0]
+    total_pages    = max(1, math.ceil(len(all_positions) / PAGE_SIZE)) if all_positions else 1
+    page_positions = all_positions[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    page_info      = f"  •  Page {page + 1}/{total_pages}" if total_pages > 1 else ""
+    lines          = [f"📄 *Paper Portfolio*{page_info}\n\nSOL: `{sol_bal:.4f}`\n"]
+    total_sol      = 0.0
+    token_rows     = []
 
-    if positions:
+    if page_positions:
         lines.append("*Positions — tap ⚡ to trade:*")
-        for mint, raw_amt in positions.items():
+        for mint, raw_amt in page_positions:
             pair = fetch_sol_pair(mint)
             cfg  = as_configs.get(mint)
             if pair:
@@ -1968,11 +1993,20 @@ async def _show_portfolio(send_fn, uid: int):
                 ])
         if total_sol:
             lines.append("━━━━━━━━━━━━━━━━━━")
-            lines.append(f"*Total Positions:* `{total_sol:.4f}◎`")
+            page_suffix = f" _(page {page + 1}/{total_pages})_" if total_pages > 1 else ""
+            lines.append(f"*Total Positions:* `{total_sol:.4f}◎`{page_suffix}")
     else:
         lines.append("No positions yet.")
 
     kb = token_rows[:]   # each entry is already a [⚡, 📊, 🪙] row
+    if total_pages > 1:
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"portfolio:page:{page - 1}"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"portfolio:page:{page + 1}"))
+        if nav:
+            kb.append(nav)
     kb += [
         [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
          InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
@@ -2110,6 +2144,8 @@ def _autobuy_status_text(uid: int) -> str:
     daily_limit = cfg.get("daily_limit_sol", 1.0)
     spent       = cfg.get("spent_today", 0.0)
     bought      = cfg.get("bought", [])
+    max_pos     = cfg.get("max_positions", 0)
+    open_pos    = len(load_auto_sell().get(str(uid), {}))
     mode        = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
     buy_tier    = cfg.get("buy_tier", "")
 
@@ -2138,7 +2174,9 @@ def _autobuy_status_text(uid: int) -> str:
         f"Max MCap: `${max_mcap:,.0f}`\n"
         f"Daily SOL limit: `{'Unlimited ♾️' if daily_limit == 0 else str(daily_limit) + ' SOL'}`\n"
         f"Spent today: `{spent:.3f} SOL`\n"
-        f"Bought today: `{len(bought)}` token(s)\n\n"
+        f"Bought today: `{len(bought)}` token(s)\n"
+        f"Max positions: `{'Unlimited ♾️' if max_pos == 0 else str(max_pos)}`\n"
+        f"Open positions: `{open_pos}`{'  ⛔ *PAUSED*' if max_pos > 0 and open_pos >= max_pos else ''}\n\n"
         f"_Auto-buys fire when scanner alerts a token meeting your tier/score._"
     )
 
@@ -2153,7 +2191,8 @@ def _autobuy_kb(uid: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🌡️ Buy Tier",           callback_data="autobuy:set_tier")],
         [InlineKeyboardButton("🏦 Max MCap",          callback_data="autobuy:set_mcap"),
          InlineKeyboardButton("📅 Daily Limit",       callback_data="autobuy:set_daily")],
-        [InlineKeyboardButton("🔄 Reset Today",       callback_data="autobuy:reset_day")],
+        [InlineKeyboardButton("� Max Positions",     callback_data="autobuy:set_maxpos")],
+        [InlineKeyboardButton("�🔄 Reset Today",       callback_data="autobuy:reset_day")],
         [InlineKeyboardButton("⬅️ Back",              callback_data="menu:main")],
     ])
 
@@ -2349,6 +2388,34 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cfg["bought"]      = []
         cfg["spent_date"]  = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         set_auto_buy(uid, cfg)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_maxpos":
+        set_state(uid, waiting_for="ab_max_positions")
+        max_pos = cfg.get("max_positions", 0)
+        await query.edit_message_text(
+            "📊 *Max Open Positions*\n\n"
+            "Auto-buy pauses when your open positions hit this number.\n"
+            "Resumes automatically when a position is fully closed.\n"
+            "Set to `0` for unlimited.\n\n"
+            f"Current: `{'Unlimited ♾️' if max_pos == 0 else str(max_pos)}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("0 (Unlimited)", callback_data="autobuy:maxpos_preset:0"),
+                 InlineKeyboardButton("3",             callback_data="autobuy:maxpos_preset:3"),
+                 InlineKeyboardButton("5",             callback_data="autobuy:maxpos_preset:5")],
+                [InlineKeyboardButton("7",             callback_data="autobuy:maxpos_preset:7"),
+                 InlineKeyboardButton("10",            callback_data="autobuy:maxpos_preset:10"),
+                 InlineKeyboardButton("15",            callback_data="autobuy:maxpos_preset:15")],
+                [InlineKeyboardButton("⬅️ Back",       callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "maxpos_preset":
+        val = int(query.data.split(":")[2])
+        cfg["max_positions"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
         await _show_autobuy(query.edit_message_text, uid)
 
     elif action == "menu":
@@ -6227,6 +6294,12 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Loading...")
         await _show_portfolio(query.edit_message_text, uid)
 
+    elif action == "page":
+        await query.answer()
+        target_page = int(query.data.split(":")[2]) if len(query.data.split(":")) > 2 else 0
+        await query.edit_message_text("Loading...")
+        await _show_portfolio(query.edit_message_text, uid, page=target_page)
+
     elif action == "sell_all_confirm":
         await query.answer()
         mode = get_mode(uid)
@@ -7547,6 +7620,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label = "Unlimited ♾️" if val == 0 else f"`{val} SOL`"
         await update.message.reply_text(
             f"✅ Daily auto-buy limit set to {label}",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_max_positions":
+        try:
+            val = int(text.strip())
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a whole number (e.g. `5` or `0` for unlimited).", parse_mode="Markdown")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["max_positions"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "Unlimited ♾️" if val == 0 else str(val)
+        await update.message.reply_text(
+            f"✅ Max positions set to `{label}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
