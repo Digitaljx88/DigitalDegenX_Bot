@@ -184,6 +184,38 @@ def set_global_sl(data: dict):
     gs["stop_loss"] = data
     save_global_settings(gs)
 
+def get_global_trailing_stop() -> dict:
+    return load_global_settings().get("global_trailing_stop", {
+        "enabled": False, "trail_pct": 30, "sell_pct": 100
+    })
+
+def set_global_trailing_stop(data: dict):
+    gs = load_global_settings(); gs["global_trailing_stop"] = data; save_global_settings(gs)
+
+def get_global_trailing_tp() -> dict:
+    return load_global_settings().get("global_trailing_tp", {
+        "enabled": False, "activate_mult": 2.0, "trail_pct": 20, "sell_pct": 50
+    })
+
+def set_global_trailing_tp(data: dict):
+    gs = load_global_settings(); gs["global_trailing_tp"] = data; save_global_settings(gs)
+
+def get_global_breakeven_stop() -> dict:
+    return load_global_settings().get("global_breakeven_stop", {
+        "enabled": False, "activate_mult": 2.0
+    })
+
+def set_global_breakeven_stop(data: dict):
+    gs = load_global_settings(); gs["global_breakeven_stop"] = data; save_global_settings(gs)
+
+def get_global_time_exit() -> dict:
+    return load_global_settings().get("global_time_exit", {
+        "enabled": False, "hours": 24, "target_mult": 1.5, "sell_pct": 100
+    })
+
+def set_global_time_exit(data: dict):
+    gs = load_global_settings(); gs["global_time_exit"] = data; save_global_settings(gs)
+
 def get_user_as_presets(uid: int) -> list:
     """Get user's custom auto-sell multiplier presets.
     Returns list of dicts: [{"mult": 2.0, "sell_pct": 50}, {"mult": 4.0, "sell_pct": 50}]
@@ -997,7 +1029,137 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                         price_usd=price, mcap=mcap or 0
                     )
 
-            # ── Multiplier targets (auto-sell) ────────────────────────────────
+            # ── Global Trailing Stop ──────────────────────────────────────────
+            gts = get_global_trailing_stop()
+            if gts.get("enabled") and not cfg.get("_gts_triggered"):
+                # Track the running peak price for this position
+                if cfg.get("_gts_peak") is None:
+                    cfg["_gts_peak"] = price
+                    changed = True
+                elif price > cfg["_gts_peak"]:
+                    cfg["_gts_peak"] = price
+                    changed = True
+                peak = cfg.get("_gts_peak", buy_price)
+                trail_pct = gts.get("trail_pct", 30)
+                drop_from_peak = ((peak - price) / peak) * 100 if peak > 0 else 0
+                if drop_from_peak >= trail_pct:
+                    cfg["_gts_triggered"] = True
+                    changed = True
+                    await execute_auto_sell(
+                        context.bot, uid, mint, symbol,
+                        gts.get("sell_pct", 100),
+                        f"Global Trailing Stop -{trail_pct}% from peak", mode,
+                        price_usd=price, mcap=mcap or 0
+                    )
+                    try:
+                        await context.bot.send_message(
+                            uid,
+                            f"📉 *Global Trailing Stop Fired* — `${symbol}`\n"
+                            f"Peak was `${peak:.6f}` → dropped `{drop_from_peak:.1f}%` → SOLD",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
+            # ── Global Trailing Take-Profit ───────────────────────────────────
+            gttp = get_global_trailing_tp()
+            if gttp.get("enabled") and not cfg.get("_gttp_triggered"):
+                activate_mult = gttp.get("activate_mult", 2.0)
+                trail_pct     = gttp.get("trail_pct", 20)
+                sell_pct      = gttp.get("sell_pct", 50)
+                if not cfg.get("_gttp_active") and price >= buy_price * activate_mult:
+                    # Activate trailing TP
+                    cfg["_gttp_active"] = True
+                    cfg["_gttp_peak"]   = price
+                    changed = True
+                    try:
+                        await context.bot.send_message(
+                            uid,
+                            f"🎯 *Global Trailing TP Activated* — `${symbol}`\n"
+                            f"Price hit `{activate_mult}x` (`${price:.6f}`). "
+                            f"Now trailing `{trail_pct}%` below peak. "
+                            f"Will sell `{sell_pct}%` if price drops that far.",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+                elif cfg.get("_gttp_active"):
+                    if price > cfg.get("_gttp_peak", 0):
+                        cfg["_gttp_peak"] = price
+                        changed = True
+                    peak = cfg.get("_gttp_peak", price)
+                    drop_from_peak = ((peak - price) / peak) * 100 if peak > 0 else 0
+                    if drop_from_peak >= trail_pct:
+                        cfg["_gttp_triggered"] = True
+                        changed = True
+                        await execute_auto_sell(
+                            context.bot, uid, mint, symbol,
+                            sell_pct,
+                            f"Global Trailing TP -{trail_pct}% from peak", mode,
+                            price_usd=price, mcap=mcap or 0
+                        )
+                        try:
+                            await context.bot.send_message(
+                                uid,
+                                f"🎯 *Global Trailing TP Fired* — `${symbol}`\n"
+                                f"Peak was `${peak:.6f}` → dropped `{drop_from_peak:.1f}%` → SOLD `{sell_pct}%`",
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
+
+            # ── Global Breakeven Stop ─────────────────────────────────────────
+            gbe = get_global_breakeven_stop()
+            if gbe.get("enabled") and not cfg.get("_gbe_triggered"):
+                be_mult = gbe.get("activate_mult", 2.0)
+                if price >= buy_price * be_mult:
+                    cfg["_gbe_triggered"] = True
+                    # Move per-position stop-loss to breakeven (0% drop = entry price)
+                    if "stop_loss" not in cfg:
+                        cfg["stop_loss"] = {}
+                    cfg["stop_loss"]["pct"]       = 0
+                    cfg["stop_loss"]["enabled"]   = True
+                    cfg["stop_loss"]["triggered"] = False
+                    changed = True
+                    try:
+                        await context.bot.send_message(
+                            uid,
+                            f"🛡️ *Global Breakeven Stop Activated* — `${symbol}`\n"
+                            f"Price hit `{be_mult}x` — stop-loss locked to entry price `${buy_price:.6f}`.\n"
+                            f"You cannot lose money on this position now.",
+                            parse_mode="Markdown"
+                        )
+                    except Exception:
+                        pass
+
+            # ── Global Time Exit ──────────────────────────────────────────────
+            gte = get_global_time_exit()
+            if gte.get("enabled") and not cfg.get("_gte_triggered"):
+                purchase_ts = cfg.get("purchase_timestamp", 0)
+                if purchase_ts:
+                    hours_elapsed = (time.time() - purchase_ts) / 3600
+                    gte_hours  = gte.get("hours", 24)
+                    target_mult = gte.get("target_mult", 1.5)
+                    if hours_elapsed >= gte_hours and price < buy_price * target_mult:
+                        cfg["_gte_triggered"] = True
+                        changed = True
+                        await execute_auto_sell(
+                            context.bot, uid, mint, symbol,
+                            gte.get("sell_pct", 100),
+                            f"Global Time Exit ({gte_hours}h elapsed, below {target_mult}x)", mode,
+                            price_usd=price, mcap=mcap or 0
+                        )
+                        try:
+                            await context.bot.send_message(
+                                uid,
+                                f"⏱️ *Global Time Exit Fired* — `${symbol}`\n"
+                                f"`{hours_elapsed:.1f}h` elapsed and price still below `{target_mult}x` target → SOLD",
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
+
+
             for target in cfg.get("mult_targets", []):
                 if target["triggered"]:
                     continue
@@ -2255,19 +2417,17 @@ async def cmd_autosell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await _show_autosell(msg.edit_text, update.effective_user.id)
 
 async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Quick access to global stop-loss settings."""
+    """Quick access to global risk settings (all 5 strategies)."""
     uid = update.effective_user.id
-    gsl = get_global_sl()
-    on = gsl.get("enabled", False)
-    status_txt = "🟢 Enabled" if on else "🔴 Disabled"
+    gsl  = get_global_sl()
+    gts  = get_global_trailing_stop()
+    gttp = get_global_trailing_tp()
+    gbe  = get_global_breakeven_stop()
+    gte  = get_global_time_exit()
     await update.message.reply_text(
-        f"*🌍 Global Stop-Loss*\n\n"
-        f"Status: {status_txt}\n"
-        f"Trigger: price drops `{gsl.get('pct', 50)}%` from buy price\n"
-        f"Action: sell `{gsl.get('sell_pct', 100)}%` of position\n\n"
-        f"Applies to ALL tracked positions as a safety net.",
+        _global_risk_menu_text(gsl, gts, gttp, gbe, gte),
         parse_mode="Markdown",
-        reply_markup=_gsl_menu_kb(gsl)
+        reply_markup=_global_risk_kb(gsl, gts, gttp, gbe, gte)
     )
 
 
@@ -6798,6 +6958,186 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
+    elif state == "gts_trail_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 99:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 99.")
+            return
+        clear_state(uid)
+        gts = get_global_trailing_stop()
+        gts["trail_pct"] = val
+        set_global_trailing_stop(gts)
+        await update.message.reply_text(
+            f"✅ Trailing stop trail % set to `{val}%` drop from peak",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📉 Trailing Stop Settings", callback_data="gts:menu")
+            ]])
+        )
+
+    elif state == "gts_sell_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        clear_state(uid)
+        gts = get_global_trailing_stop()
+        gts["sell_pct"] = val
+        set_global_trailing_stop(gts)
+        await update.message.reply_text(
+            f"✅ Trailing stop sell % set to `{val}%`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("📉 Trailing Stop Settings", callback_data="gts:menu")
+            ]])
+        )
+
+    elif state == "gttp_activate_mult":
+        try:
+            val = float(text)
+            if val < 1.1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a multiplier between 1.1 and 100 (e.g. 2.5).")
+            return
+        clear_state(uid)
+        gttp = get_global_trailing_tp()
+        gttp["activate_mult"] = round(val, 2)
+        set_global_trailing_tp(gttp)
+        await update.message.reply_text(
+            f"✅ Trailing TP activation set to `{val}x`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎯 Trailing TP Settings", callback_data="gttp:menu")
+            ]])
+        )
+
+    elif state == "gttp_trail_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 99:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 99.")
+            return
+        clear_state(uid)
+        gttp = get_global_trailing_tp()
+        gttp["trail_pct"] = val
+        set_global_trailing_tp(gttp)
+        await update.message.reply_text(
+            f"✅ Trailing TP trail % set to `{val}%` drop from peak",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎯 Trailing TP Settings", callback_data="gttp:menu")
+            ]])
+        )
+
+    elif state == "gttp_sell_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        clear_state(uid)
+        gttp = get_global_trailing_tp()
+        gttp["sell_pct"] = val
+        set_global_trailing_tp(gttp)
+        await update.message.reply_text(
+            f"✅ Trailing TP sell % set to `{val}%`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🎯 Trailing TP Settings", callback_data="gttp:menu")
+            ]])
+        )
+
+    elif state == "gbe_activate_mult":
+        try:
+            val = float(text)
+            if val < 1.1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a multiplier between 1.1 and 100 (e.g. 2.0).")
+            return
+        clear_state(uid)
+        gbe = get_global_breakeven_stop()
+        gbe["activate_mult"] = round(val, 2)
+        set_global_breakeven_stop(gbe)
+        await update.message.reply_text(
+            f"✅ Breakeven stop activates at `{val}x`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🛡️ Breakeven Stop Settings", callback_data="gbe:menu")
+            ]])
+        )
+
+    elif state == "gte_hours":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 720:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number of hours between 1 and 720.")
+            return
+        clear_state(uid)
+        gte = get_global_time_exit()
+        gte["hours"] = val
+        set_global_time_exit(gte)
+        await update.message.reply_text(
+            f"✅ Time exit limit set to `{val} hours`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⏱️ Time Exit Settings", callback_data="gte:menu")
+            ]])
+        )
+
+    elif state == "gte_target_mult":
+        try:
+            val = float(text)
+            if val < 1.0 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a multiplier between 1.0 and 100 (e.g. 1.5).")
+            return
+        clear_state(uid)
+        gte = get_global_time_exit()
+        gte["target_mult"] = round(val, 2)
+        set_global_time_exit(gte)
+        await update.message.reply_text(
+            f"✅ Time exit target set to `{val}x` — sell if below this after time limit",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⏱️ Time Exit Settings", callback_data="gte:menu")
+            ]])
+        )
+
+    elif state == "gte_sell_pct":
+        try:
+            val = int(float(text))
+            if val < 1 or val > 100:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 100.")
+            return
+        clear_state(uid)
+        gte = get_global_time_exit()
+        gte["sell_pct"] = val
+        set_global_time_exit(gte)
+        await update.message.reply_text(
+            f"✅ Time exit sell % set to `{val}%`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⏱️ Time Exit Settings", callback_data="gte:menu")
+            ]])
+        )
+
     elif state == "scanner_alert_channel":
         # Accept channel ID (numeric, e.g. -1001234567890) or @username
         ch = text.strip()
@@ -7630,6 +7970,200 @@ async def channels_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+
+# ─── Global Risk Settings menu helpers ───────────────────────────────────────
+
+def _global_risk_menu_text(gsl: dict, gts: dict, gttp: dict, gbe: dict, gte: dict) -> str:
+    def _on(d): return "🟢 ON" if d.get("enabled") else "🔴 OFF"
+
+    gsl_line  = f"  Trigger: {gsl.get('pct', 50)}% drop → sell {gsl.get('sell_pct', 100)}%"
+    gts_line  = f"  Trail: {gts.get('trail_pct', 30)}% drop from peak → sell {gts.get('sell_pct', 100)}%"
+    gttp_line = (f"  Activates at {gttp.get('activate_mult', 2.0)}x → trails {gttp.get('trail_pct', 20)}% "
+                 f"→ sells {gttp.get('sell_pct', 50)}%")
+    gbe_line  = f"  Activates at {gbe.get('activate_mult', 2.0)}x → stop-loss moves to entry price"
+    gte_line  = (f"  After {gte.get('hours', 24)}h, if below {gte.get('target_mult', 1.5)}x "
+                 f"→ sell {gte.get('sell_pct', 100)}%")
+
+    return (
+        "*🌍 Global Risk Settings*\n\n"
+        "These rules apply automatically to *every token you buy* — no per-trade setup needed.\n\n"
+        f"🛑 *Hard Stop-Loss* — {_on(gsl)}\n"
+        f"{gsl_line}\n"
+        "  Maximum loss protection. Sells immediately when price drops X% from your buy.\n\n"
+        f"📉 *Trailing Stop* — {_on(gts)}\n"
+        f"{gts_line}\n"
+        "  Follows the price up automatically. Locks in gains by selling only if the price\n"
+        "  reverses by X% from its highest point. Lets winners run, stops big reversals.\n\n"
+        f"🎯 *Trailing Take-Profit* — {_on(gttp)}\n"
+        f"{gttp_line}\n"
+        "  Waits for a strong rally, then trails the peak. Captures real profit without\n"
+        "  selling too early — activates only when you're already winning.\n\n"
+        f"🛡️ *Breakeven Stop* — {_on(gbe)}\n"
+        f"{gbe_line}\n"
+        "  Once you double your money, your stop-loss moves to your entry price.\n"
+        "  After this triggers, you literally *cannot lose money* on the trade.\n\n"
+        f"⏱️ *Time Exit* — {_on(gte)}\n"
+        f"{gte_line}\n"
+        "  Exits dead/slow trades automatically. If a token hasn't gained enough\n"
+        "  after X hours, it sells — freeing capital for better opportunities."
+    )
+
+
+def _global_risk_kb(gsl: dict, gts: dict, gttp: dict, gbe: dict, gte: dict) -> InlineKeyboardMarkup:
+    def _toggle_lbl(d, name): return f"{'✅' if d.get('enabled') else '❌'} {name}"
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton(_toggle_lbl(gsl, "Hard Stop-Loss"),    callback_data="gsl:toggle"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="gsl:menu")],
+        [InlineKeyboardButton(_toggle_lbl(gts, "Trailing Stop"),     callback_data="gts:toggle"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="gts:menu")],
+        [InlineKeyboardButton(_toggle_lbl(gttp, "Trailing TP"),      callback_data="gttp:toggle"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="gttp:menu")],
+        [InlineKeyboardButton(_toggle_lbl(gbe, "Breakeven Stop"),    callback_data="gbe:toggle"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="gbe:menu")],
+        [InlineKeyboardButton(_toggle_lbl(gte, "Time Exit"),         callback_data="gte:toggle"),
+         InlineKeyboardButton("⚙️ Settings", callback_data="gte:menu")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="menu:autosell")],
+    ])
+
+
+def _gts_menu_text(gts: dict) -> str:
+    on = "🟢 ON" if gts.get("enabled") else "🔴 OFF"
+    return (
+        f"*📉 Global Trailing Stop* — {on}\n\n"
+        "*How it works:*\n"
+        "Every time the price hits a new high, that becomes the new 'peak'. "
+        "If the price then drops X% from that peak, your position sells automatically.\n\n"
+        "*Example:*\n"
+        "  Buy at `$1.00` → rises to `$2.00` (new peak)\n"
+        "  Drops 30% → price hits `$1.40` → SELL!\n\n"
+        "This is ideal for meme coins: lets winners run but exits before a full dump.\n\n"
+        f"Trail %: `{gts.get('trail_pct', 30)}%` drop from peak triggers sell\n"
+        f"Sell %: `{gts.get('sell_pct', 100)}%` of position sold when triggered"
+    )
+
+
+def _gts_menu_kb(gts: dict) -> InlineKeyboardMarkup:
+    on = gts.get("enabled", False)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏸️ Disable" if on else "▶️ Enable", callback_data="gts:toggle")],
+        [InlineKeyboardButton("Trail 15%", callback_data="gts:trail_pct:15"),
+         InlineKeyboardButton("Trail 30%", callback_data="gts:trail_pct:30"),
+         InlineKeyboardButton("Trail 50%", callback_data="gts:trail_pct:50")],
+        [InlineKeyboardButton("✏️ Custom trail %", callback_data="gts:trail_pct_custom")],
+        [InlineKeyboardButton("Sell 50%",  callback_data="gts:sell_pct:50"),
+         InlineKeyboardButton("Sell 75%",  callback_data="gts:sell_pct:75"),
+         InlineKeyboardButton("Sell 100%", callback_data="gts:sell_pct:100")],
+        [InlineKeyboardButton("✏️ Custom sell %", callback_data="gts:sell_pct_custom")],
+        [InlineKeyboardButton("⬅️ Back to Risk Settings", callback_data="gsl:overview")],
+    ])
+
+
+def _gttp_menu_text(gttp: dict) -> str:
+    on = "🟢 ON" if gttp.get("enabled") else "🔴 OFF"
+    return (
+        f"*🎯 Global Trailing Take-Profit* — {on}\n\n"
+        "*How it works:*\n"
+        "Waits until your position hits a big gain (e.g. 2x), then starts trailing. "
+        "If the price reverses X% from its highest point after activation, it sells your chosen %.\n\n"
+        "*Example:*\n"
+        "  Buy at `$1.00` → activates at `$2.00` (2x)\n"
+        "  Rises to `$3.00` (new peak) → drops 20% → hits `$2.40` → SELL 50%\n\n"
+        "Sells partial position to lock in profits while letting the rest ride higher.\n\n"
+        f"Activate at: `{gttp.get('activate_mult', 2.0)}x` from buy price\n"
+        f"Trail %: `{gttp.get('trail_pct', 20)}%` drop from peak triggers sell\n"
+        f"Sell %: `{gttp.get('sell_pct', 50)}%` of position sold when triggered"
+    )
+
+
+def _gttp_menu_kb(gttp: dict) -> InlineKeyboardMarkup:
+    on = gttp.get("enabled", False)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏸️ Disable" if on else "▶️ Enable", callback_data="gttp:toggle")],
+        [InlineKeyboardButton("Activate 1.5x", callback_data="gttp:activate_mult:1.5"),
+         InlineKeyboardButton("Activate 2x",   callback_data="gttp:activate_mult:2.0"),
+         InlineKeyboardButton("Activate 3x",   callback_data="gttp:activate_mult:3.0")],
+        [InlineKeyboardButton("✏️ Custom activate mult", callback_data="gttp:activate_mult_custom")],
+        [InlineKeyboardButton("Trail 10%", callback_data="gttp:trail_pct:10"),
+         InlineKeyboardButton("Trail 20%", callback_data="gttp:trail_pct:20"),
+         InlineKeyboardButton("Trail 30%", callback_data="gttp:trail_pct:30")],
+        [InlineKeyboardButton("✏️ Custom trail %", callback_data="gttp:trail_pct_custom")],
+        [InlineKeyboardButton("Sell 25%",  callback_data="gttp:sell_pct:25"),
+         InlineKeyboardButton("Sell 50%",  callback_data="gttp:sell_pct:50"),
+         InlineKeyboardButton("Sell 75%",  callback_data="gttp:sell_pct:75")],
+        [InlineKeyboardButton("✏️ Custom sell %", callback_data="gttp:sell_pct_custom")],
+        [InlineKeyboardButton("⬅️ Back to Risk Settings", callback_data="gsl:overview")],
+    ])
+
+
+def _gbe_menu_text(gbe: dict) -> str:
+    on = "🟢 ON" if gbe.get("enabled") else "🔴 OFF"
+    return (
+        f"*🛡️ Global Breakeven Stop* — {on}\n\n"
+        "*How it works:*\n"
+        "Once your position reaches a set gain (e.g. 2x), your stop-loss automatically moves "
+        "to your original entry price. From that point on, the position can only make money — "
+        "the absolute worst outcome is breaking even.\n\n"
+        "*Example:*\n"
+        "  Buy at `$1.00` → price hits `$2.00` (2x reached)\n"
+        "  Stop-loss moves to `$1.00` (your buy price)\n"
+        "  If price crashes back to `$1.00` → SELL at breakeven, zero loss\n\n"
+        "Works best combined with Trailing Stop or Hard Stop-Loss.\n\n"
+        f"Activate at: `{gbe.get('activate_mult', 2.0)}x` from buy price"
+    )
+
+
+def _gbe_menu_kb(gbe: dict) -> InlineKeyboardMarkup:
+    on = gbe.get("enabled", False)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏸️ Disable" if on else "▶️ Enable", callback_data="gbe:toggle")],
+        [InlineKeyboardButton("Activate 1.5x", callback_data="gbe:activate_mult:1.5"),
+         InlineKeyboardButton("Activate 2x",   callback_data="gbe:activate_mult:2.0"),
+         InlineKeyboardButton("Activate 3x",   callback_data="gbe:activate_mult:3.0")],
+        [InlineKeyboardButton("✏️ Custom activate mult", callback_data="gbe:activate_mult_custom")],
+        [InlineKeyboardButton("⬅️ Back to Risk Settings", callback_data="gsl:overview")],
+    ])
+
+
+def _gte_menu_text(gte: dict) -> str:
+    on = "🟢 ON" if gte.get("enabled") else "🔴 OFF"
+    return (
+        f"*⏱️ Global Time Exit* — {on}\n\n"
+        "*How it works:*\n"
+        "If a token hasn't reached your target gain after a set number of hours, "
+        "it sells automatically. This frees up capital from slow, stagnant trades "
+        "so you can deploy it into better opportunities.\n\n"
+        "*Example:*\n"
+        "  Buy at `$1.00` — target is `1.5x` within `24h`\n"
+        "  After 24h, price is only `$1.20` (below 1.5x target)\n"
+        "  Time Exit fires → SELL 100%\n\n"
+        "  If price hits 1.5x before 24h, Time Exit does NOT fire.\n\n"
+        f"Time limit: `{gte.get('hours', 24)} hours` after purchase\n"
+        f"Target: must be at `{gte.get('target_mult', 1.5)}x` or above, otherwise sell\n"
+        f"Sell %: `{gte.get('sell_pct', 100)}%` of position sold"
+    )
+
+
+def _gte_menu_kb(gte: dict) -> InlineKeyboardMarkup:
+    on = gte.get("enabled", False)
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("⏸️ Disable" if on else "▶️ Enable", callback_data="gte:toggle")],
+        [InlineKeyboardButton("4 hours",  callback_data="gte:hours:4"),
+         InlineKeyboardButton("12 hours", callback_data="gte:hours:12"),
+         InlineKeyboardButton("24 hours", callback_data="gte:hours:24"),
+         InlineKeyboardButton("48 hours", callback_data="gte:hours:48")],
+        [InlineKeyboardButton("✏️ Custom hours", callback_data="gte:hours_custom")],
+        [InlineKeyboardButton("Target 1.2x", callback_data="gte:target_mult:1.2"),
+         InlineKeyboardButton("Target 1.5x", callback_data="gte:target_mult:1.5"),
+         InlineKeyboardButton("Target 2x",   callback_data="gte:target_mult:2.0")],
+        [InlineKeyboardButton("✏️ Custom target mult", callback_data="gte:target_mult_custom")],
+        [InlineKeyboardButton("Sell 50%",  callback_data="gte:sell_pct:50"),
+         InlineKeyboardButton("Sell 75%",  callback_data="gte:sell_pct:75"),
+         InlineKeyboardButton("Sell 100%", callback_data="gte:sell_pct:100")],
+        [InlineKeyboardButton("✏️ Custom sell %", callback_data="gte:sell_pct_custom")],
+        [InlineKeyboardButton("⬅️ Back to Risk Settings", callback_data="gsl:overview")],
+    ])
+
+
 # ─── Global Stop-Loss callback ────────────────────────────────────────────────
 
 def _gsl_menu_kb(gsl: dict) -> InlineKeyboardMarkup:
@@ -7737,6 +8271,250 @@ async def gsl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Enter sell % when global stop-loss fires (1–100):",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ Cancel", callback_data="gsl:menu")
+            ]])
+        )
+
+    elif action == "overview":
+        gts  = get_global_trailing_stop()
+        gttp = get_global_trailing_tp()
+        gbe  = get_global_breakeven_stop()
+        gte  = get_global_time_exit()
+        gsl  = get_global_sl()
+        await query.edit_message_text(
+            _global_risk_menu_text(gsl, gts, gttp, gbe, gte),
+            parse_mode="Markdown",
+            reply_markup=_global_risk_kb(gsl, gts, gttp, gbe, gte)
+        )
+
+
+# ─── Global Trailing Stop callback ───────────────────────────────────────────
+
+async def gts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+    await query.answer()
+
+    gts = get_global_trailing_stop()
+
+    if action in ("menu", "toggle"):
+        if action == "toggle":
+            gts["enabled"] = not gts.get("enabled", False)
+            set_global_trailing_stop(gts)
+        await query.edit_message_text(
+            _gts_menu_text(gts),
+            parse_mode="Markdown",
+            reply_markup=_gts_menu_kb(gts)
+        )
+
+    elif action == "trail_pct":
+        gts["trail_pct"] = int(parts[2])
+        set_global_trailing_stop(gts)
+        await query.answer(f"Trail % set to {parts[2]}%")
+        await query.edit_message_text(_gts_menu_text(gts), parse_mode="Markdown",
+                                      reply_markup=_gts_menu_kb(gts))
+
+    elif action == "sell_pct":
+        gts["sell_pct"] = int(parts[2])
+        set_global_trailing_stop(gts)
+        await query.answer(f"Sell % set to {parts[2]}%")
+        await query.edit_message_text(_gts_menu_text(gts), parse_mode="Markdown",
+                                      reply_markup=_gts_menu_kb(gts))
+
+    elif action == "trail_pct_custom":
+        set_state(uid, waiting_for="gts_trail_pct")
+        await query.edit_message_text(
+            "Enter custom trail % (e.g. 25 means sell if price drops 25% from peak):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gts:menu")
+            ]])
+        )
+
+    elif action == "sell_pct_custom":
+        set_state(uid, waiting_for="gts_sell_pct")
+        await query.edit_message_text(
+            "Enter sell % when trailing stop fires (1–100):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gts:menu")
+            ]])
+        )
+
+
+# ─── Global Trailing Take-Profit callback ────────────────────────────────────
+
+async def gttp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+    await query.answer()
+
+    gttp = get_global_trailing_tp()
+
+    if action in ("menu", "toggle"):
+        if action == "toggle":
+            gttp["enabled"] = not gttp.get("enabled", False)
+            set_global_trailing_tp(gttp)
+        await query.edit_message_text(
+            _gttp_menu_text(gttp),
+            parse_mode="Markdown",
+            reply_markup=_gttp_menu_kb(gttp)
+        )
+
+    elif action == "activate_mult":
+        gttp["activate_mult"] = float(parts[2])
+        set_global_trailing_tp(gttp)
+        await query.answer(f"Activation set to {parts[2]}x")
+        await query.edit_message_text(_gttp_menu_text(gttp), parse_mode="Markdown",
+                                      reply_markup=_gttp_menu_kb(gttp))
+
+    elif action == "trail_pct":
+        gttp["trail_pct"] = int(parts[2])
+        set_global_trailing_tp(gttp)
+        await query.answer(f"Trail % set to {parts[2]}%")
+        await query.edit_message_text(_gttp_menu_text(gttp), parse_mode="Markdown",
+                                      reply_markup=_gttp_menu_kb(gttp))
+
+    elif action == "sell_pct":
+        gttp["sell_pct"] = int(parts[2])
+        set_global_trailing_tp(gttp)
+        await query.answer(f"Sell % set to {parts[2]}%")
+        await query.edit_message_text(_gttp_menu_text(gttp), parse_mode="Markdown",
+                                      reply_markup=_gttp_menu_kb(gttp))
+
+    elif action == "activate_mult_custom":
+        set_state(uid, waiting_for="gttp_activate_mult")
+        await query.edit_message_text(
+            "Enter activation multiplier (e.g. 2.5 = activates when price is 2.5x your buy):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gttp:menu")
+            ]])
+        )
+
+    elif action == "trail_pct_custom":
+        set_state(uid, waiting_for="gttp_trail_pct")
+        await query.edit_message_text(
+            "Enter trail % (e.g. 20 = sell if price drops 20% from peak after activation):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gttp:menu")
+            ]])
+        )
+
+    elif action == "sell_pct_custom":
+        set_state(uid, waiting_for="gttp_sell_pct")
+        await query.edit_message_text(
+            "Enter sell % when trailing TP fires (1–100):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gttp:menu")
+            ]])
+        )
+
+
+# ─── Global Breakeven Stop callback ──────────────────────────────────────────
+
+async def gbe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+    await query.answer()
+
+    gbe = get_global_breakeven_stop()
+
+    if action in ("menu", "toggle"):
+        if action == "toggle":
+            gbe["enabled"] = not gbe.get("enabled", False)
+            set_global_breakeven_stop(gbe)
+        await query.edit_message_text(
+            _gbe_menu_text(gbe),
+            parse_mode="Markdown",
+            reply_markup=_gbe_menu_kb(gbe)
+        )
+
+    elif action == "activate_mult":
+        gbe["activate_mult"] = float(parts[2])
+        set_global_breakeven_stop(gbe)
+        await query.answer(f"Activation set to {parts[2]}x")
+        await query.edit_message_text(_gbe_menu_text(gbe), parse_mode="Markdown",
+                                      reply_markup=_gbe_menu_kb(gbe))
+
+    elif action == "activate_mult_custom":
+        set_state(uid, waiting_for="gbe_activate_mult")
+        await query.edit_message_text(
+            "Enter activation multiplier (e.g. 2.0 = activates when price is 2x your buy):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gbe:menu")
+            ]])
+        )
+
+
+# ─── Global Time Exit callback ────────────────────────────────────────────────
+
+async def gte_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1]
+    await query.answer()
+
+    gte = get_global_time_exit()
+
+    if action in ("menu", "toggle"):
+        if action == "toggle":
+            gte["enabled"] = not gte.get("enabled", False)
+            set_global_time_exit(gte)
+        await query.edit_message_text(
+            _gte_menu_text(gte),
+            parse_mode="Markdown",
+            reply_markup=_gte_menu_kb(gte)
+        )
+
+    elif action == "hours":
+        gte["hours"] = int(parts[2])
+        set_global_time_exit(gte)
+        await query.answer(f"Time limit set to {parts[2]}h")
+        await query.edit_message_text(_gte_menu_text(gte), parse_mode="Markdown",
+                                      reply_markup=_gte_menu_kb(gte))
+
+    elif action == "target_mult":
+        gte["target_mult"] = float(parts[2])
+        set_global_time_exit(gte)
+        await query.answer(f"Target set to {parts[2]}x")
+        await query.edit_message_text(_gte_menu_text(gte), parse_mode="Markdown",
+                                      reply_markup=_gte_menu_kb(gte))
+
+    elif action == "sell_pct":
+        gte["sell_pct"] = int(parts[2])
+        set_global_time_exit(gte)
+        await query.answer(f"Sell % set to {parts[2]}%")
+        await query.edit_message_text(_gte_menu_text(gte), parse_mode="Markdown",
+                                      reply_markup=_gte_menu_kb(gte))
+
+    elif action == "hours_custom":
+        set_state(uid, waiting_for="gte_hours")
+        await query.edit_message_text(
+            "Enter time limit in hours (e.g. 6, 12, 24, 48):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gte:menu")
+            ]])
+        )
+
+    elif action == "target_mult_custom":
+        set_state(uid, waiting_for="gte_target_mult")
+        await query.edit_message_text(
+            "Enter target multiplier (e.g. 1.5 = token must be 1.5x or higher, otherwise sell):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gte:menu")
+            ]])
+        )
+
+    elif action == "sell_pct_custom":
+        set_state(uid, waiting_for="gte_sell_pct")
+        await query.edit_message_text(
+            "Enter sell % when time exit fires (1–100):",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="gte:menu")
             ]])
         )
 
@@ -7865,6 +8643,10 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))
     app.add_handler(CallbackQueryHandler(pnl_callback,                 pattern=r"^pnl:"))
     app.add_handler(CallbackQueryHandler(gsl_callback,                 pattern=r"^gsl:"))
+    app.add_handler(CallbackQueryHandler(gts_callback,                 pattern=r"^gts:"))
+    app.add_handler(CallbackQueryHandler(gttp_callback,                pattern=r"^gttp:"))
+    app.add_handler(CallbackQueryHandler(gbe_callback,                 pattern=r"^gbe:"))
+    app.add_handler(CallbackQueryHandler(gte_callback,                 pattern=r"^gte:"))
     app.add_handler(CallbackQueryHandler(intel_callback,               pattern=r"^intel:"))
 
     # Text input
