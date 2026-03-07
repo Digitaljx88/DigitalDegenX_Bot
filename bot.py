@@ -2200,107 +2200,123 @@ async def cmd_trades_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
       /trades BONK
       /trades 2024-03-01:2024-03-05 page 2
     """
-    trades = load_trade_log()
-    if not isinstance(trades, list):
-        trades = []
-    
-    # Parse filter arguments
-    filter_type = context.args[0].lower() if context.args else None
-    page_num = 1
     try:
-        if len(context.args) >= 2 and context.args[-2].lower() == "page":
-            page_num = max(1, int(context.args[-1]))
-    except (ValueError, IndexError):
-        pass
-    
-    # Apply filters
-    filtered_trades = trades[:]  # Copy list
-    
-    if filter_type == "win":
-        filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) > 0 and t.get("action") == "sell"]
-    elif filter_type == "loss":
-        filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) <= 0 and t.get("action") == "sell"]
-    elif filter_type and ":" in filter_type and len(filter_type.split(":")[0]) == 10:  # Date range (YYYY-MM-DD:...)
+        trades = load_trade_log()
+        if not isinstance(trades, list):
+            trades = []
+        
+        # Parse filter arguments
+        filter_type = context.args[0].lower() if context.args else None
+        page_num = 1
         try:
-            date1, date2 = filter_type.split(":")
-            filtered_trades = [
-                t for t in filtered_trades 
-                if date1 <= t.get("date", "") <= date2
-            ]
-        except Exception:
+            if len(context.args) >= 2 and context.args[-2].lower() == "page":
+                page_num = max(1, int(context.args[-1]))
+        except (ValueError, IndexError):
             pass
-    elif filter_type and filter_type not in ("page", "win", "loss"):
-        # Filter by symbol or CA
-        query_lower = filter_type.lower()
-        filtered_trades = [
-            t for t in filtered_trades
-            if query_lower in t.get("symbol", "").lower() or query_lower in t.get("mint", "").lower()
+        
+        # Apply filters
+        filtered_trades = trades[:]  # Copy list
+        
+        if filter_type == "win":
+            filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) > 0 and t.get("action") == "sell"]
+        elif filter_type == "loss":
+            filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) <= 0 and t.get("action") == "sell"]
+        elif filter_type and ":" in filter_type and len(filter_type.split(":")[0]) == 10:
+            try:
+                date1, date2 = filter_type.split(":")
+                filtered_trades = [
+                    t for t in filtered_trades 
+                    if date1 <= t.get("date", "") <= date2
+                ]
+            except Exception:
+                pass
+        elif filter_type and filter_type not in ("page", "win", "loss"):
+            query_lower = filter_type.lower()
+            filtered_trades = [
+                t for t in filtered_trades
+                if query_lower in t.get("symbol", "").lower() or query_lower in t.get("mint", "").lower()
+            ]
+        
+        filtered_trades = sorted(filtered_trades, key=lambda t: t.get("ts", 0), reverse=True)
+        
+        if not filtered_trades:
+            await update.message.reply_text(
+                "📊 *Trade History*\n\nNo trades match that filter.",
+                parse_mode="Markdown", reply_markup=back_kb("menu:main")
+            )
+            return
+        
+        # Pagination
+        trades_per_page = 20
+        total_pages = max(1, (len(filtered_trades) + trades_per_page - 1) // trades_per_page)
+        page_num = min(page_num, total_pages)
+        start_idx = (page_num - 1) * trades_per_page
+        end_idx = start_idx + trades_per_page
+        page_trades = filtered_trades[start_idx:end_idx]
+        
+        # Format output
+        lines = [
+            f"📊 *Trade History* — Page {page_num}/{total_pages}",
+            f"Total: {len(filtered_trades)} trades",
+            "",
+            "```",
+            "Date       Symbol  Buy Price   Status     PnL",
+            "─────────────────────────────────────────────",
         ]
-    
-    # Sort by timestamp descending (newest first)
-    filtered_trades = sorted(filtered_trades, key=lambda t: t.get("ts", 0), reverse=True)
-    
-    if not filtered_trades:
+        
+        for trade in page_trades:
+            try:
+                date_str = str(trade.get("date", "????-??-??"))[:10]
+                mint = trade.get("mint", "???")
+                sym = trade.get("symbol", mint[:6] if mint else "???")
+                symbol = str(sym)[:6].ljust(6)
+                action = str(trade.get("action", "?")).upper()
+                buy_price = float(trade.get("buy_price_usd") or 0)
+                price_str = f"${buy_price:.8g}".ljust(10)
+                
+                if action == "BUY":
+                    status_str = "🟢 BUY ".ljust(7)
+                else:
+                    pnl_pct = float(trade.get("pnl_pct") or 0)
+                    if pnl_pct > 0:
+                        status_str = f"✅ +{pnl_pct:.1f}%".ljust(7)
+                    else:
+                        status_str = f"❌ {pnl_pct:.1f}%".ljust(7)
+                
+                pnl_usd = float(trade.get("pnl_usd") or 0)
+                pnl_str = f"${pnl_usd:+.2f}".ljust(10) if abs(pnl_usd) > 0.01 else "-".ljust(10)
+                
+                lines.append(f"{date_str}  {symbol} {price_str} {status_str} {pnl_str}")
+            except Exception as e:
+                print(f"[TRADES] Error formatting trade: {e}")
+                continue
+        
+        lines.append("```")
+        
+        # Navigation
+        kb = []
+        if page_num > 1:
+            kb.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"trades:page:{page_num - 1}"))
+        if page_num < total_pages:
+            kb.append(InlineKeyboardButton("Next ➡️", callback_data=f"trades:page:{page_num + 1}"))
+        
+        nav_kb = [kb] if kb else []
+        nav_kb.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
+        
         await update.message.reply_text(
-            "✅ No trades match that filter.",
-            parse_mode="Markdown", reply_markup=back_kb("menu:main")
+            "\n".join(lines),
+            parse_mode="Markdown", 
+            reply_markup=InlineKeyboardMarkup(nav_kb)
         )
-        return
-    
-    # Pagination
-    trades_per_page = 20
-    total_pages = (len(filtered_trades) + trades_per_page - 1) // trades_per_page
-    page_num = min(page_num, total_pages)
-    start_idx = (page_num - 1) * trades_per_page
-    end_idx = start_idx + trades_per_page
-    page_trades = filtered_trades[start_idx:end_idx]
-    
-    # Format output
-    lines = [
-        f"📊 *Trade History* — Page {page_num}/{total_pages}\n",
-        f"Total: {len(filtered_trades)} trades\n",
-        "```",
-        "Date       Symbol  Buy Price   Status     PnL",
-        "─────────────────────────────────────────────",
-    ]
-    
-    for trade in page_trades:
-        date_str = trade.get("date", "????-??-??")[:10]
-        symbol = (trade.get("symbol") or trade.get("mint", "???")[:6]).ljust(6)
-        action = trade.get("action", "?").upper()
-        buy_price = trade.get("buy_price_usd", 0)
-        price_str = f"${buy_price:.8g}".ljust(10)
-        
-        if action == "BUY":
-            status_str = "🟢 BUY "
-        else:
-            pnl_pct = trade.get("pnl_pct", 0)
-            if pnl_pct > 0:
-                status_str = f"✅ +{pnl_pct:.1f}%".ljust(7)
-            else:
-                status_str = f"❌ {pnl_pct:.1f}%".ljust(7)
-        
-        pnl_usd = trade.get("pnl_usd", 0) or 0
-        pnl_str = f"${pnl_usd:+.2f}".ljust(10) if pnl_usd else "-"
-        
-        lines.append(f"{date_str}  {symbol} {price_str} {status_str} {pnl_str}")
-    
-    lines.append("```")
-    
-    # Navigation
-    kb = []
-    if page_num > 1:
-        kb.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"trades:page:{page_num - 1}"))
-    if page_num < total_pages:
-        kb.append(InlineKeyboardButton("Next ➡️", callback_data=f"trades:page:{page_num + 1}"))
-    
-    nav_kb = [kb] if kb else []
-    nav_kb.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
-    
-    await update.message.reply_text(
-        "\n".join(lines) if lines else "No trades yet.",
-        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(nav_kb) if nav_kb else back_kb("menu:main")
-    )
+    except Exception as e:
+        print(f"[TRADES] Command error: {e}")
+        import traceback
+        traceback.print_exc()
+        await update.message.reply_text(
+            "❌ Error loading trade history. Please try again.",
+            parse_mode="Markdown", 
+            reply_markup=back_kb("menu:main")
+        )
 
 
 async def cmd_research_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
