@@ -4,6 +4,8 @@ config.py
 # Runtime data
 data/
 logs/
+global_settings.json
+scanner_state.json
 
 # Python
 venv/
