@@ -1300,8 +1300,22 @@ async def execute_auto_buy(bot, uid: int, result: dict):
 
     print(f"[AUTOBUY] uid={uid} evaluating {symbol} mint={mint[:8]}.. score={score} mcap=${mcap:,.0f}", flush=True)
 
-    if not result.get("grad_buy") and score < cfg.get("min_score", 70):
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {cfg.get('min_score', 70)}", flush=True)
+    # Use auto-buy min_score, but also respect v2 tier thresholds if configured
+    min_score = cfg.get("min_score", 70)
+    ab_tier = cfg.get("buy_tier", "")
+    if ab_tier:
+        # Map tier name to user's v2 threshold
+        user_cfg = sm.get_user_settings(uid)
+        tier_map = {
+            "scouted":  user_cfg.get("alert_scouted_threshold", 50),
+            "warm":     user_cfg.get("alert_warm_threshold", 70),
+            "hot":      user_cfg.get("alert_hot_threshold", 80),
+            "ultra_hot": user_cfg.get("alert_ultra_hot_threshold", 90),
+        }
+        min_score = tier_map.get(ab_tier, min_score)
+
+    if not result.get("grad_buy") and score < min_score:
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {min_score}", flush=True)
         return
     if mcap and mcap > cfg.get("max_mcap", 500_000):
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} > max ${cfg.get('max_mcap', 500_000):,.0f}", flush=True)
@@ -2097,6 +2111,22 @@ def _autobuy_status_text(uid: int) -> str:
     spent       = cfg.get("spent_today", 0.0)
     bought      = cfg.get("bought", [])
     mode        = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
+    buy_tier    = cfg.get("buy_tier", "")
+
+    # Resolve effective min score
+    if buy_tier:
+        user_cfg = sm.get_user_settings(uid)
+        tier_map = {
+            "scouted":  user_cfg.get("alert_scouted_threshold", 50),
+            "warm":     user_cfg.get("alert_warm_threshold", 70),
+            "hot":      user_cfg.get("alert_hot_threshold", 80),
+            "ultra_hot": user_cfg.get("alert_ultra_hot_threshold", 90),
+        }
+        effective_min = tier_map.get(buy_tier, min_score)
+        tier_label = buy_tier.replace('_', ' ').title()
+        score_line = f"Buy tier: *{tier_label}* (score ≥ `{effective_min}`)"
+    else:
+        score_line = f"Min heat score: `{min_score}/100`"
 
     status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
     return (
@@ -2104,12 +2134,12 @@ def _autobuy_status_text(uid: int) -> str:
         f"Status: *{status}*\n"
         f"Mode: *{mode}*\n\n"
         f"SOL per trade: `{sol_amount} SOL`\n"
-        f"Min heat score: `{min_score}/100`\n"
+        f"{score_line}\n"
         f"Max MCap: `${max_mcap:,.0f}`\n"
         f"Daily SOL limit: `{'Unlimited ♾️' if daily_limit == 0 else str(daily_limit) + ' SOL'}`\n"
         f"Spent today: `{spent:.3f} SOL`\n"
         f"Bought today: `{len(bought)}` token(s)\n\n"
-        f"_Auto-buys fire when scanner alerts a token above your min score._"
+        f"_Auto-buys fire when scanner alerts a token meeting your tier/score._"
     )
 
 
@@ -2120,7 +2150,7 @@ def _autobuy_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(toggle_lbl,            callback_data="autobuy:toggle")],
         [InlineKeyboardButton("💰 SOL Amount",        callback_data="autobuy:set_sol"),
-         InlineKeyboardButton("🌡️ Thresholds",         callback_data="autobuy:set_score")],
+         InlineKeyboardButton("🌡️ Buy Tier",           callback_data="autobuy:set_tier")],
         [InlineKeyboardButton("🏦 Max MCap",          callback_data="autobuy:set_mcap"),
          InlineKeyboardButton("📅 Daily Limit",       callback_data="autobuy:set_daily")],
         [InlineKeyboardButton("🔄 Reset Today",       callback_data="autobuy:reset_day")],
@@ -2219,8 +2249,43 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "score_preset":
         val = int(query.data.split(":")[2])
         cfg["min_score"] = val
+        cfg["buy_tier"] = ""  # clear tier when using manual score
         set_auto_buy(uid, cfg)
         clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_tier":
+        buy_tier = cfg.get("buy_tier", "")
+        user_cfg = sm.get_user_settings(uid)
+        s_thr = user_cfg.get("alert_scouted_threshold", 50)
+        w_thr = user_cfg.get("alert_warm_threshold", 70)
+        h_thr = user_cfg.get("alert_hot_threshold", 80)
+        u_thr = user_cfg.get("alert_ultra_hot_threshold", 90)
+        cur_lbl = buy_tier.replace("_", " ").title() if buy_tier else f"Manual ({cfg.get('min_score', 70)})"
+        await query.edit_message_text(
+            "🌡️ *Set Auto-Buy Trigger Tier*\n\n"
+            "Choose which alert tier triggers auto-buy.\n"
+            "Uses your v2 heat score thresholds from /settings.\n\n"
+            f"Current: *{cur_lbl}*\n\n"
+            f"⚪ Scouted = score ≥ `{s_thr}`\n"
+            f"🟡 Warm = score ≥ `{w_thr}`\n"
+            f"🟠 Hot = score ≥ `{h_thr}`\n"
+            f"🔴 Ultra Hot = score ≥ `{u_thr}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(f"⚪ Scouted (≥{s_thr})", callback_data="autobuy:tier_pick:scouted"),
+                 InlineKeyboardButton(f"🟡 Warm (≥{w_thr})",    callback_data="autobuy:tier_pick:warm")],
+                [InlineKeyboardButton(f"🟠 Hot (≥{h_thr})",     callback_data="autobuy:tier_pick:hot"),
+                 InlineKeyboardButton(f"🔴 Ultra (≥{u_thr})",   callback_data="autobuy:tier_pick:ultra_hot")],
+                [InlineKeyboardButton("✏️ Custom Score", callback_data="autobuy:set_score")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "tier_pick":
+        tier = query.data.split(":")[2]
+        cfg["buy_tier"] = tier
+        set_auto_buy(uid, cfg)
         await _show_autobuy(query.edit_message_text, uid)
 
     elif action == "set_mcap":
