@@ -615,8 +615,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
          InlineKeyboardButton("👀 Scouted",       callback_data="scanner:watchlist"),
          InlineKeyboardButton("🏆 Top Scouts",    callback_data="scanner:topalerts")],
-        [InlineKeyboardButton("🌡️ Min Score",     callback_data="scanner:set_threshold"),
-         InlineKeyboardButton("� Channels",      callback_data="channels:menu")],
+        [InlineKeyboardButton("🌡️ Thresholds",     callback_data="scanner:set_threshold"),
+         InlineKeyboardButton("📢 Channels",      callback_data="channels:menu")],
         [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:menu")],
         [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:menu")],
         [InlineKeyboardButton("👛 Wallet",        callback_data="wallet:menu"),
@@ -2091,7 +2091,7 @@ def _autobuy_kb(uid: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(toggle_lbl,            callback_data="autobuy:toggle")],
         [InlineKeyboardButton("💰 SOL Amount",        callback_data="autobuy:set_sol"),
-         InlineKeyboardButton("🌡️ Min Score",         callback_data="autobuy:set_score")],
+         InlineKeyboardButton("🌡️ Thresholds",         callback_data="autobuy:set_score")],
         [InlineKeyboardButton("🏦 Max MCap",          callback_data="autobuy:set_mcap"),
          InlineKeyboardButton("📅 Daily Limit",       callback_data="autobuy:set_daily")],
         [InlineKeyboardButton("🔄 Reset Today",       callback_data="autobuy:reset_day")],
@@ -2735,7 +2735,7 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [
         [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
         [InlineKeyboardButton("⚙️ Customize", callback_data="heatscore:customize")],
-        [InlineKeyboardButton("🔄 Reset to Defaults", callback_data="heatscore:reset")],
+        [InlineKeyboardButton("🔄 Reset to Defaults", callback_data="heatscore:reset_confirm")],
         [InlineKeyboardButton("📊 Show Non-Defaults Only", callback_data="heatscore:show_custom")],
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
     ]
@@ -4691,7 +4691,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton(toggle_lbl,      callback_data="scanner:toggle")],
                 [InlineKeyboardButton("🌡️ Thresholds",  callback_data="scanner:set_threshold"),
-                 InlineKeyboardButton("� Channels",   callback_data="channels:menu")],
+                 InlineKeyboardButton("📢 Channels",   callback_data="channels:menu")],
                 [InlineKeyboardButton("👀 Scouted",    callback_data="scanner:watchlist"),
                  InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts")],
                 [InlineKeyboardButton("⬅️ Back",       callback_data="menu:main")],
@@ -4849,7 +4849,7 @@ async def heatscore_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             disable_web_page_preview=True
         )
     
-    elif action == "reset_confirm":
+    elif action == "reset" or action == "reset_confirm":
         # Confirm reset
         keyboard = [
             [InlineKeyboardButton("✅ Yes, Reset", callback_data="heatscore:reset_execute")],
