@@ -8532,12 +8532,17 @@ async def gte_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def _supervised_task(name: str, coro_fn, *args):
-    """Run a coroutine forever, auto-restarting on crash with backoff."""
+    """Run a coroutine forever, auto-restarting on crash with backoff.
+    If the coroutine returns cleanly (no exception), it is NOT restarted.
+    """
     import traceback
     delay = 5
     while True:
         try:
             await coro_fn(*args)
+            # Clean return — task chose to exit (e.g. disabled in config)
+            print(f"[{name}] exited cleanly", flush=True)
+            return
         except asyncio.CancelledError:
             print(f"[{name}] cancelled", flush=True)
             return
