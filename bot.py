@@ -21,6 +21,7 @@ import pumpfun
 import pumpfeed as pf
 import intelligence_tracker as intel
 import wallet_manager as wm
+import research_logger
 
 import config as _cfg
 from config import (
@@ -310,11 +311,12 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
         })
     
     config = {
-        "symbol":        symbol,
-        "buy_price_usd": buy_price_usd,
-        "initial_raw":   raw_amount,
-        "decimals":      decimals,
-        "enabled":       True,
+        "symbol":             symbol,
+        "buy_price_usd":      buy_price_usd,
+        "purchase_timestamp": time.time(),  # Track when token was purchased (for dual % tracking)
+        "initial_raw":        raw_amount,
+        "decimals":           decimals,
+        "enabled":            True,
         # Multiplier targets: sell_pct of current holdings when triggered (from user presets)
         "mult_targets":  mult_targets,
         # Market cap milestone alerts (USD)
@@ -467,6 +469,32 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
     if len(trades) > 10_000:
         trades = trades[-10_000:]
     save_trade_log(trades)
+    
+    # Log to research logger (CSV + JSON) for data analysis
+    try:
+        pnl_usd = None
+        if action == "sell" and buy_price_usd and price_usd:
+            pnl_usd = (price_usd - buy_price_usd) * token_amount
+        
+        research_logger.log_trade(
+            timestamp=record["ts"],
+            user_id=uid,
+            action=action,
+            mint=mint,
+            symbol=symbol,
+            narrative=narrative,
+            heat_score=heat_score or 0,
+            buy_price_usd=buy_price_usd or 0.0,
+            sell_price_usd=price_usd if action == "sell" else 0.0,
+            sol_amount=sol_amount or sol_received or 0.0,
+            token_amount=token_amount,
+            pnl_usd=pnl_usd,
+            pnl_pct=pnl_pct,
+            mcap_at_entry=mcap if action == "buy" else None,
+            mcap_at_exit=mcap if action == "sell" else None,
+        )
+    except Exception as e:
+        print(f"[log_trade] Research logger error: {e}")
 
 
 # ─── In-memory state ──────────────────────────────────────────────────────────
@@ -1713,8 +1741,27 @@ async def _show_portfolio(send_fn, uid: int):
                 val       = price * ui
                 total_usd += val
                 buy_price = cfg.get("buy_price_usd", 0) if cfg else 0
-                gain_pct  = ((price - buy_price) / buy_price * 100) if buy_price else 0
-                gain_str  = f" (+{gain_pct:.0f}% 🔥)" if gain_pct >= 100 else f" ({gain_pct:+.0f}%)" if buy_price else ""
+                entry_pct = ((price - buy_price) / buy_price * 100) if buy_price else 0
+                
+                # Calculate "since purchase" % — resets to 0% on each new buy
+                purchase_ts = cfg.get("purchase_timestamp", 0) if cfg else 0
+                since_pct = 0.0
+                if purchase_ts > 0:
+                    # For now, "since purchase" % is same as entry %
+                    # In future, could track separate purchase baselines per session
+                    since_pct = entry_pct
+                
+                # Format gain string with both percentages
+                if entry_pct >= 100:
+                    pct_str = f"(+{entry_pct:.0f}% from buy 🔥)"
+                elif entry_pct > 0:
+                    pct_str = f"(+{entry_pct:.0f}% from buy)"
+                elif entry_pct < 0:
+                    pct_str = f"({entry_pct:.0f}% from buy)"
+                else:
+                    pct_str = "(from buy)"
+                
+                gain_str = f" {pct_str}" if buy_price else ""
                 as_tag    = " 🤖" if cfg and cfg.get("enabled") else ""
                 lines.append(f"`{sym}`{as_tag}: {ui:,.4f} ≈ `${val:,.4f}`{gain_str}")
                 if cfg and cfg.get("enabled"):
@@ -2134,6 +2181,151 @@ async def cmd_sell(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Loading...")
     await _show_portfolio(msg.edit_text, update.effective_user.id)
+
+
+async def cmd_trades_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    View trade history with filtering.
+    Usage:
+      /trades [filter] [page]
+    Filters:
+      (none)         - All trades (latest first)
+      win            - Profitable trades only
+      loss           - Losing trades only
+      <symbol|CA>    - Filter by symbol or contract address
+      <date1:date2>  - Date range (YYYY-MM-DD:YYYY-MM-DD)
+    Examples:
+      /trades
+      /trades win
+      /trades BONK
+      /trades 2024-03-01:2024-03-05 page 2
+    """
+    trades = load_trade_log()
+    if not isinstance(trades, list):
+        trades = []
+    
+    # Parse filter arguments
+    filter_type = context.args[0].lower() if context.args else None
+    page_num = 1
+    try:
+        if len(context.args) >= 2 and context.args[-2].lower() == "page":
+            page_num = max(1, int(context.args[-1]))
+    except (ValueError, IndexError):
+        pass
+    
+    # Apply filters
+    filtered_trades = trades[:]  # Copy list
+    
+    if filter_type == "win":
+        filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) > 0 and t.get("action") == "sell"]
+    elif filter_type == "loss":
+        filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) <= 0 and t.get("action") == "sell"]
+    elif filter_type and ":" in filter_type and len(filter_type.split(":")[0]) == 10:  # Date range (YYYY-MM-DD:...)
+        try:
+            date1, date2 = filter_type.split(":")
+            filtered_trades = [
+                t for t in filtered_trades 
+                if date1 <= t.get("date", "") <= date2
+            ]
+        except Exception:
+            pass
+    elif filter_type and filter_type not in ("page", "win", "loss"):
+        # Filter by symbol or CA
+        query_lower = filter_type.lower()
+        filtered_trades = [
+            t for t in filtered_trades
+            if query_lower in t.get("symbol", "").lower() or query_lower in t.get("mint", "").lower()
+        ]
+    
+    # Sort by timestamp descending (newest first)
+    filtered_trades = sorted(filtered_trades, key=lambda t: t.get("ts", 0), reverse=True)
+    
+    if not filtered_trades:
+        await update.message.reply_text(
+            "✅ No trades match that filter.",
+            parse_mode="Markdown", reply_markup=back_kb("menu:main")
+        )
+        return
+    
+    # Pagination
+    trades_per_page = 20
+    total_pages = (len(filtered_trades) + trades_per_page - 1) // trades_per_page
+    page_num = min(page_num, total_pages)
+    start_idx = (page_num - 1) * trades_per_page
+    end_idx = start_idx + trades_per_page
+    page_trades = filtered_trades[start_idx:end_idx]
+    
+    # Format output
+    lines = [
+        f"📊 *Trade History* — Page {page_num}/{total_pages}\n",
+        f"Total: {len(filtered_trades)} trades\n",
+        "```",
+        "Date       Symbol  Buy Price   Status     PnL",
+        "─────────────────────────────────────────────",
+    ]
+    
+    for trade in page_trades:
+        date_str = trade.get("date", "????-??-??")[:10]
+        symbol = (trade.get("symbol") or trade.get("mint", "???")[:6]).ljust(6)
+        action = trade.get("action", "?").upper()
+        buy_price = trade.get("buy_price_usd", 0)
+        price_str = f"${buy_price:.8g}".ljust(10)
+        
+        if action == "BUY":
+            status_str = "🟢 BUY "
+        else:
+            pnl_pct = trade.get("pnl_pct", 0)
+            if pnl_pct > 0:
+                status_str = f"✅ +{pnl_pct:.1f}%".ljust(7)
+            else:
+                status_str = f"❌ {pnl_pct:.1f}%".ljust(7)
+        
+        pnl_usd = trade.get("pnl_usd", 0) or 0
+        pnl_str = f"${pnl_usd:+.2f}".ljust(10) if pnl_usd else "-"
+        
+        lines.append(f"{date_str}  {symbol} {price_str} {status_str} {pnl_str}")
+    
+    lines.append("```")
+    
+    # Navigation
+    kb = []
+    if page_num > 1:
+        kb.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"trades:page:{page_num - 1}"))
+    if page_num < total_pages:
+        kb.append(InlineKeyboardButton("Next ➡️", callback_data=f"trades:page:{page_num + 1}"))
+    
+    nav_kb = [kb] if kb else []
+    nav_kb.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
+    
+    await update.message.reply_text(
+        "\n".join(lines) if lines else "No trades yet.",
+        parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(nav_kb) if nav_kb else back_kb("menu:main")
+    )
+
+
+async def cmd_research_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Download research log CSV file for data analysis."""
+    csv_path = research_logger.export_csv_path()
+    
+    if not os.path.exists(csv_path) or os.path.getsize(csv_path) == 0:
+        await update.message.reply_text(
+            "📊 No research log data yet. Start trading to generate records!",
+            parse_mode="Markdown", reply_markup=back_kb("menu:main")
+        )
+        return
+    
+    try:
+        with open(csv_path, "rb") as f:
+            await update.message.reply_document(
+                document=f,
+                filename="research_log.csv",
+                caption="📊 *Research Log — Trading History*\n\nColumns: timestamp, user_id, action, mint, symbol, narrative, heat_score, prices, amounts, PnL"
+            )
+    except Exception as e:
+        await update.message.reply_text(
+            f"❌ Error downloading file: {e}",
+            parse_mode="Markdown", reply_markup=back_kb("menu:main")
+        )
 
 
 async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -7883,6 +8075,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("buy",        cmd_buy))
     app.add_handler(CommandHandler("sell",       cmd_sell))
     app.add_handler(CommandHandler("portfolio",  cmd_portfolio))
+    app.add_handler(CommandHandler("trades",     cmd_trades_history))
+    app.add_handler(CommandHandler("research_log", cmd_research_log))
     app.add_handler(CommandHandler("autosell",   cmd_autosell))
     app.add_handler(CommandHandler("mode",       cmd_mode))
     app.add_handler(CommandHandler("alert",      cmd_alert))
@@ -7951,16 +8145,58 @@ if __name__ == "__main__":
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
-    # Background jobs
-    app.job_queue.run_repeating(check_price_alerts, interval=ALERT_CHECK_SECS, first=15)
-    app.job_queue.run_repeating(check_auto_sell,    interval=ALERT_CHECK_SECS, first=30)
+    # Background jobs with error handling
+    async def safe_check_price_alerts(ctx):
+        try:
+            await check_price_alerts(ctx)
+        except Exception as e:
+            print(f"[PRICE_ALERT] Critical error: {e}")
+            import traceback; traceback.print_exc()
+
+    async def safe_check_auto_sell(ctx):
+        try:
+            await check_auto_sell(ctx)
+        except Exception as e:
+            print(f"[AUTO-SELL] Critical error: {e}")
+            import traceback; traceback.print_exc()
+
+    async def safe_run_scanner(ctx):
+        try:
+            s = sc.load_state()
+            chat_ids = s.get("scan_targets", [])
+            await sc.run_scan(ctx.bot, chat_ids, on_alert=handle_scanner_autobuy)
+        except Exception as e:
+            print(f"[SCANNER] Critical error: {e}")
+            import traceback; traceback.print_exc()
+
+    app.job_queue.run_repeating(safe_check_price_alerts, interval=ALERT_CHECK_SECS, first=15)
+    app.job_queue.run_repeating(safe_check_auto_sell,    interval=ALERT_CHECK_SECS, first=30)
 
     async def run_scanner_job(ctx):
         s        = sc.load_state()
         chat_ids = s.get("scan_targets", [])
         await sc.run_scan(ctx.bot, chat_ids, on_alert=handle_scanner_autobuy)
 
-    app.job_queue.run_repeating(run_scanner_job, interval=15, first=5)
+    app.job_queue.run_repeating(safe_run_scanner, interval=15, first=5)
+
+    # Global error handler to catch unhandled exceptions
+    async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle application-level errors."""
+        print(f"[ERROR_HANDLER] Exception: {context.error}")
+        import traceback
+        if context.error:
+            traceback.print_exception(type(context.error), context.error, context.error.__traceback__)
+        # Try to notify user
+        try:
+            if update and hasattr(update, 'effective_user') and update.effective_user:
+                await context.bot.send_message(
+                    chat_id=update.effective_user.id,
+                    text="⚠️ An error occurred. The bot is back online. Please try again."
+                )
+        except:
+            pass
+
+    app.add_error_handler(error_handler)
 
     print("@DigitalDegenX_Bot running...")
     app.run_polling()

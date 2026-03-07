@@ -9,28 +9,24 @@ import json
 import time
 import os
 import requests
+from config import (
+    WATCHER_SIGNAL_WEIGHTS,
+    WATCHER_ALERT_THRESHOLD_HIGH,
+    WATCHER_ALERT_THRESHOLD_MEDIUM,
+    WATCHER_ALERT_THRESHOLD_LOW,
+    WATCHER_SIGNAL_COOLDOWN_SECS,
+    WATCHER_MIN_BASELINE_CYCLES,
+)
 
 WATCHER_STATE_FILE = os.path.join("data", "portfolio_watcher_state.json")
 
-# Signal weights (confidence multipliers)
-SIGNAL_WEIGHTS = {
-    "dev_movement": 3.0,      # Extremely high confidence
-    "whale_exit": 2.5,         # High confidence
-    "liquidity_drain": 2.0,    # Solid signal
-    "buy_sell_flip": 1.5,      # Moderate signal
-    "volume_collapse": 1.0,    # Weak signal
-}
-
-# Alert thresholds
-ALERT_THRESHOLD_HIGH = 3.0
-ALERT_THRESHOLD_MEDIUM = 2.0
-ALERT_THRESHOLD_LOW = 1.0
-
-# Cooldown: don't re-alert same signal on same token within 5 minutes
-SIGNAL_COOLDOWN_SECS = 300
-
-# Minimum cycles before alerting (allow baseline establishment)
-MIN_CYCLES_BASELINE = 3
+# Local aliases for backward compatibility
+SIGNAL_WEIGHTS = WATCHER_SIGNAL_WEIGHTS
+ALERT_THRESHOLD_HIGH = WATCHER_ALERT_THRESHOLD_HIGH
+ALERT_THRESHOLD_MEDIUM = WATCHER_ALERT_THRESHOLD_MEDIUM
+ALERT_THRESHOLD_LOW = WATCHER_ALERT_THRESHOLD_LOW
+SIGNAL_COOLDOWN_SECS = WATCHER_SIGNAL_COOLDOWN_SECS
+MIN_CYCLES_BASELINE = WATCHER_MIN_BASELINE_CYCLES
 
 
 def _load_state() -> dict:
