@@ -2597,32 +2597,38 @@ async def intel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    s = sc.load_state()
-    s["scanning"] = True
-    targets = s.get("scan_targets", [])
-    if uid not in targets:
-        targets.append(uid)
-    s["scan_targets"] = targets
-    sc.save_state(s)
-    
-    # Get user's alert thresholds from new v2 settings
-    user_settings = sm.get_user_settings(uid)
-    warm_threshold = user_settings.get("alert_warm_threshold", 70)
-    
-    await update.message.reply_text(
-        f"🟢 *Scout is live!*\n\n"
-        f"Scanning pump.fun + DexScreener every 15 seconds.\n"
-        f"Alerts fire at: WARM ≥ {warm_threshold}, HOT ≥ {user_settings.get('alert_hot_threshold', 80)}, ULTRA ≥ {user_settings.get('alert_ultra_hot_threshold', 90)}\n\n"
-        f"Edit thresholds: /customize or use menu below.\n\n"
-        f"Use /stopscan to pause your scout.",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
-            InlineKeyboardButton("⚙️ Settings",     callback_data="scanner:set_threshold"),
-            InlineKeyboardButton("👀 Scouted",      callback_data="scanner:watchlist"),
-            InlineKeyboardButton("🏆 Top Scouts",   callback_data="scanner:topalerts"),
-        ]])
-    )
+    try:
+        s = sc.load_state()
+        s["scanning"] = True
+        targets = s.get("scan_targets", [])
+        if uid not in targets:
+            targets.append(uid)
+        s["scan_targets"] = targets
+        sc.save_state(s)
+        
+        # Get user's alert thresholds from new v2 settings
+        user_settings = sm.get_user_settings(uid)
+        warm_threshold = user_settings.get("alert_warm_threshold", 70)
+        
+        await update.message.reply_text(
+            f"🟢 *Scout is live!*\n\n"
+            f"Scanning pump.fun + DexScreener every 15 seconds.\n"
+            f"Alerts fire at: WARM ≥ {warm_threshold}, HOT ≥ {user_settings.get('alert_hot_threshold', 80)}, ULTRA ≥ {user_settings.get('alert_ultra_hot_threshold', 90)}\n\n"
+            f"Edit thresholds: /customize or use menu below.\n\n"
+            f"Use /stopscan to pause your scout.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
+                InlineKeyboardButton("⚙️ Settings",     callback_data="scanner:set_threshold"),
+                InlineKeyboardButton("👀 Scouted",      callback_data="scanner:watchlist"),
+                InlineKeyboardButton("🏆 Top Scouts",   callback_data="scanner:topalerts"),
+            ]])
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[CMD_SCAN ERROR] {e}\n{tb}", flush=True)
+        await update.message.reply_text(f"Error in /scan: {e}")
 
 
 async def cmd_stopscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2727,25 +2733,30 @@ async def cmd_settings(update: Update, context: ContextTypes.DEFAULT_TYPE):
     Allows inline adjustment via buttons.
     """
     user_id = update.effective_user.id
-    
-    # Show formatted settings
-    settings_text = sm.format_settings_display(user_id, compact=False)
-    
-    # Create keyboard with preset buttons + customize option
-    keyboard = [
-        [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
-        [InlineKeyboardButton("⚙️ Customize", callback_data="heatscore:customize")],
-        [InlineKeyboardButton("🔄 Reset to Defaults", callback_data="heatscore:reset_confirm")],
-        [InlineKeyboardButton("📊 Show Non-Defaults Only", callback_data="heatscore:show_custom")],
-        [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
-    ]
-    
-    await update.message.reply_text(
-        settings_text,
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        disable_web_page_preview=True
-    )
+    try:
+        # Show formatted settings
+        settings_text = sm.format_settings_display(user_id, compact=False)
+        
+        # Create keyboard with preset buttons + customize option
+        keyboard = [
+            [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
+            [InlineKeyboardButton("⚙️ Customize", callback_data="heatscore:customize")],
+            [InlineKeyboardButton("🔄 Reset to Defaults", callback_data="heatscore:reset_confirm")],
+            [InlineKeyboardButton("📊 Show Non-Defaults Only", callback_data="heatscore:show_custom")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+        ]
+        
+        await update.message.reply_text(
+            settings_text,
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            disable_web_page_preview=True
+        )
+    except Exception as e:
+        import traceback
+        tb = traceback.format_exc()
+        print(f"[CMD_SETTINGS ERROR] {e}\n{tb}", flush=True)
+        await update.message.reply_text(f"Error in /settings: {e}")
 
 
 async def cmd_presets(update: Update, context: ContextTypes.DEFAULT_TYPE):
