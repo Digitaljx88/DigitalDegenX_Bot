@@ -2841,6 +2841,87 @@ async def cmd_customize(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /stats — Show your scout performance analytics by alert tier.
+    """
+    user_id = update.effective_user.id
+    
+    # Get today's log
+    try:
+        log = sc.load_log()
+    except Exception:
+        log = []
+    
+    # Filter for this user's alerts (if logging includes user_id, otherwise show global)
+    # For now, show global stats with breakdown by alert tier
+    stats_by_tier = {
+        "ULTRA_HOT (90+)": {"total": 0, "profitable": 0},
+        "HOT (80-89)": {"total": 0, "profitable": 0},
+        "WARM (70-79)": {"total": 0, "profitable": 0},
+        "SCOUTED (50-69)": {"total": 0, "profitable": 0},
+    }
+    
+    for entry in log:
+        score = entry.get("score", 0)
+        
+        if score >= 90:
+            tier = "ULTRA_HOT (90+)"
+        elif score >= 80:
+            tier = "HOT (80-89)"
+        elif score >= 70:
+            tier = "WARM (70-79)"
+        elif score >= 50:
+            tier = "SCOUTED (50-69)"
+        else:
+            continue
+        
+        stats_by_tier[tier]["total"] += 1
+        # entries would have PnL info in production
+        # For now just count total
+    
+    # Get current settings
+    try:
+        user_cfg = settings_manager.get_user_settings(user_id)
+        current_preset = "Custom"
+        for preset_name, preset_cfg in _cfg.SCOUT_PRESETS.items():
+            if all(user_cfg.get(k) == v for k, v in preset_cfg.get("overrides", {}).items()):
+                current_preset = preset_cfg.get("name", preset_name)
+                break
+    except Exception:
+        current_preset = "Default"
+    
+    lines = [
+        "*📊 Scout Performance Analytics*\n",
+        f"Current Preset: {current_preset}\n",
+        "*Today's Alerts:*\n",
+    ]
+    
+    total_alerts = sum(s["total"] for s in stats_by_tier.values())
+    if total_alerts == 0:
+        lines.append("No alerts fired today yet.\n")
+    else:
+        for tier, stats in stats_by_tier.items():
+            if stats["total"] > 0:
+                pct = (stats["total"] / total_alerts) * 100
+                lines.append(f"{tier}: `{stats['total']} alerts` ({pct:.0f}%)")
+    
+    lines.extend([
+        "\nℹ️ _Full PnL tracking coming soon_",
+        "\nUse `/settings` to adjust heatwave thresholds or `/presets` to switch strategies.",
+    ])
+    
+    await update.message.reply_text(
+        "\n".join(lines),
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📋 View Settings", callback_data="heatscore:show")],
+            [InlineKeyboardButton("🎯 Quick Presets", callback_data="heatscore:presets")],
+            [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+        ])
+    )
+
+
 # ─── Wallet commands ──────────────────────────────────────────────────────────
 
 async def cmd_wallet(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -9043,6 +9124,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("settings",   cmd_settings))
     app.add_handler(CommandHandler("presets",    cmd_presets))
     app.add_handler(CommandHandler("customize",  cmd_customize))
+    app.add_handler(CommandHandler("stats",      cmd_stats))
     app.add_handler(CommandHandler("wallet",     cmd_wallet))
     app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
     app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))

@@ -992,7 +992,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         if not (MCAP_MIN <= mcap <= MCAP_MAX):
             continue
 
-        # Fetch RugCheck and score
+        # Fetch RugCheck and score (use v1 for logging/caching, v2 for alerts)
         rc     = fetch_rugcheck(mint)
         result = calculate_heat_score(token, rc)
 
@@ -1025,15 +1025,50 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
 
         mark_seen_token(mint)
 
-        # Watchlist (50-69): add to watchlist AND send a scouted push notification
-        if 50 <= score < 70:
+        # Now determine which users get alerts using their v2 settings
+        # For each user, get their alert thresholds and check if token qualifies
+        user_scores = {}  # cache v2 scores per user
+        user_tiers = {}   # cache tier classification per user
+        
+        for uid in chat_ids:
+            # Get user's v2 settings
+            try:
+                user_cfg = settings_manager.get_user_settings(uid)
+                scouted_threshold = user_cfg.get("alert_scouted_threshold", 50)
+                warm_threshold = user_cfg.get("alert_warm_threshold", 70)
+                hot_threshold = user_cfg.get("alert_hot_threshold", 80)
+                ultra_hot_threshold = user_cfg.get("alert_ultra_hot_threshold", 90)
+            except Exception:
+                # Fallback if settings_manager has issues
+                scouted_threshold, warm_threshold, hot_threshold, ultra_hot_threshold = 50, 70, 80, 90
+            
+            user_scores[uid] = (scouted_threshold, warm_threshold, hot_threshold, ultra_hot_threshold)
+            
+            # Classify into tier
+            if score >= ultra_hot_threshold:
+                user_tiers[uid] = "ULTRA_HOT"
+            elif score >= hot_threshold:
+                user_tiers[uid] = "HOT"
+            elif score >= warm_threshold:
+                user_tiers[uid] = "WARM"
+            elif score >= scouted_threshold:
+                user_tiers[uid] = "SCOUTED"
+            else:
+                user_tiers[uid] = None  # Below user's threshold
+
+        # Separate scouted from hot alerts
+        scouted_uids = [uid for uid, tier in user_tiers.items() if tier == "SCOUTED"]
+        hot_uids = [uid for uid, tier in user_tiers.items() if tier in ("HOT", "WARM", "ULTRA_HOT")]
+
+        # ─── Send SCOUTED alerts ───────────────────────────────────────────
+        if scouted_uids or (alert_channel and (score >= 50)):
             add_to_watchlist(mint, {
                 "name": result["name"], "symbol": result["symbol"],
                 "score": score, "mcap": mcap, "mint": mint,
                 "ts": time.time(),
             })
-            # Push a 👀 SCOUTED alert to every user who has Scout active
-            if (chat_ids or alert_channel) and cooldown_ok(mint):
+            
+            if (scouted_uids or alert_channel) and cooldown_ok(mint):
                 mark_alerted(mint)
                 log = load_log()
                 for e in reversed(log):
@@ -1053,7 +1088,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                      InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
                      InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
                 ])
-                for uid in chat_ids:
+                for uid in scouted_uids:
                     try:
                         await bot.send_message(
                             chat_id=uid, text=scout_msg,
@@ -1068,7 +1103,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                             )
                         except Exception as e:
                             print(f"[SCANNER] scouted DM error uid={uid}: {e}", flush=True)
-                if alert_channel:
+                if alert_channel and score >= 50:
                     channel_scout_kb = InlineKeyboardMarkup([
                         [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
                          InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
@@ -1087,15 +1122,11 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                         await on_alert(bot, result)
                     except Exception:
                         pass
-            continue  # scouted tokens handled; skip the 70+ hot-alert path
 
-        # Alert threshold (70+) — check per-user min score, respect global cooldown
-        # Find which users this token qualifies for
-        eligible_uids = [uid for uid in chat_ids if score >= get_user_min_score(uid)]
+        # ─── Send HOT alerts (70+) ──────────────────────────────────────────
+        should_alert_hot = (hot_uids or alert_channel) and cooldown_ok(mint)
 
-        should_alert = (eligible_uids or alert_channel) and cooldown_ok(mint)
-
-        if should_alert:
+        if should_alert_hot:
             mark_alerted(mint)
 
             # Update log entry
@@ -1117,7 +1148,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                  InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
                  InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
             ])
-            for uid in eligible_uids:
+            for uid in hot_uids:
                 try:
                     await bot.send_message(
                         chat_id=uid, text=msg,
@@ -1134,7 +1165,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                         print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
 
             # Post to alert channel (URL buttons only — callback buttons don't work in channels)
-            if alert_channel:
+            if alert_channel and score >= 70:  # Channel uses default 70 threshold
                 channel_kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
                      InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
