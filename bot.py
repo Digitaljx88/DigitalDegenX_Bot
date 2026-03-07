@@ -606,10 +606,8 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("🌡️ Threshold",     callback_data="scanner:set_threshold"),
          InlineKeyboardButton("� Channels",      callback_data="channels:menu"),
          InlineKeyboardButton("⚙️ Alerts",        callback_data="alert_prefs:menu")],
-        [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:toggle"),
-         InlineKeyboardButton("⚙️ Live Settings", callback_data="pumplive:menu")],
-        [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:toggle"),
-         InlineKeyboardButton("⚙️ Grad Settings", callback_data="pumpgrad:menu")],
+        [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:menu")],
+        [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:menu")],
         [InlineKeyboardButton("👛 Wallet",        callback_data="wallet:menu"),
          InlineKeyboardButton(gsl_lbl,            callback_data="gsl:menu")],
         [InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
@@ -1265,6 +1263,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     """
     cfg = get_auto_buy(uid)
     if not cfg.get("enabled"):
+        print(f"[AUTOBUY] uid={uid} skipped — not enabled", flush=True)
         return
 
     score     = result.get("total", 0)
@@ -1273,14 +1272,19 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     name      = result.get("name", symbol)
     mcap      = result.get("mcap", 0)
 
+    print(f"[AUTOBUY] uid={uid} evaluating {symbol} mint={mint[:8]}.. score={score} mcap=${mcap:,.0f}", flush=True)
+
     if score < cfg.get("min_score", 70):
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {cfg.get('min_score', 70)}", flush=True)
         return
     if mcap and mcap > cfg.get("max_mcap", 500_000):
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} > max ${cfg.get('max_mcap', 500_000):,.0f}", flush=True)
         return
 
     cfg = _ab_reset_day_if_needed(cfg)
 
     if mint in cfg.get("bought", []):
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — already bought today", flush=True)
         return  # already bought this token today
 
     sol_amount  = cfg.get("sol_amount", 0.1)
@@ -1301,6 +1305,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         return
 
     mode = get_mode(uid)
+    print(f"[AUTOBUY] uid={uid} proceeding with {symbol} in {mode} mode — {sol_amount} SOL", flush=True)
 
     # ── Paper auto-buy ─────────────────────────────────────────────────────────
     if mode == "paper":
@@ -1437,13 +1442,17 @@ async def execute_auto_buy(bot, uid: int, result: dict):
 
 async def handle_scanner_autobuy(bot, result: dict):
     """Called by run_scan when a token hits the alert threshold."""
+    import traceback
     s        = sc.load_state()
     chat_ids = s.get("scan_targets", [])
+    sym = result.get("symbol", "?")
+    print(f"[AUTOBUY] scanner alert fired for {sym} — targets={chat_ids}", flush=True)
     for uid in chat_ids:
         try:
             await execute_auto_buy(bot, uid, result)
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[AUTOBUY] execute_auto_buy error uid={uid}: {e}", flush=True)
+            traceback.print_exc()
 
 
 # ─── Trade execution (shared) ─────────────────────────────────────────────────
@@ -8522,17 +8531,34 @@ async def gte_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ─── Bot command list ─────────────────────────────────────────────────────────
 
 
+async def _supervised_task(name: str, coro_fn, *args):
+    """Run a coroutine forever, auto-restarting on crash with backoff."""
+    import traceback
+    delay = 5
+    while True:
+        try:
+            await coro_fn(*args)
+        except asyncio.CancelledError:
+            print(f"[{name}] cancelled", flush=True)
+            return
+        except Exception as e:
+            print(f"[{name}] CRASHED: {e} — restarting in {delay}s", flush=True)
+            traceback.print_exc()
+            await asyncio.sleep(delay)
+            delay = min(delay * 2, 120)
+
+
 async def post_init(app):
     # Inject auto-buy callback into pumpfeed (avoids circular import)
     pf.set_grad_autobuy_fn(execute_auto_buy)
-    # Start pump.fun live feed WebSocket listener as background task
-    asyncio.create_task(pf.run_pumpfeed(app.bot))
+    # Start pump.fun live feed WebSocket listener (supervised, auto-restarts)
+    asyncio.create_task(_supervised_task("PUMPFEED", pf.run_pumpfeed, app.bot))
     # Poll pump.fun API for graduated tokens → pumpgrad DM notifications
-    asyncio.create_task(pf.run_gradwatch(app.bot))
+    asyncio.create_task(_supervised_task("GRADWATCH", pf.run_gradwatch, app.bot))
     # Monitor portfolio tokens for crash signals (distribution watcher)
-    asyncio.create_task(pf.run_portfolio_watch(app.bot))
+    asyncio.create_task(_supervised_task("PORTFOLIO_WATCH", pf.run_portfolio_watch, app.bot))
     # Monitor blockchain for brand new token launches (early hunter)
-    asyncio.create_task(pf.run_launch_hunter(app.bot))
+    asyncio.create_task(_supervised_task("LAUNCH_HUNTER", pf.run_launch_hunter, app.bot))
 
     await app.bot.set_my_commands([
         BotCommand("start",      "Launch the bot"),

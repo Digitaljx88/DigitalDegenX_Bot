@@ -10,7 +10,9 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import time
+import traceback
 import requests
 import websockets
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
@@ -72,28 +74,68 @@ DEFAULT_FILTERS = {
     "blocked_wallets":     [],    # never notify
 }
 
-# ─── State helpers ─────────────────────────────────────────────────────────────
+# ─── State helpers (thread-safe with in-memory cache) ──────────────────────────
+
+_state_lock  = threading.Lock()
+_state_cache: dict | None = None
+_state_dirty = False
+
 
 def load_state() -> dict:
-    try:
-        with open(STATE_FILE) as f:
-            s = json.load(f)
-        # Migrate old list-format to dict-format
-        if isinstance(s.get("subscribers"), list):
-            old = s["subscribers"]
-            s["subscribers"] = {
-                str(uid): {"active": True, "filters": dict(DEFAULT_FILTERS)}
-                for uid in old
-            }
-            save_state(s)
-        return s
-    except (FileNotFoundError, json.JSONDecodeError):
-        return {"subscribers": {}, "seen": {}}
+    global _state_cache
+    with _state_lock:
+        if _state_cache is not None:
+            return _state_cache
+        try:
+            with open(STATE_FILE) as f:
+                s = json.load(f)
+            # Migrate old list-format to dict-format
+            if isinstance(s.get("subscribers"), list):
+                old = s["subscribers"]
+                s["subscribers"] = {
+                    str(uid): {"active": True, "filters": dict(DEFAULT_FILTERS)}
+                    for uid in old
+                }
+                _state_cache = s
+                _flush_state_locked()
+            _state_cache = s
+            return s
+        except (FileNotFoundError, json.JSONDecodeError):
+            _state_cache = {"subscribers": {}, "seen": {}}
+            return _state_cache
 
 
 def save_state(s: dict):
-    with open(STATE_FILE, "w") as f:
-        json.dump(s, f, indent=2)
+    global _state_cache, _state_dirty
+    with _state_lock:
+        _state_cache = s
+        _state_dirty = True
+
+
+def _flush_state_locked():
+    """Write cache to disk. Must be called while holding _state_lock."""
+    global _state_dirty
+    if _state_cache is not None:
+        try:
+            with open(STATE_FILE, "w") as f:
+                json.dump(_state_cache, f, indent=2)
+            _state_dirty = False
+        except Exception as e:
+            print(f"[PUMPFEED] state flush error: {e}", flush=True)
+
+
+def flush_state():
+    """Flush cached state to disk (called periodically)."""
+    with _state_lock:
+        if _state_dirty:
+            _flush_state_locked()
+
+
+def _state_cache_update(s: dict):
+    """Update cache and mark dirty. Must be called while holding _state_lock."""
+    global _state_cache, _state_dirty
+    _state_cache = s
+    _state_dirty = True
 
 
 def get_alert_channel(channel_type: str = "main"):
@@ -526,12 +568,14 @@ async def _handle_token(bot: Bot, token: dict):
     if not mint:
         return
 
-    s = load_state()
-    _prune_seen(s)
-    if mint in s.get("seen", {}):
-        return
-    s.setdefault("seen", {})[mint] = time.time()
-    save_state(s)
+    # Atomic dedup check + mark seen
+    with _state_lock:
+        s = _state_cache or load_state()
+        _prune_seen(s)
+        if mint in s.get("seen", {}):
+            return
+        s.setdefault("seen", {})[mint] = time.time()
+        _state_cache_update(s)
 
     subscribers = s.get("subscribers", {})
     active_subs = [
@@ -580,8 +624,8 @@ async def _handle_token(bot: Bot, token: dict):
                 reply_markup=kb,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[PUMPLIVE] DM send error uid={uid}: {e}", flush=True)
 
     # Post to pump live alert channel (URL-only keyboard — callbacks don't work in channels)
     if channel:
@@ -596,8 +640,8 @@ async def _handle_token(bot: Bot, token: dict):
                 parse_mode="Markdown", reply_markup=channel_kb,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[PUMPLIVE] channel send error ch={channel}: {e}", flush=True)
 
 
 # ─── Graduation (100% bonding curve) subscriber state ─────────────────────────
@@ -918,12 +962,14 @@ async def _handle_grad_token(bot: Bot, token: dict):
     if not mint:
         return
 
-    s = load_state()
-    _prune_grad_seen(s)
-    if mint in s.get("grad_seen", {}):
-        return
-    s.setdefault("grad_seen", {})[mint] = time.time()
-    save_state(s)
+    # Atomic dedup check + mark seen
+    with _state_lock:
+        s = _state_cache or load_state()
+        _prune_grad_seen(s)
+        if mint in s.get("grad_seen", {}):
+            return
+        s.setdefault("grad_seen", {})[mint] = time.time()
+        _state_cache_update(s)
 
     grad_subs = s.get("grad_subscribers", {})
     active_subs = [
@@ -1000,8 +1046,8 @@ async def _handle_grad_token(bot: Bot, token: dict):
                 reply_markup=kb,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[PUMPGRAD WS] DM send error uid={uid}: {e}", flush=True)
         # Auto-buy on graduation if enabled
         if grad_subs[str(uid)].get("auto_buy") and _grad_autobuy_fn:
             result = {
@@ -1014,8 +1060,9 @@ async def _handle_grad_token(bot: Bot, token: dict):
             }
             try:
                 await _grad_autobuy_fn(bot, uid, result)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[PUMPGRAD WS] autobuy error uid={uid} mint={mint}: {e}", flush=True)
+                traceback.print_exc()
 
     # Post to pump grad alert channel (URL-only keyboard — callbacks don't work in channels)
     if grad_channel:
@@ -1030,8 +1077,8 @@ async def _handle_grad_token(bot: Bot, token: dict):
                 parse_mode="Markdown", reply_markup=channel_kb,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[PUMPGRAD WS] channel send error ch={grad_channel}: {e}", flush=True)
 
 
 # ─── Graduation polling (pump.fun API) ────────────────────────────────────────
@@ -1075,12 +1122,14 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
     if not mint:
         return
 
-    s = load_state()
-    _prune_grad_seen(s)
-    if mint in s.get("grad_seen", {}):
-        return
-    s.setdefault("grad_seen", {})[mint] = time.time()
-    save_state(s)
+    # Atomic dedup check + mark seen
+    with _state_lock:
+        s = _state_cache or load_state()
+        _prune_grad_seen(s)
+        if mint in s.get("grad_seen", {}):
+            return
+        s.setdefault("grad_seen", {})[mint] = time.time()
+        _state_cache_update(s)
 
     grad_subs = s.get("grad_subscribers", {})
     active_subs = [
@@ -1149,8 +1198,8 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
                 reply_markup=kb,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[PUMPGRAD REST] DM send error uid={uid}: {e}", flush=True)
         # Auto-buy on graduation if enabled
         if grad_subs[str(uid)].get("auto_buy") and _grad_autobuy_fn:
             result = {
@@ -1163,8 +1212,9 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
             }
             try:
                 await _grad_autobuy_fn(bot, uid, result)
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[PUMPGRAD REST] autobuy error uid={uid} mint={mint}: {e}", flush=True)
+                traceback.print_exc()
 
     # Post to pump grad alert channel (URL-only keyboard — callbacks don't work in channels)
     if grad_channel:
@@ -1179,8 +1229,8 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
                 parse_mode="Markdown", reply_markup=channel_kb,
                 disable_web_page_preview=True,
             )
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[PUMPGRAD REST] channel send error ch={grad_channel}: {e}", flush=True)
 
 
 async def run_gradwatch(bot: Bot):
@@ -1220,8 +1270,21 @@ async def run_gradwatch(bot: Bot):
 
 # ─── Persistent WebSocket listener ────────────────────────────────────────────
 
+async def _state_flush_loop():
+    """Periodically flush in-memory state cache to disk."""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            flush_state()
+        except Exception as e:
+            print(f"[PUMPFEED] flush error: {e}", flush=True)
+
+
 async def run_pumpfeed(bot: Bot):
     """Long-running coroutine. Auto-reconnects on error."""
+    # Start the periodic state flush loop
+    asyncio.create_task(_state_flush_loop())
+    reconnect_delay = 5
     while True:
         try:
             async with websockets.connect(
@@ -1230,6 +1293,8 @@ async def run_pumpfeed(bot: Bot):
                 ping_timeout=20,
                 open_timeout=15,
             ) as ws:
+                print("[PUMPFEED] WebSocket connected", flush=True)
+                reconnect_delay = 5  # reset on successful connect
                 # Subscribe to new token launches
                 await ws.send(json.dumps({"method": "subscribeNewToken"}))
                 # Also subscribe to migration/graduation events
@@ -1241,23 +1306,22 @@ async def run_pumpfeed(bot: Bot):
                         continue
                     tx_type = data.get("txType") or data.get("type") or ""
                     if tx_type == "create":
-                        s = load_state()
+                        s = load_state()  # reads from cache, no disk I/O
                         has_subs    = any(cfg.get("active") for cfg in s.get("subscribers", {}).values())
                         has_channel = bool(s.get("pumplive_channel"))
-                        print(f"[PUMPFEED] new token {data.get('mint','?')} subs={has_subs} ch={has_channel}", flush=True)
                         if has_subs or has_channel:
                             asyncio.create_task(_handle_token(bot, data))
                     elif tx_type in ("complete", "migration", "migrate"):
                         s = load_state()
                         has_subs    = any(cfg.get("active") for cfg in s.get("grad_subscribers", {}).values())
                         has_channel = bool(s.get("pumpgrad_channel"))
-                        print(f"[PUMPFEED] graduation {data.get('mint','?')} subs={has_subs} ch={has_channel}", flush=True)
                         if has_subs or has_channel:
                             asyncio.create_task(_handle_grad_token(bot, data))
 
         except Exception as e:
-            print(f"[PUMPFEED] WS error: {e}", flush=True)
-            await asyncio.sleep(5)
+            print(f"[PUMPFEED] WS error: {e} — reconnecting in {reconnect_delay}s", flush=True)
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 2, 60)  # exponential backoff, max 60s
 
 
 # ─── Portfolio Distribution Watcher ───────────────────────────────────────────
