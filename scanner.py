@@ -143,14 +143,15 @@ def get_alert_channel() -> str | None:
         return ch
     # Fallback: use launch channel from global_settings.json
     try:
-        gs_path = os.path.join(os.path.dirname(__file__), "data", "global_settings.json")
+        gs_path = os.path.join(DATA_DIR, "global_settings.json")
         with open(gs_path) as f:
             gs = json.load(f)
         launch_ch = gs.get("launch_alert_channel_id")
         if launch_ch:
-            return str(launch_ch) if isinstance(launch_ch, int) else launch_ch
-    except (FileNotFoundError, json.JSONDecodeError):
-        pass
+            print(f"[SCANNER] Using launch channel as scout fallback: {launch_ch}", flush=True)
+            return launch_ch  # keep original type (int or str)
+    except (FileNotFoundError, json.JSONDecodeError) as e:
+        print(f"[SCANNER] get_alert_channel fallback failed: {e}", flush=True)
     return None
 
 
