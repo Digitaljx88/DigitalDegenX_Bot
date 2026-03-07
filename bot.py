@@ -586,7 +586,7 @@ def format_pair(pair: dict) -> str:
 def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     mode      = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
     targets   = sc.load_state().get("scan_targets", [])
-    scan_lbl  = "🔕 Pause Alerts" if uid in targets else "🔔 Resume Alerts"
+    scan_lbl  = "🔕 Pause Scout" if uid in targets else "🔔 Start Scout"
     pf_lbl    = "🟢 Pump Live: ON" if pf.is_subscribed(uid) else "🔴 Pump Live: OFF"
     pg_lbl    = "🟢 Pump Grad: ON" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad: OFF"
     ab_cfg    = get_auto_buy(uid)
@@ -597,15 +597,14 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
          InlineKeyboardButton("💰 Trade",        callback_data="menu:trade"),
          InlineKeyboardButton("👜 Portfolio",    callback_data="menu:portfolio")],
-        [InlineKeyboardButton("🔔 Alerts",        callback_data="menu:alerts"),
+        [InlineKeyboardButton("🔍 Scout",         callback_data="menu:scout"),
          InlineKeyboardButton("🤖 Auto-Sell",     callback_data="menu:autosell"),
          InlineKeyboardButton(ab_lbl,             callback_data="menu:autobuy")],
         [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
-         InlineKeyboardButton("📋 Watchlist",     callback_data="scanner:watchlist"),
-         InlineKeyboardButton("🏆 Top Alerts",    callback_data="scanner:topalerts")],
-        [InlineKeyboardButton("🌡️ Threshold",     callback_data="scanner:set_threshold"),
-         InlineKeyboardButton("� Channels",      callback_data="channels:menu"),
-         InlineKeyboardButton("⚙️ Alerts",        callback_data="alert_prefs:menu")],
+         InlineKeyboardButton("👀 Scouted",       callback_data="scanner:watchlist"),
+         InlineKeyboardButton("🏆 Top Scouts",    callback_data="scanner:topalerts")],
+        [InlineKeyboardButton("🌡️ Min Score",     callback_data="scanner:set_threshold"),
+         InlineKeyboardButton("� Channels",      callback_data="channels:menu")],
         [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:menu")],
         [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:menu")],
         [InlineKeyboardButton("👛 Wallet",        callback_data="wallet:menu"),
@@ -2528,15 +2527,15 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s["scan_targets"] = targets
     sc.save_state(s)
     await update.message.reply_text(
-        "🟢 *Live Scanner Active!*\n\n"
+        "🟢 *Scout is live!*\n\n"
         "Scanning pump.fun + DexScreener every 15 seconds.\n"
         "You'll be alerted instantly when Heat Score ≥ 70/100 by default.\n\n"
-        "Use /stopscan to pause your alerts.",
+        "Use /stopscan to pause your scout.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔕 Pause Alerts", callback_data="scanner:toggle"),
-            InlineKeyboardButton("📋 Watchlist",    callback_data="scanner:watchlist"),
-            InlineKeyboardButton("🏆 Top Alerts",   callback_data="scanner:topalerts"),
+            InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
+            InlineKeyboardButton("👀 Scouted",      callback_data="scanner:watchlist"),
+            InlineKeyboardButton("🏆 Top Scouts",   callback_data="scanner:topalerts"),
         ]])
     )
 
@@ -2550,11 +2549,11 @@ async def cmd_stopscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     s["scan_targets"] = targets
     sc.save_state(s)
     await update.message.reply_text(
-        "⏸ *Alerts paused for you.*\n\nThe scanner keeps running in the background.\nUse /scan to resume your alerts.",
+        "⏸ *Scout paused.*\n\nThe scanner keeps running in the background.\nUse /scan to resume your scout.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔔 Resume Alerts", callback_data="scanner:toggle"),
-            InlineKeyboardButton("📋 Menu",          callback_data="menu:main"),
+            InlineKeyboardButton("🔔 Start Scout", callback_data="scanner:toggle"),
+            InlineKeyboardButton("📋 Menu",        callback_data="menu:main"),
         ]])
     )
 
@@ -2563,16 +2562,16 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     wl = sc.get_watchlist()
     if not wl:
         await update.message.reply_text(
-            "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here automatically as the scanner runs.",
+            "👀 *No scouted tokens yet.*\n\nTokens scoring 50–69 appear here automatically as the scanner runs.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+                InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
                 InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
             ]])
         )
         return
     items = sorted(wl.values(), key=lambda x: -x.get("ts", 0))[:20]
-    lines = ["*📋 Watchlist* — tokens scoring 50–69\n"]
+    lines = ["*👀 Scouted* — tokens scoring 50–69\n"]
     for t in items:
         lines.append(
             f"⚪ *{t['name']}* (${t['symbol']}) — {t['score']}/100\n"
@@ -2581,7 +2580,7 @@ async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "\n".join(lines), parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+            InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
             InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
         ]])
     )
@@ -2613,23 +2612,23 @@ async def cmd_topalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
     alerts = sc.get_todays_alerts()
     if not alerts:
         await update.message.reply_text(
-            "🏆 *No alerts fired today yet.*\n\nThe scanner is live — alerts will appear here as hot tokens are found.",
+            "🏆 *No scouts fired today yet.*\n\nThe scanner is live — scouts will appear here as hot tokens are found.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+                InlineKeyboardButton("👀 Scouted",   callback_data="scanner:watchlist"),
                 InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
             ]])
         )
         return
     top = sorted(alerts, key=lambda x: -x.get("timestamp", 0))[:10]
-    lines = ["*🏆 Recent Alerts Today*\n"]
+    lines = ["*🏆 Top Scouts Today*\n"]
     for i, e in enumerate(top, 1):
         label = sc.priority_label(e["score"])
         lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
     await update.message.reply_text(
         "\n".join(lines), parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+            InlineKeyboardButton("👀 Scouted",   callback_data="scanner:watchlist"),
             InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
         ]])
     )
@@ -4163,11 +4162,11 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s["scan_targets"] = targets
             sc.save_state(s)
             await query.edit_message_text(
-                "⏸ *Alerts paused for you.*\n\nScanner keeps running in the background.\nTap Resume to get alerts again.",
+                "⏸ *Scout paused.*\n\nScanner keeps running in the background.\nTap Start Scout to get alerts again.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔔 Resume Alerts", callback_data="scanner:toggle"),
-                    InlineKeyboardButton("⬅️ Menu",          callback_data="menu:main"),
+                    InlineKeyboardButton("🔔 Start Scout", callback_data="scanner:toggle"),
+                    InlineKeyboardButton("⬅️ Menu",        callback_data="menu:main"),
                 ]])
             )
         else:
@@ -4176,13 +4175,13 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s["scan_targets"] = targets
             sc.save_state(s)
             await query.edit_message_text(
-                f"🟢 *Live alerts resumed!*\n\n"
+                f"🟢 *Scout is live!*\n\n"
                 f"Scanning every 15 seconds.\n"
                 f"Alerts fire when Heat Score ≥ {sc.get_user_min_score(uid)}/100.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔕 Pause Alerts", callback_data="scanner:toggle"),
-                    InlineKeyboardButton("📋 Watchlist",    callback_data="scanner:watchlist"),
+                    InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
+                    InlineKeyboardButton("👀 Scouted",      callback_data="scanner:watchlist"),
                 ]])
             )
 
@@ -4190,16 +4189,16 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         wl = sc.get_watchlist()
         if not wl:
             await query.edit_message_text(
-                "📋 *Watchlist is empty.*\n\nTokens scoring 50–69 appear here automatically.",
+                "👀 *No scouted tokens yet.*\n\nTokens scoring 50–69 appear here automatically.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+                    InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
                     InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
                 ]])
             )
             return
         items = sorted(wl.values(), key=lambda x: -x.get("ts", 0))[:20]
-        lines = ["*📋 Watchlist* — tokens scoring 50–69\n"]
+        lines = ["*👀 Scouted* — tokens scoring 50–69\n"]
         for t in items:
             lines.append(
                 f"⚪ *{t['name']}* (${t['symbol']}) — {t['score']}/100\n"
@@ -4208,7 +4207,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "\n".join(lines), parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏆 Top Alerts", callback_data="scanner:topalerts"),
+                InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
                 InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
             ]])
         )
@@ -4217,23 +4216,23 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         alerts = sc.get_todays_alerts()
         if not alerts:
             await query.edit_message_text(
-                "🏆 *No alerts fired today yet.*\n\nThe scanner is live — alerts will appear here as tokens are found.",
+                "🏆 *No scouts fired today yet.*\n\nThe scanner is live — scouts will appear here as tokens are found.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+                    InlineKeyboardButton("👀 Scouted",   callback_data="scanner:watchlist"),
                     InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
                 ]])
             )
             return
         top   = sorted(alerts, key=lambda x: -x.get("timestamp", 0))[:10]
-        lines = ["*🏆 Recent Alerts Today*\n"]
+        lines = ["*🏆 Top Scouts Today*\n"]
         for i, e in enumerate(top, 1):
             label = sc.priority_label(e["score"])
             lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
         await query.edit_message_text(
             "\n".join(lines), parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("📋 Watchlist", callback_data="scanner:watchlist"),
+                InlineKeyboardButton("👀 Scouted",   callback_data="scanner:watchlist"),
                 InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main"),
             ]])
         )
@@ -4241,10 +4240,10 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "set_threshold":
         cur = sc.get_user_min_score(uid)
         await query.edit_message_text(
-            f"*🌡️ Alert Score Threshold*\n\n"
+            f"*🌡️ Scout Min Score*\n\n"
             f"Current: `{cur}/100`\n\n"
-            f"You'll only receive alerts for tokens scoring at or above this value.\n"
-            f"Lower = more alerts · Higher = fewer but stronger signals.",
+            f"You'll only receive scouts for tokens scoring at or above this value.\n"
+            f"Lower = more scouts · Higher = fewer but stronger signals.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("40", callback_data="scanner:threshold:40"),
@@ -4267,7 +4266,7 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         val = int(query.data.split(":")[2])
         sc.set_user_min_score(uid, val)
         await query.edit_message_text(
-            f"✅ Alert threshold set to `{val}/100`\n\nYou'll receive alerts for tokens scoring ≥ {val}.",
+            f"✅ Scout min score set to `{val}/100`\n\nYou'll receive scouts for tokens scoring ≥ {val}.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main"),
@@ -4343,6 +4342,30 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             "*⚙️ Settings*\n\n📄 Paper — virtual 10 SOL\n🔴 Live — real on-chain",
             parse_mode="Markdown", reply_markup=settings_kb(uid)
+        )
+    elif action == "scout":
+        s = sc.load_state()
+        targets = s.get("scan_targets", [])
+        cur_score = sc.get_user_min_score(uid)
+        ch = sc.get_alert_channel()
+        ch_txt = f"`{ch}`" if ch else "_Not set_"
+        status = "🟢 Active" if uid in targets else "🔴 Paused"
+        toggle_lbl = "🔕 Pause Scout" if uid in targets else "🔔 Start Scout"
+        await query.edit_message_text(
+            f"*🔍 Scout*\n\n"
+            f"Status: {status}\n"
+            f"Min Score: `{cur_score}/100`\n"
+            f"Alert Channel: {ch_txt}\n\n"
+            f"Scout monitors pump.fun for hot tokens and alerts you based on heat score.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton(toggle_lbl,      callback_data="scanner:toggle")],
+                [InlineKeyboardButton("🌡️ Min Score",  callback_data="scanner:set_threshold"),
+                 InlineKeyboardButton("� Channels",   callback_data="channels:menu")],
+                [InlineKeyboardButton("👀 Scouted",    callback_data="scanner:watchlist"),
+                 InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts")],
+                [InlineKeyboardButton("⬅️ Back",       callback_data="menu:main")],
+            ])
         )
     elif action == "mode":
         await query.edit_message_text("Select mode:", reply_markup=settings_kb(uid))
