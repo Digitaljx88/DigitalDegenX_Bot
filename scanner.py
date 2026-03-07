@@ -992,19 +992,23 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         if not (MCAP_MIN <= mcap <= MCAP_MAX):
             continue
 
-        # Fetch RugCheck and score (use v1 for logging/caching, v2 for alerts)
+        # Fetch RugCheck and score using v2 engine
         rc     = fetch_rugcheck(mint)
-        result = calculate_heat_score(token, rc)
+        result = calculate_heat_score_with_settings(token, rc)
 
         # Intelligence tracking: update narrative stats + auto-track wallets
         score = result["total"]
+        sym   = result.get("symbol", mint[:8])
+        dq    = result.get("disqualified")
+        print(f"[SCANNER] {sym} ({mint[:8]}) → score={score} dq={dq}", flush=True)
         try:
             intelligence_tracker.process_scored_token(token, rc, score)
         except Exception:
             pass
 
         # Log every scored token
-        narr_reason = result["breakdown"]["narrative"][1]
+        narr_breakdown = result["breakdown"].get("social_narrative") or result["breakdown"].get("narrative") or ("", "")
+        narr_reason = narr_breakdown[1] if isinstance(narr_breakdown, (list, tuple)) else narr_breakdown.get("reason", "")
         matched_narrative = next((n for n in NARRATIVES if n in narr_reason), "Other")
         append_log({
             "date":      datetime.now(timezone.utc).strftime("%Y-%m-%d"),
@@ -1023,12 +1027,11 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         if result["disqualified"]:
             continue
 
-        mark_seen_token(mint)
-
         # Now determine which users get alerts using their v2 settings
         # For each user, get their alert thresholds and check if token qualifies
         user_scores = {}  # cache v2 scores per user
         user_tiers = {}   # cache tier classification per user
+        any_user_qualifies = False
         
         for uid in chat_ids:
             # Get user's v2 settings
@@ -1047,14 +1050,22 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             # Classify into tier
             if score >= ultra_hot_threshold:
                 user_tiers[uid] = "ULTRA_HOT"
+                any_user_qualifies = True
             elif score >= hot_threshold:
                 user_tiers[uid] = "HOT"
+                any_user_qualifies = True
             elif score >= warm_threshold:
                 user_tiers[uid] = "WARM"
+                any_user_qualifies = True
             elif score >= scouted_threshold:
                 user_tiers[uid] = "SCOUTED"
+                any_user_qualifies = True
             else:
                 user_tiers[uid] = None  # Below user's threshold
+
+        # Only mark as seen if at least one user qualifies or score is high enough
+        if any_user_qualifies or (alert_channel and score >= 50):
+            mark_seen_token(mint)
 
         # Separate scouted from hot alerts
         scouted_uids = [uid for uid, tier in user_tiers.items() if tier == "SCOUTED"]
