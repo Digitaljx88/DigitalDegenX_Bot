@@ -60,12 +60,75 @@ def get_user_settings(user_id: int) -> Dict[str, Any]:
     # Start with defaults from config
     merged_settings = config.HEAT_SCORE_V2_DEFAULTS.copy()
     
+    # Check for old min_score setting and migrate if needed
+    if user_key not in settings_data or HEAT_SCORE_SETTINGS_KEY not in settings_data.get(user_key, {}):
+        # User has no v2 settings yet - check for old min_score migration
+        try:
+            old_min_score = migrate_min_score_to_v2(user_id)
+            if old_min_score:
+                merged_settings.update(old_min_score)
+        except Exception:
+            pass  # Silently fail if migration doesn't work
+    
     # Merge user overrides if they exist
     if user_key in settings_data:
         user_settings = settings_data[user_key].get(HEAT_SCORE_SETTINGS_KEY, {})
         merged_settings.update(user_settings)
     
     return merged_settings
+
+
+def migrate_min_score_to_v2(user_id: int) -> Optional[Dict[str, Any]]:
+    """
+    Migrate old min_score setting from scanner_state.json to v2 thresholds.
+    
+    Maps old single threshold to new tier-based thresholds:
+    - min_score < 60: aggressive (50/60/70/85)
+    - min_score 60-70: balanced (55/65/75/90)
+    - min_score 70-80: conservative (65/75/85/95)
+    - min_score >= 80: ultra-conservative (75/85/95/100)
+    
+    Args:
+        user_id: Telegram user ID
+    
+    Returns:
+        Dict with migrated v2 settings, or None if no old setting found
+    """
+    try:
+        import scanner as sc
+        old_min_score = sc.get_user_min_score(user_id)
+        
+        # Map old min_score to v2 thresholds
+        if old_min_score < 60:
+            return {
+                "alert_scouted_threshold": 50,
+                "alert_warm_threshold": 60,
+                "alert_hot_threshold": 70,
+                "alert_ultra_hot_threshold": 85,
+            }
+        elif old_min_score <= 70:
+            return {
+                "alert_scouted_threshold": 55,
+                "alert_warm_threshold": 65,
+                "alert_hot_threshold": 75,
+                "alert_ultra_hot_threshold": 90,
+            }
+        elif old_min_score <= 80:
+            return {
+                "alert_scouted_threshold": 65,
+                "alert_warm_threshold": 75,
+                "alert_hot_threshold": 85,
+                "alert_ultra_hot_threshold": 95,
+            }
+        else:
+            return {
+                "alert_scouted_threshold": 75,
+                "alert_warm_threshold": 85,
+                "alert_hot_threshold": 95,
+                "alert_ultra_hot_threshold": 100,
+            }
+    except Exception:
+        return None
 
 
 def save_user_settings(user_id: int, settings_dict: Dict[str, Any]) -> bool:

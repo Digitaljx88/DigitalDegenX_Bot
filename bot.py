@@ -2604,15 +2604,21 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         targets.append(uid)
     s["scan_targets"] = targets
     sc.save_state(s)
-    min_score = sc.get_user_min_score(uid)
+    
+    # Get user's alert thresholds from new v2 settings
+    user_settings = sm.get_user_settings(uid)
+    warm_threshold = user_settings.get("alert_warm_threshold", 70)
+    
     await update.message.reply_text(
         f"🟢 *Scout is live!*\n\n"
         f"Scanning pump.fun + DexScreener every 15 seconds.\n"
-        f"Alerting when Heat Score ≥ *{min_score}/100*.\n\n"
+        f"Alerts fire at: WARM ≥ {warm_threshold}, HOT ≥ {user_settings.get('alert_hot_threshold', 80)}, ULTRA ≥ {user_settings.get('alert_ultra_hot_threshold', 90)}\n\n"
+        f"Edit thresholds: /customize or use menu below.\n\n"
         f"Use /stopscan to pause your scout.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
+            InlineKeyboardButton("⚙️ Settings",     callback_data="scanner:set_threshold"),
             InlineKeyboardButton("👀 Scouted",      callback_data="scanner:watchlist"),
             InlineKeyboardButton("🏆 Top Scouts",   callback_data="scanner:topalerts"),
         ]])
@@ -4464,13 +4470,17 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             targets.append(uid)
             s["scan_targets"] = targets
             sc.save_state(s)
+            user_settings = sm.get_user_settings(uid)
+            warm_threshold = user_settings.get("alert_warm_threshold", 70)
+            hot_threshold = user_settings.get("alert_hot_threshold", 80)
             await query.edit_message_text(
                 f"🟢 *Scout is live!*\n\n"
                 f"Scanning every 15 seconds.\n"
-                f"Alerts fire when Heat Score ≥ {sc.get_user_min_score(uid)}/100.",
+                f"Alerts: WARM ≥ {warm_threshold} · HOT ≥ {hot_threshold}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
+                    InlineKeyboardButton("⚙️ Settings",     callback_data="scanner:set_threshold"),
                     InlineKeyboardButton("👀 Scouted",      callback_data="scanner:watchlist"),
                 ]])
             )
@@ -4528,53 +4538,66 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "set_threshold":
-        cur = sc.get_user_min_score(uid)
+        user_settings = sm.get_user_settings(uid)
+        warm = user_settings.get("alert_warm_threshold", 70)
+        hot = user_settings.get("alert_hot_threshold", 80)
+        ultra = user_settings.get("alert_ultra_hot_threshold", 90)
         await query.edit_message_text(
-            f"*🌡️ Scout Min Score*\n\n"
-            f"Current: `{cur}/100`\n\n"
-            f"You'll only receive scouts for tokens scoring at or above this value.\n"
-            f"Lower = more scouts · Higher = fewer but stronger signals.\n\n"
-            f"Tap a preset or use *✏️ Custom* to type any number (1–100).",
+            f"*🌡️ Alert Thresholds*\n\n"
+            f"🟡 WARM (70-79): `{warm}/100`\n"
+            f"🟠 HOT (80-89): `{hot}/100`\n"
+            f"🔴 ULTRA HOT (90-100): `{ultra}/100`\n\n"
+            f"Lower thresholds = more alerts · Higher = fewer but hotter signals.\n\n"
+            f"Edit individual thresholds:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("40", callback_data="scanner:threshold:40"),
-                 InlineKeyboardButton("45", callback_data="scanner:threshold:45"),
-                 InlineKeyboardButton("50", callback_data="scanner:threshold:50"),
-                 InlineKeyboardButton("55", callback_data="scanner:threshold:55")],
-                [InlineKeyboardButton("60", callback_data="scanner:threshold:60"),
-                 InlineKeyboardButton("65", callback_data="scanner:threshold:65"),
-                 InlineKeyboardButton("70", callback_data="scanner:threshold:70"),
-                 InlineKeyboardButton("75", callback_data="scanner:threshold:75")],
-                [InlineKeyboardButton("80", callback_data="scanner:threshold:80"),
-                 InlineKeyboardButton("85", callback_data="scanner:threshold:85"),
-                 InlineKeyboardButton("90", callback_data="scanner:threshold:90"),
-                 InlineKeyboardButton("100", callback_data="scanner:threshold:100")],
-                [InlineKeyboardButton("✏️ Custom", callback_data="scanner:custom_threshold")],
+                [InlineKeyboardButton("✏️ WARM", callback_data="scanner:edit_warm"),
+                 InlineKeyboardButton("✏️ HOT", callback_data="scanner:edit_hot"),
+                 InlineKeyboardButton("✏️ ULTRA", callback_data="scanner:edit_ultra")],
+                [InlineKeyboardButton("📋 Presets", callback_data="heatscore:presets")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
             ])
         )
 
-    elif action == "custom_threshold":
-        set_state(uid, waiting_for="scanner_min_score")
-        cur = sc.get_user_min_score(uid)
+    elif action == "edit_warm":
+        set_state(uid, waiting_for="scanner_warm_threshold")
+        user_settings = sm.get_user_settings(uid)
+        cur = user_settings.get("alert_warm_threshold", 70)
         await query.edit_message_text(
-            f"*✏️ Custom Scout Min Score*\n\n"
+            f"*✏️ WARM Threshold*\n\n"
             f"Current: `{cur}/100`\n\n"
-            f"Type any number between 1 and 100 and send it.",
+            f"Type a number between 5 and 100.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
             ]])
         )
-
-    elif action == "threshold":
-        val = int(query.data.split(":")[2])
-        sc.set_user_min_score(uid, val)
+    
+    elif action == "edit_hot":
+        set_state(uid, waiting_for="scanner_hot_threshold")
+        user_settings = sm.get_user_settings(uid)
+        cur = user_settings.get("alert_hot_threshold", 80)
         await query.edit_message_text(
-            f"✅ Scout min score set to `{val}/100`\n\nYou'll receive scouts for tokens scoring ≥ {val}.",
+            f"*✏️ HOT Threshold*\n\n"
+            f"Current: `{cur}/100`\n\n"
+            f"Type a number between 5 and 100.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main"),
+                InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+            ]])
+        )
+    
+    elif action == "edit_ultra":
+        set_state(uid, waiting_for="scanner_ultra_hot_threshold")
+        user_settings = sm.get_user_settings(uid)
+        cur = user_settings.get("alert_ultra_hot_threshold", 90)
+        await query.edit_message_text(
+            f"*✏️ ULTRA HOT Threshold*\n\n"
+            f"Current: `{cur}/100`\n\n"
+            f"Type a number between 5 and 100.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
             ]])
         )
 
@@ -4651,7 +4674,9 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "scout":
         s = sc.load_state()
         targets = s.get("scan_targets", [])
-        cur_score = sc.get_user_min_score(uid)
+        user_settings = sm.get_user_settings(uid)
+        warm = user_settings.get("alert_warm_threshold", 70)
+        hot = user_settings.get("alert_hot_threshold", 80)
         ch = sc.get_alert_channel()
         ch_txt = f"`{ch}`" if ch else "_Not set_"
         status = "🟢 Active" if uid in targets else "🔴 Paused"
@@ -4659,7 +4684,7 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(
             f"*🔍 Scout*\n\n"
             f"Status: {status}\n"
-            f"Min Score: `{cur_score}/100`\n"
+            f"Thresholds: WARM ≥ {warm} · HOT ≥ {hot}\n"
             f"Alert Channel: {ch_txt}\n\n"
             f"Scout monitors pump.fun for hot tokens and alerts you based on heat score.",
             parse_mode="Markdown",
@@ -7648,24 +7673,72 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
-    elif state == "scanner_min_score":
+    elif state == "scanner_warm_threshold":
         raw = text.strip()
-        if not raw.isdigit() or not (1 <= int(raw) <= 100):
+        if not raw.isdigit() or not (5 <= int(raw) <= 100):
             await update.message.reply_text(
-                "Please send a number between 1 and 100.",
+                "Please send a number between 5 and 100.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
                 ]])
             )
             return
         val = int(raw)
-        sc.set_user_min_score(uid, val)
+        user_settings = sm.get_user_settings(uid)
+        user_settings["alert_warm_threshold"] = val
+        sm.save_user_settings(uid, user_settings)
         clear_state(uid)
         await update.message.reply_text(
-            f"✅ Scout min score set to `{val}/100`\n\nYou'll receive scouts for tokens scoring ≥ {val}.",
+            f"✅ WARM threshold set to `{val}/100`\n\nYou'll receive WARM alerts for tokens scoring ≥ {val}.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main"),
+                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
+            ]])
+        )
+
+    elif state == "scanner_hot_threshold":
+        raw = text.strip()
+        if not raw.isdigit() or not (5 <= int(raw) <= 100):
+            await update.message.reply_text(
+                "Please send a number between 5 and 100.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+                ]])
+            )
+            return
+        val = int(raw)
+        user_settings = sm.get_user_settings(uid)
+        user_settings["alert_hot_threshold"] = val
+        sm.save_user_settings(uid, user_settings)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ HOT threshold set to `{val}/100`\n\nYou'll receive HOT alerts for tokens scoring ≥ {val}.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
+            ]])
+        )
+
+    elif state == "scanner_ultra_hot_threshold":
+        raw = text.strip()
+        if not raw.isdigit() or not (5 <= int(raw) <= 100):
+            await update.message.reply_text(
+                "Please send a number between 5 and 100.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+                ]])
+            )
+            return
+        val = int(raw)
+        user_settings = sm.get_user_settings(uid)
+        user_settings["alert_ultra_hot_threshold"] = val
+        sm.save_user_settings(uid, user_settings)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ ULTRA HOT threshold set to `{val}/100`\n\nYou'll receive ULTRA HOT alerts for tokens scoring ≥ {val}.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
             ]])
         )
 
