@@ -530,18 +530,33 @@ def _fetch_pumpfun_coin(mint: str) -> dict | None:
 
 
 def fetch_token_price(mint: str) -> tuple[float | None, float | None]:
-    """Returns (price_usd, mcap_usd)."""
+    """Returns (price_usd, mcap_usd). Falls back to pump.fun bonding curve."""
     try:
         pairs = requests.get(DEXSCREENER_TOKEN + mint, timeout=10).json().get("pairs") or []
         sol   = [p for p in pairs if p.get("chainId") == "solana"]
-        if not sol:
-            return None, None
-        pair  = sorted(sol, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0), reverse=True)[0]
-        price = float(pair.get("priceUsd", 0) or 0)
-        mcap  = float(pair.get("marketCap", 0) or 0)
-        return price, mcap
+        if sol:
+            pair  = sorted(sol, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0), reverse=True)[0]
+            price = float(pair.get("priceUsd", 0) or 0)
+            mcap  = float(pair.get("marketCap", 0) or 0)
+            if price:
+                return price, mcap
     except Exception:
-        return None, None
+        pass
+
+    # Fallback: pump.fun bonding curve
+    try:
+        _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+        if _bc and _bc.get("virtual_token_reserves"):
+            price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9
+            sol_usd   = pf.get_sol_price() or 150.0
+            price_usd = price_sol * sol_usd
+            coin      = _fetch_pumpfun_coin(mint)
+            mcap_usd  = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0) if coin else 0
+            return price_usd, mcap_usd
+    except Exception:
+        pass
+
+    return None, None
 
 
 def _n(v, decimals=0) -> str:
@@ -1809,6 +1824,20 @@ async def _show_portfolio(send_fn, uid: int):
                 sym       = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
                 price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
                 mcap      = float(pair.get("marketCap", 0) or 0) if pair else 0
+
+                # Fallback: pump.fun bonding curve for tokens not yet on DexScreener
+                src_tag   = ""
+                if not price_sol:
+                    _bc = pumpfun.fetch_bonding_curve_data(acc["mint"], SOLANA_RPC)
+                    if _bc and _bc.get("virtual_token_reserves"):
+                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9
+                        src_tag = " _(pump)_"
+                    if not pair:
+                        coin = _fetch_pumpfun_coin(acc["mint"])
+                        if coin:
+                            sym  = coin.get("symbol", acc["mint"][:8])
+                            mcap = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
+
                 val_sol   = price_sol * acc["ui_amount"]
                 total_sol_positions += val_sol
                 as_cfg    = as_configs.get(acc["mint"], {})
@@ -1816,7 +1845,7 @@ async def _show_portfolio(send_fn, uid: int):
                 mcap_str  = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
                 val_str   = f"{val_sol:.4f}◎" if val_sol else "unlisted"
                 lines.append("━━━━━━━━━━━━━━━━━━")
-                lines.append(f"*{sym}*{as_tag}")
+                lines.append(f"*{sym}*{as_tag}{src_tag}")
                 lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ `{val_str}`{mcap_str}")
                 token_rows.append([
                     InlineKeyboardButton(f"⚡ {sym}",  callback_data=f"qt:{acc['mint']}"),
