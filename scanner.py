@@ -15,6 +15,7 @@ import wallet_cluster
 import launch_predictor
 import intelligence_tracker
 import birdeye
+import geckoterminal
 import config as _cfg
 
 def _esc(s: str) -> str:
@@ -595,6 +596,37 @@ def score_buy_sell_pressure(token_mint: str) -> tuple[int, str]:
         return 0, f"Pressure score error: {str(e)[:40]}"
 
 
+def score_volume_trend(token_mint: str) -> tuple[int, str]:
+    """0-5 pts — volume trend acceleration (GeckoTerminal).
+    
+    Scores:
+    - 5pts: Explosive volume increase (3x+ over 4h baseline)
+    - 3pts: Strong volume increase (2x+ over 4h baseline)
+    - 1pt: Mild volume increase
+    - 0pts: Neutral or declining volume
+    """
+    try:
+        trend = geckoterminal.get_volume_trend(token_mint)
+        if trend.get("error"):
+            return 0, f"GeckoTerminal unavailable ({trend['error']})"
+        
+        intensity = trend.get("trend_intensity", 0)
+        trend_type = trend.get("trend", "STEADY")
+        score = trend.get("trend_score", 0)
+        
+        vol_1h = trend.get("vol_1h", 0)
+        vol_4h = trend.get("vol_4h", 0)
+        
+        reason = (
+            f"{trend_type} volume trend (1h: ${vol_1h:,.0f}, "
+            f"4h avg: ${vol_4h:,.0f}, intensity: {intensity:+d})"
+        )
+        
+        return max(0, score), reason
+    except Exception as e:
+        return 0, f"Volume trend error: {str(e)[:40]}"
+
+
 def calculate_heat_score(token: dict, rc: dict) -> dict:
     """
     Run the extended scoring model but return a normalized 0-100 heat score.
@@ -607,6 +639,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     wal_pts,  wal_reason  = score_watched_wallet_entry(mid_mint)
     clus_pts, clus_reason = score_cluster_boost(mid_mint)
     pres_pts, pres_reason = score_buy_sell_pressure(mid_mint)  # ← NEW: Birdeye pressure
+    trend_pts, trend_reason = score_volume_trend(mid_mint)  # ← NEW: GeckoTerminal trend
 
     wall_pts, wall_reason = score_wallets(rc)
     twit_pts, twit_reason = score_twitter(token)
@@ -624,6 +657,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         "wallet_rep": (wal_pts,  wal_reason),
         "cluster":    (clus_pts, clus_reason),
         "pressure":   (pres_pts, pres_reason),  # ← NEW: Birdeye buy/sell
+        "trend":      (trend_pts, trend_reason),  # ← NEW: GeckoTerminal OHLCV
         "wallets":    (wall_pts, wall_reason),
         "twitter":    (twit_pts, twit_reason),
         "narrative":  (narr_pts, narr_reason),
@@ -667,9 +701,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         intel_narrative_boost = 0.0
 
     # Convert the richer internal score into the documented 0-100 scale.
-    base_total = mom_pts + liq_pts + pres_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
+    base_total = mom_pts + liq_pts + pres_pts + trend_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
     raw_total = max(0.0, float(base_total + clus_pts + bund_pts + pred_pts + intel_wallet_boost + intel_narrative_boost))
-    total = max(0, min(100, int(round((raw_total / 120.0) * 100))))
+    total = max(0, min(100, int(round((raw_total / 125.0) * 100))))
 
     # Risk level (adjusted for 120pt scale)
     red_flags = []
@@ -706,6 +740,7 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
             "wallet_rep": (wal_pts,  wal_reason),
             "cluster":    (clus_pts, clus_reason),
             "pressure":   (pres_pts, pres_reason),  # ← NEW: Birdeye
+            "trend":      (trend_pts, trend_reason),  # ← NEW: GeckoTerminal
             "wallets":    (wall_pts, wall_reason),
             "twitter":    (twit_pts, twit_reason),
             "narrative":  (narr_pts, narr_reason),
