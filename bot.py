@@ -22,6 +22,7 @@ import pumpfeed as pf
 import intelligence_tracker as intel
 import wallet_manager as wm
 import research_logger
+import portfolio_alerts
 
 import config as _cfg
 from config import (
@@ -47,12 +48,10 @@ TOKEN_PROGRAM      = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
 PORTFOLIO_FILE     = os.path.join(DATA_DIR, "portfolios.json")
-ALERTS_FILE        = os.path.join(DATA_DIR, "alerts.json")
 AUTO_SELL_FILE     = os.path.join(DATA_DIR, "auto_sell.json")
 AUTO_BUY_FILE      = os.path.join(DATA_DIR, "auto_buy.json")
 TRADE_LOG_FILE     = os.path.join(DATA_DIR, "trade_log.json")
 GLOBAL_SETTINGS_FILE = os.path.join(DATA_DIR, "global_settings.json")
-ALERT_PREFS_FILE   = os.path.join(DATA_DIR, "alert_prefs.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -125,51 +124,7 @@ def save_wallet_key(new_key: str):
 
 # ── Price alerts ──────────────────────────────────────────────────────────────
 
-def load_alerts() -> dict:   return _load(ALERTS_FILE)
-def save_alerts(d: dict):    _save(ALERTS_FILE, d)
-
-def get_alerts(uid: int) -> list:
-    return load_alerts().get(str(uid), [])
-
-def add_alert(uid: int, mint: str, symbol: str, target: float, direction: str):
-    a = load_alerts()
-    a.setdefault(str(uid), []).append(
-        {"mint": mint, "symbol": symbol, "target": target, "direction": direction}
-    )
-    save_alerts(a)
-
-def remove_alert(uid: int, index: int):
-    a = load_alerts()
-    key = str(uid)
-    if key in a and 0 <= index < len(a[key]):
-        a[key].pop(index)
-        save_alerts(a)
-
-# ── Alert preferences ─────────────────────────────────────────────────────────
-
-def load_alert_prefs() -> dict:   return _load(ALERT_PREFS_FILE)
-def save_alert_prefs(d: dict):    _save(ALERT_PREFS_FILE, d)
-
-def get_alert_prefs(uid: int) -> dict:
-    """Get alert preferences with defaults."""
-    prefs = load_alert_prefs().get(str(uid), {})
-    defaults = {
-        "price_alerts": True,
-        "crash_signals": True,
-        "liquidity_drain": True,
-        "whale_activity": True,
-        "portfolio_loss": True,
-        "pump_live": True,
-        "pump_grad": True,
-        "mcap_milestones": True,
-    }
-    return {**defaults, **prefs}
-
-def set_alert_pref(uid: int, pref_type: str, enabled: bool):
-    """Toggle a specific alert preference."""
-    prefs = load_alert_prefs()
-    prefs.setdefault(str(uid), {})[pref_type] = enabled
-    save_alert_prefs(prefs)
+# ── Portfolio alert milestones (automatic mcap tracking) ─────────────────────
 
 # ── Auto-sell configs ─────────────────────────────────────────────────────────
 
@@ -645,18 +600,6 @@ def trade_kb() -> InlineKeyboardMarkup:
     ])
 
 
-def alerts_kb(uid: int) -> InlineKeyboardMarkup:
-    rows = []
-    for i, a in enumerate(get_alerts(uid)):
-        arrow = "↑" if a["direction"] == "above" else "↓"
-        rows.append([InlineKeyboardButton(
-            f"❌ ${a['symbol']} {arrow} ${a['target']}", callback_data=f"alert:del:{i}"
-        )])
-    rows.append([InlineKeyboardButton("➕ New Alert", callback_data="alert:new")])
-    rows.append([InlineKeyboardButton("⬅️ Back",      callback_data="menu:main")])
-    return InlineKeyboardMarkup(rows)
-
-
 def autosell_list_kb(uid: int) -> InlineKeyboardMarkup:
     """List all tokens with auto-sell configs."""
     configs = load_auto_sell().get(str(uid), {})
@@ -902,51 +845,6 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
 
 
 # ─── Background monitoring ────────────────────────────────────────────────────
-
-async def check_price_alerts(context: ContextTypes.DEFAULT_TYPE):
-    """Check regular price alerts (above/below)."""
-    alerts_data = load_alerts()
-    if not alerts_data:
-        return
-    triggered: dict[str, list[int]] = {}
-    for uid_str, user_alerts in alerts_data.items():
-        to_remove = []
-        for i, alert in enumerate(user_alerts):
-            price, _ = fetch_token_price(alert["mint"])
-            if price is None:
-                continue
-            hit = (
-                (alert["direction"] == "above" and price >= alert["target"]) or
-                (alert["direction"] == "below" and price <= alert["target"])
-            )
-            if hit:
-                arrow = "↑" if alert["direction"] == "above" else "↓"
-                try:
-                    await context.bot.send_message(
-                        chat_id=int(uid_str),
-                        text=(
-                            f"🔔 *Price Alert!*\n\n"
-                            f"`${alert['symbol']}` hit `${price:.8f}`\n"
-                            f"Target: {arrow} `${alert['target']}`"
-                        ),
-                        parse_mode="Markdown",
-                        reply_markup=InlineKeyboardMarkup([[
-                            InlineKeyboardButton("📊 View", callback_data=f"quick:buy:{alert['mint']}")
-                        ]])
-                    )
-                except Exception:
-                    pass
-                to_remove.append(i)
-        if to_remove:
-            triggered[uid_str] = to_remove
-    if triggered:
-        alerts_data = load_alerts()
-        for uid_str, indices in triggered.items():
-            for i in sorted(indices, reverse=True):
-                if uid_str in alerts_data and i < len(alerts_data[uid_str]):
-                    alerts_data[uid_str].pop(i)
-        save_alerts(alerts_data)
-
 
 async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
     """Monitor positions for auto-sell triggers and mcap milestones."""
@@ -2352,111 +2250,9 @@ async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def cmd_alert(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if len(context.args) < 3:
-        await update.message.reply_text(
-            "Usage: `/alert <symbol|CA> <above|below> <price>`\n"
-            "Example: `/alert BONK above 0.00005`",
-            parse_mode="Markdown"
-        )
-        return
-    uid, query, direction = update.effective_user.id, context.args[0], context.args[1].lower()
-    if direction not in ("above", "below"):
-        await update.message.reply_text("Direction must be `above` or `below`.", parse_mode="Markdown")
-        return
-    try:
-        target = float(context.args[2])
-    except ValueError:
-        await update.message.reply_text("Invalid price.")
-        return
-    msg  = await update.message.reply_text("Setting alert...")
-    pair = fetch_sol_pair(query)
-    if not pair:
-        await msg.edit_text("Token not found.")
-        return
-    add_alert(uid, pair["baseToken"]["address"], pair["baseToken"]["symbol"], target, direction)
-    await msg.edit_text(
-        f"✅ Alert set — `${pair['baseToken']['symbol']}` {direction} `${target}`",
-        parse_mode="Markdown", reply_markup=back_kb("menu:alerts")
-    )
-
-
-async def cmd_alerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    uid    = update.effective_user.id
-    alerts = get_alerts(uid)
-    text   = f"*🔔 Alerts* — {len(alerts)} active\n\nTap ❌ to remove." if alerts else "No alerts set."
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=alerts_kb(uid))
-
-
-async def cmd_alert_prefs(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Show alert preferences customization menu."""
-    uid = update.effective_user.id
-    await alert_prefs_menu(update.message, uid)
-
-
-async def alert_prefs_menu(target, uid: int, edit=False):
-    """Display alert preferences customization menu."""
-    prefs = get_alert_prefs(uid)
-    
-    text = (
-        "*⚙️ Alert Preferences*\n\n"
-        "Choose which alerts to receive:\n\n"
-    )
-    
-    alert_types = {
-        "price_alerts": "💰 Price Alerts",
-        "crash_signals": "🔴 Crash Signals",
-        "liquidity_drain": "🚨 Liquidity Drain",
-        "whale_activity": "🐋 Whale Activity",
-        "portfolio_loss": "📊 Portfolio Loss",
-        "pump_live": "🟢 Pump Live",
-        "pump_grad": "🟢 Pump Grad",
-        "mcap_milestones": "🏁 MCap Milestones",
-    }
-    
-    buttons = []
-    for pref_type, label in alert_types.items():
-        status = "✅" if prefs.get(pref_type, True) else "❌"
-        buttons.append([InlineKeyboardButton(
-            f"{status} {label}",
-            callback_data=f"alert_prefs:toggle:{pref_type}"
-        )])
-    
-    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
-    
-    markup = InlineKeyboardMarkup(buttons)
-    
-    if edit:
-        await target.edit_message_text(text, parse_mode="Markdown", reply_markup=markup)
-    else:
-        await target.reply_text(text, parse_mode="Markdown", reply_markup=markup)
-
-
 async def cmd_autosell(update: Update, context: ContextTypes.DEFAULT_TYPE):
     msg = await update.message.reply_text("Loading auto-sell...")
     await _show_autosell(msg.edit_text, update.effective_user.id)
-
-
-async def alert_prefs_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle alert preference toggles."""
-    query = update.callback_query
-    uid = query.from_user.id
-    parts = query.data.split(":")
-    action = parts[1] if len(parts) > 1 else ""
-    
-    await query.answer()
-    
-    if action == "menu":
-        await alert_prefs_menu(query.message, uid, edit=True)
-    
-    elif action == "toggle":
-        pref_type = parts[2] if len(parts) > 2 else ""
-        if pref_type:
-            prefs = get_alert_prefs(uid)
-            current = prefs.get(pref_type, True)
-            set_alert_pref(uid, pref_type, not current)
-            await alert_prefs_menu(query.message, uid, edit=True)
-
 
 async def cmd_stoploss(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Quick access to global stop-loss settings."""
@@ -4360,12 +4156,6 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "portfolio":
         await query.edit_message_text("Loading...")
         await _show_portfolio(query.edit_message_text, uid)
-    elif action == "alerts":
-        alerts = get_alerts(uid)
-        await query.edit_message_text(
-            f"*🔔 Alerts* — {len(alerts)} active\n\nTap ❌ to remove.",
-            parse_mode="Markdown", reply_markup=alerts_kb(uid)
-        )
     elif action == "autosell":
         await _show_autosell(query.edit_message_text, uid)
     elif action == "autobuy":
@@ -4434,29 +4224,6 @@ async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_portfolio(uid)
         await query.edit_message_text("🗑️ Paper portfolio reset to `10 SOL`.",
                                        parse_mode="Markdown", reply_markup=back_kb())
-
-
-async def alert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query  = update.callback_query
-    uid    = query.from_user.id
-    parts  = query.data.split(":")
-    action = parts[1]
-    await query.answer()
-
-    if action == "new":
-        set_state(uid, waiting_for="alert_token")
-        await query.edit_message_text(
-            "🔔 *New Alert*\n\nSend token symbol or CA:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="menu:alerts")]])
-        )
-    elif action == "del":
-        remove_alert(uid, int(parts[2]))
-        alerts = get_alerts(uid)
-        await query.edit_message_text(
-            f"*🔔 Alerts* — {len(alerts)} active",
-            parse_mode="Markdown", reply_markup=alerts_kb(uid)
-        )
 
 
 async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6061,20 +5828,6 @@ async def quick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
-async def alert_dir_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query     = update.callback_query
-    uid       = query.from_user.id
-    direction = query.data.split(":")[1]
-    await query.answer()
-    set_state(uid, waiting_for="alert_price", alert_direction=direction)
-    symbol = get_state(uid, "alert_symbol", "token")
-    await query.edit_message_text(
-        f"🔔 `${symbol}` {direction}...\n\nEnter target price (USD):",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
-    )
-
-
 async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     uid   = query.from_user.id
@@ -6118,44 +5871,6 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_state(uid)
         msg = await update.message.reply_text("Getting quote...")
         await do_trade_flow(msg, uid, context, action, token, text)
-
-    elif state == "alert_token":
-        msg  = await update.message.reply_text("Finding token...")
-        pair = fetch_sol_pair(text)
-        if not pair:
-            await msg.edit_text("Not found.", reply_markup=back_kb("menu:alerts"))
-            return
-        mint   = pair["baseToken"]["address"]
-        symbol = pair["baseToken"]["symbol"]
-        set_state(uid, waiting_for="alert_direction", alert_mint=mint, alert_symbol=symbol)
-        await msg.edit_text(
-            f"🔔 *Alert for ${symbol}*\n\nAlert when price goes:",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("↑ Above", callback_data="alert_dir:above"),
-                 InlineKeyboardButton("↓ Below", callback_data="alert_dir:below")],
-                [InlineKeyboardButton("❌ Cancel", callback_data="cancel")],
-            ])
-        )
-
-    elif state == "alert_price":
-        try:
-            target = float(text)
-        except ValueError:
-            await update.message.reply_text("Invalid price. Try `0.00005`.", parse_mode="Markdown")
-            return
-        mint      = get_state(uid, "alert_mint")
-        symbol    = get_state(uid, "alert_symbol")
-        direction = get_state(uid, "alert_direction")
-        clear_state(uid)
-        add_alert(uid, mint, symbol, target, direction)
-        await update.message.reply_text(
-            f"✅ Alert set — `${symbol}` {direction} `${target}`",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔔 View Alerts", callback_data="menu:alerts")
-            ]])
-        )
 
     elif state == "custom_target_value":
         try:
@@ -8054,8 +7769,6 @@ async def post_init(app):
         BotCommand("autosell",   "Configure auto-sell targets per token"),
         BotCommand("stoploss",   "Global stop-loss settings (safety net)"),
         BotCommand("mode",       "Switch between paper and live trading"),
-        BotCommand("alert",      "Set a price alert for a token"),
-        BotCommand("alerts",     "View & manage your active alerts"),
         BotCommand("scan",       "Resume live token alerts (always-on scanner)"),
         BotCommand("stopscan",   "Pause your live token alerts"),
         BotCommand("watchlist",  "Tokens scoring 50–69 (worth watching)"),
@@ -8097,8 +7810,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("research_log", cmd_research_log))
     app.add_handler(CommandHandler("autosell",   cmd_autosell))
     app.add_handler(CommandHandler("mode",       cmd_mode))
-    app.add_handler(CommandHandler("alert",      cmd_alert))
-    app.add_handler(CommandHandler("alerts",     cmd_alerts))
     app.add_handler(CommandHandler("scan",       cmd_scan))
     app.add_handler(CommandHandler("stopscan",   cmd_stopscan))
     app.add_handler(CommandHandler("watchlist",  cmd_watchlist))
@@ -8123,7 +7834,6 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
     app.add_handler(CommandHandler("pnl",        cmd_pnl))
     app.add_handler(CommandHandler("stoploss",   cmd_stoploss))
-    app.add_handler(CommandHandler("alertprefs", cmd_alert_prefs))
     app.add_handler(CommandHandler("wallets",    cmd_wallets_intel))
     app.add_handler(CommandHandler("narratives", cmd_narratives_intel))
 
@@ -8133,8 +7843,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(trade_callback,               pattern=r"^trade:"))
     app.add_handler(CallbackQueryHandler(mode_callback,                pattern=r"^mode:"))
     app.add_handler(CallbackQueryHandler(settings_callback,            pattern=r"^settings:"))
-    app.add_handler(CallbackQueryHandler(alert_callback,               pattern=r"^alert:"))
-    app.add_handler(CallbackQueryHandler(alert_dir_callback,           pattern=r"^alert_dir:"))
     app.add_handler(CallbackQueryHandler(autosell_callback,            pattern=r"^as:"))
     app.add_handler(CallbackQueryHandler(as_preset_callback,           pattern=r"^as_preset:"))
     app.add_handler(CallbackQueryHandler(custom_target_type_callback,  pattern=r"^ct_type:"))
@@ -8152,7 +7860,6 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(watch_callback,               pattern=r"^watch:"))
     app.add_handler(CallbackQueryHandler(launches_callback,            pattern=r"^launches:"))
     app.add_handler(CallbackQueryHandler(channels_callback,            pattern=r"^channels:"))
-    app.add_handler(CallbackQueryHandler(alert_prefs_callback,         pattern=r"^alert_prefs:"))
     app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
     app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
     app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))
@@ -8164,18 +7871,27 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
 
     # Background jobs with error handling
-    async def safe_check_price_alerts(ctx):
-        try:
-            await check_price_alerts(ctx)
-        except Exception as e:
-            print(f"[PRICE_ALERT] Critical error: {e}")
-            import traceback; traceback.print_exc()
-
     async def safe_check_auto_sell(ctx):
         try:
             await check_auto_sell(ctx)
         except Exception as e:
             print(f"[AUTO-SELL] Critical error: {e}")
+            import traceback; traceback.print_exc()
+
+    async def safe_check_portfolio_alerts(ctx):
+        """Check all users' portfolios for mcap milestones."""
+        try:
+            all_configs = portfolio_alerts.load_auto_sell()
+            for uid_str in all_configs.keys():
+                try:
+                    uid = int(uid_str)
+                    await portfolio_alerts.check_all_portfolio_alerts(
+                        ctx.bot, uid, fetch_token_price
+                    )
+                except Exception as e:
+                    print(f"[PORTFOLIO_ALERTS] Error for user {uid_str}: {e}")
+        except Exception as e:
+            print(f"[PORTFOLIO_ALERTS] Critical error: {e}")
             import traceback; traceback.print_exc()
 
     async def safe_run_scanner(ctx):
@@ -8187,8 +7903,8 @@ if __name__ == "__main__":
             print(f"[SCANNER] Critical error: {e}")
             import traceback; traceback.print_exc()
 
-    app.job_queue.run_repeating(safe_check_price_alerts, interval=ALERT_CHECK_SECS, first=15)
-    app.job_queue.run_repeating(safe_check_auto_sell,    interval=ALERT_CHECK_SECS, first=30)
+    app.job_queue.run_repeating(safe_check_auto_sell,            interval=ALERT_CHECK_SECS, first=30)
+    app.job_queue.run_repeating(safe_check_portfolio_alerts,     interval=ALERT_CHECK_SECS, first=45)
 
     async def run_scanner_job(ctx):
         s        = sc.load_state()
