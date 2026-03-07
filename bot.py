@@ -1818,6 +1818,11 @@ async def _show_portfolio(send_fn, uid: int):
                 mcap      = float(pair.get("marketCap", 0) or 0)
                 dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
                 ui        = raw_amt / (10 ** dec)
+                # Fallback to bonding curve if DexScreener priceNative is missing
+                if not price_sol:
+                    _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+                    if _bc and _bc.get("virtual_token_reserves"):
+                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9
                 val_sol   = price_sol * ui
                 total_sol += val_sol
                 buy_price = cfg.get("buy_price_usd", 0) if cfg else 0
@@ -1853,8 +1858,19 @@ async def _show_portfolio(send_fn, uid: int):
                         InlineKeyboardButton(f"🤖 {sym} Auto-Sell Config", callback_data=f"as:view:{mint}")
                     ])
             else:
+                # Not on DexScreener yet — try pump.fun bonding curve for SOL price
+                bc        = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+                ui        = raw_amt / 1e6   # pump.fun tokens are always 6 decimals
+                price_sol = 0.0
+                if bc and bc.get("virtual_token_reserves"):
+                    price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9
+                val_sol   = price_sol * ui
+                total_sol += val_sol
+                val_str   = f"{val_sol:.4f}◎" if val_sol else "?"
+                src_tag   = " _(pump.fun)_" if price_sol else " _(unlisted)_"
                 lines.append("━━━━━━━━━━━━━━━━━━")
-                lines.append(f"`{mint[:8]}...`: {raw_amt:,} raw (unlisted)")
+                lines.append(f"*{mint[:8]}...*{src_tag}")
+                lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`")
                 token_rows.append([
                     InlineKeyboardButton(f"⚡ {mint[:6]}", callback_data=f"qt:{mint}"),
                     InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
