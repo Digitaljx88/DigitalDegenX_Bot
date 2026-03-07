@@ -136,8 +136,22 @@ def set_user_min_score(uid: int, score: int):
 
 
 def get_alert_channel() -> str | None:
-    """Return the alert channel ID/username, or None if not set."""
-    return load_state().get("alert_channel")
+    """Return the alert channel ID/username, or None if not set.
+    Falls back to launch channel from global settings if no dedicated scanner channel."""
+    ch = load_state().get("alert_channel")
+    if ch:
+        return ch
+    # Fallback: use launch channel from global_settings.json
+    try:
+        gs_path = os.path.join(os.path.dirname(__file__), "data", "global_settings.json")
+        with open(gs_path) as f:
+            gs = json.load(f)
+        launch_ch = gs.get("launch_alert_channel_id")
+        if launch_ch:
+            return str(launch_ch) if isinstance(launch_ch, int) else launch_ch
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return None
 
 
 def set_alert_channel(channel: str | None):
