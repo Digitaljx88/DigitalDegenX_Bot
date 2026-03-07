@@ -1754,18 +1754,23 @@ async def _show_portfolio(send_fn, uid: int):
             f"SOL: `{sol_bal:.4f}`\n"
         ]
         token_rows = []
+        total_sol_positions = 0.0
         if accounts:
             lines.append("*Positions — tap ⚡ to trade:*")
             for acc in accounts[:10]:
-                pair   = fetch_sol_pair(acc["mint"])
-                sym    = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
-                price  = float(pair.get("priceUsd", 0) or 0) if pair else 0
-                mcap   = float(pair.get("marketCap", 0) or 0) if pair else 0
-                val    = price * acc["ui_amount"]
-                as_cfg = as_configs.get(acc["mint"], {})
-                as_tag = " 🤖" if as_cfg.get("enabled") else ""
-                mcap_str = f" · MCap `${mcap:,.0f}`" if mcap else ""
-                lines.append(f"`{sym}`{as_tag}: {acc['ui_amount']:,.4f} ≈ `${val:,.4f}`{mcap_str}")
+                pair      = fetch_sol_pair(acc["mint"])
+                sym       = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
+                price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
+                mcap      = float(pair.get("marketCap", 0) or 0) if pair else 0
+                val_sol   = price_sol * acc["ui_amount"]
+                total_sol_positions += val_sol
+                as_cfg    = as_configs.get(acc["mint"], {})
+                as_tag    = " 🤖" if as_cfg.get("enabled") else ""
+                mcap_str  = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
+                val_str   = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+                lines.append("━━━━━━━━━━━━━━━━━━")
+                lines.append(f"*{sym}*{as_tag}")
+                lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ `{val_str}`{mcap_str}")
                 token_rows.append([
                     InlineKeyboardButton(f"⚡ {sym}",  callback_data=f"qt:{acc['mint']}"),
                     InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{acc['mint']}"),
@@ -1775,6 +1780,9 @@ async def _show_portfolio(send_fn, uid: int):
                     token_rows.append([
                         InlineKeyboardButton(f"🤖 {sym} Auto-Sell Config", callback_data=f"as:view:{acc['mint']}")
                     ])
+            if total_sol_positions:
+                lines.append("━━━━━━━━━━━━━━━━━━")
+                lines.append(f"*Total Positions:* `{total_sol_positions:.4f}◎`")
         else:
             lines.append("No token positions found.")
 
@@ -1795,7 +1803,7 @@ async def _show_portfolio(send_fn, uid: int):
     sol_bal   = portfolio.get("SOL", 0)
     positions = {k: v for k, v in portfolio.items() if k != "SOL" and v > 0}
     lines     = [f"📄 *Paper Portfolio*\n\nSOL: `{sol_bal:.4f}`\n"]
-    total_usd = 0.0
+    total_sol = 0.0
     token_rows = []
 
     if positions:
@@ -1805,29 +1813,32 @@ async def _show_portfolio(send_fn, uid: int):
             cfg  = as_configs.get(mint)
             if pair:
                 sym       = pair.get("baseToken", {}).get("symbol", mint[:8])
-                price     = float(pair.get("priceUsd", 0) or 0)
+                price_sol = float(pair.get("priceNative", 0) or 0)
+                price_usd = float(pair.get("priceUsd", 0) or 0)
                 mcap      = float(pair.get("marketCap", 0) or 0)
                 dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
                 ui        = raw_amt / (10 ** dec)
-                val       = price * ui
-                total_usd += val
+                val_sol   = price_sol * ui
+                total_sol += val_sol
                 buy_price = cfg.get("buy_price_usd", 0) if cfg else 0
-                entry_pct = ((price - buy_price) / buy_price * 100) if buy_price else 0
-                
-                # Format gain string
-                if entry_pct >= 100:
-                    pct_str = f"(+{entry_pct:.0f}% from buy 🔥)"
-                elif entry_pct > 0:
-                    pct_str = f"(+{entry_pct:.0f}% from buy)"
-                elif entry_pct < 0:
-                    pct_str = f"({entry_pct:.0f}% from buy)"
-                else:
-                    pct_str = "(from buy)"
-                
-                gain_str  = f" {pct_str}" if buy_price else ""
-                mcap_str  = f" · MCap `${mcap:,.0f}`" if mcap else ""
+                entry_pct = ((price_usd - buy_price) / buy_price * 100) if buy_price else 0
                 as_tag    = " 🤖" if cfg and cfg.get("enabled") else ""
-                lines.append(f"`{sym}`{as_tag}: {ui:,.4f} ≈ `${val:,.4f}`{gain_str}{mcap_str}")
+
+                if buy_price and entry_pct >= 100:
+                    pnl_badge = f" `+{entry_pct:.0f}%` 🔥"
+                elif buy_price and entry_pct > 0:
+                    pnl_badge = f" `+{entry_pct:.0f}%`"
+                elif buy_price and entry_pct < 0:
+                    pnl_badge = f" `{entry_pct:.0f}%` 📉"
+                else:
+                    pnl_badge = ""
+
+                mcap_str = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
+                val_str  = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+
+                lines.append("━━━━━━━━━━━━━━━━━━")
+                lines.append(f"*{sym}*{as_tag}{pnl_badge}")
+                lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}")
                 if cfg and cfg.get("enabled"):
                     pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
                     if pending:
@@ -1842,14 +1853,16 @@ async def _show_portfolio(send_fn, uid: int):
                         InlineKeyboardButton(f"🤖 {sym} Auto-Sell Config", callback_data=f"as:view:{mint}")
                     ])
             else:
-                lines.append(f"`{mint[:8]}...`: {raw_amt:,} raw")
+                lines.append("━━━━━━━━━━━━━━━━━━")
+                lines.append(f"`{mint[:8]}...`: {raw_amt:,} raw (unlisted)")
                 token_rows.append([
                     InlineKeyboardButton(f"⚡ {mint[:6]}", callback_data=f"qt:{mint}"),
                     InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
                     InlineKeyboardButton("🪙", url=f"https://pump.fun/{mint}"),
                 ])
-        if total_usd:
-            lines.append(f"\n*Est. Value:* `${total_usd:,.4f}`")
+        if total_sol:
+            lines.append("━━━━━━━━━━━━━━━━━━")
+            lines.append(f"*Total Positions:* `{total_sol:.4f}◎`")
     else:
         lines.append("No positions yet.")
 
@@ -2089,22 +2102,24 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         set_state(uid, waiting_for="ab_min_score")
         await query.edit_message_text(
             "🌡️ *Set minimum heat score for auto-buy*\n\n"
-            "Higher = fewer but better trades.\n"
+            "Higher = fewer but better quality trades.\n"
+            "You can use any score from 1–100, or type a custom value.\n"
             f"Current: `{cfg.get('min_score', 70)}/100`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("35", callback_data="autobuy:score_preset:35"),
-                 InlineKeyboardButton("40", callback_data="autobuy:score_preset:40"),
-                 InlineKeyboardButton("45", callback_data="autobuy:score_preset:45"),
-                 InlineKeyboardButton("50", callback_data="autobuy:score_preset:50")],
-                [InlineKeyboardButton("55", callback_data="autobuy:score_preset:55"),
+                [InlineKeyboardButton("1",  callback_data="autobuy:score_preset:1"),
+                 InlineKeyboardButton("10", callback_data="autobuy:score_preset:10"),
+                 InlineKeyboardButton("20", callback_data="autobuy:score_preset:20"),
+                 InlineKeyboardButton("30", callback_data="autobuy:score_preset:30")],
+                [InlineKeyboardButton("40", callback_data="autobuy:score_preset:40"),
+                 InlineKeyboardButton("50", callback_data="autobuy:score_preset:50"),
                  InlineKeyboardButton("60", callback_data="autobuy:score_preset:60"),
-                 InlineKeyboardButton("65", callback_data="autobuy:score_preset:65"),
                  InlineKeyboardButton("70", callback_data="autobuy:score_preset:70")],
                 [InlineKeyboardButton("75", callback_data="autobuy:score_preset:75"),
                  InlineKeyboardButton("80", callback_data="autobuy:score_preset:80"),
                  InlineKeyboardButton("90", callback_data="autobuy:score_preset:90"),
                  InlineKeyboardButton("100", callback_data="autobuy:score_preset:100")],
+                [InlineKeyboardButton("✏️ Custom — type any number 1-100", callback_data="noop")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
             ])
         )
@@ -2526,11 +2541,12 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
         targets.append(uid)
     s["scan_targets"] = targets
     sc.save_state(s)
+    min_score = sc.get_user_min_score(uid)
     await update.message.reply_text(
-        "🟢 *Scout is live!*\n\n"
-        "Scanning pump.fun + DexScreener every 15 seconds.\n"
-        "You'll be alerted instantly when Heat Score ≥ 70/100 by default.\n\n"
-        "Use /stopscan to pause your scout.",
+        f"🟢 *Scout is live!*\n\n"
+        f"Scanning pump.fun + DexScreener every 15 seconds.\n"
+        f"Alerting when Heat Score ≥ *{min_score}/100*.\n\n"
+        f"Use /stopscan to pause your scout.",
         parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
             InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
@@ -6936,10 +6952,10 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif state == "ab_min_score":
         try:
             val = int(float(text))
-            if val < 35 or val > 100:
+            if val < 1 or val > 100:
                 raise ValueError
         except ValueError:
-            await update.message.reply_text("Enter a score between 35 and 100.")
+            await update.message.reply_text("Enter a score between 1 and 100.")
             return
         cfg = get_auto_buy(uid)
         cfg["min_score"] = val
