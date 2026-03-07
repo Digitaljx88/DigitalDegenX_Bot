@@ -138,7 +138,7 @@ def score_liquidity(token: dict, rc: dict = None, cfg: dict = None) -> tuple[int
     details["total_liquidity_usd"] = total_liquidity
     
     # Bonus for stable liquidity (no massive drains recorded)
-    drain_history = rc.get("drain_history", [])
+    drain_history = rc.get("drain_history", []) or []
     if drain_history and len(drain_history) > 0:
         max_drain_pct = max([d.get("drain_pct", 0) for d in drain_history])
         if max_drain_pct < 10:
@@ -149,7 +149,7 @@ def score_liquidity(token: dict, rc: dict = None, cfg: dict = None) -> tuple[int
     
     # Check contract supply info from RugCheck
     supply = rc.get("supply", 0) or 0
-    holders_count = len(rc.get("topHolders", []))
+    holders_count = len(rc.get("topHolders", []) or [])
     if holders_count > 50:
         liq_pts = min(20, liq_pts + 2)
     
