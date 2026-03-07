@@ -794,8 +794,25 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
     else:
         user_cfg = settings_manager._get_defaults().copy()
     
+    # Map scanner field names to heat_score_v2 expected names
+    t = dict(token)  # shallow copy to avoid mutating original
+    if "volume_m5" in t and "volume_5m_usd" not in t:
+        t["volume_5m_usd"] = t["volume_m5"]
+    if "volume_h1" in t and "volume_1h_usd" not in t:
+        t["volume_1h_usd"] = t["volume_h1"]
+    if "volume_h24" in t and "volume_24h_usd" not in t:
+        t["volume_24h_usd"] = t["volume_h24"]
+    if "pair_created" in t and "created_timestamp" not in t:
+        # pair_created is in milliseconds, created_timestamp in seconds
+        pc = t["pair_created"]
+        t["created_timestamp"] = pc / 1000 if pc > 1e12 else pc
+    if "liquidity" in t and "liquidity_usd" not in t:
+        t["liquidity_usd"] = t["liquidity"]
+    if "twitter_url" in t and "twitter" not in t:
+        t["twitter"] = t["twitter_url"]
+
     # Calculate v2 score
-    result_v2 = heat_score_v2.calculate_heat_score_v2(token, rc, user_cfg)
+    result_v2 = heat_score_v2.calculate_heat_score_v2(t, rc, user_cfg)
     
     # Determine alert tier based on user's thresholds
     score = result_v2["score"]
