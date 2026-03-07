@@ -9422,13 +9422,16 @@ if __name__ == "__main__":
 
     async def safe_check_portfolio_alerts(ctx):
         """Check all users' portfolios for mcap milestones."""
+        def _get_mcap(mint):
+            _, mcap = fetch_token_price(mint)
+            return mcap or 0
         try:
             all_configs = portfolio_alerts.load_auto_sell()
             for uid_str in all_configs.keys():
                 try:
                     uid = int(uid_str)
                     await portfolio_alerts.check_all_portfolio_alerts(
-                        ctx.bot, uid, fetch_token_price
+                        ctx.bot, uid, _get_mcap
                     )
                 except Exception as e:
                     print(f"[PORTFOLIO_ALERTS] Error for user {uid_str}: {e}")

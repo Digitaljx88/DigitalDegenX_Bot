@@ -1146,7 +1146,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                         )
                     except Exception as e:
                         print(f"[SCANNER] scouted channel error ch={alert_channel}: {e}", flush=True)
-                if on_alert:
+                if on_alert and score >= 50:
                     try:
                         await on_alert(bot, result)
                     except Exception:

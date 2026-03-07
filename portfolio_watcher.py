@@ -9,14 +9,29 @@ import json
 import time
 import os
 import requests
-from config import (
-    WATCHER_SIGNAL_WEIGHTS,
-    WATCHER_ALERT_THRESHOLD_HIGH,
-    WATCHER_ALERT_THRESHOLD_MEDIUM,
-    WATCHER_ALERT_THRESHOLD_LOW,
-    WATCHER_SIGNAL_COOLDOWN_SECS,
-    WATCHER_MIN_BASELINE_CYCLES,
-)
+
+try:
+    from config import (
+        WATCHER_SIGNAL_WEIGHTS,
+        WATCHER_ALERT_THRESHOLD_HIGH,
+        WATCHER_ALERT_THRESHOLD_MEDIUM,
+        WATCHER_ALERT_THRESHOLD_LOW,
+        WATCHER_SIGNAL_COOLDOWN_SECS,
+        WATCHER_MIN_BASELINE_CYCLES,
+    )
+except ImportError:
+    WATCHER_SIGNAL_WEIGHTS = {
+        "dev_movement": 3.0,
+        "whale_exit": 2.5,
+        "liquidity_drain": 2.0,
+        "buy_sell_flip": 1.5,
+        "volume_collapse": 1.0,
+    }
+    WATCHER_ALERT_THRESHOLD_HIGH = 3.0
+    WATCHER_ALERT_THRESHOLD_MEDIUM = 2.0
+    WATCHER_ALERT_THRESHOLD_LOW = 1.0
+    WATCHER_SIGNAL_COOLDOWN_SECS = 300
+    WATCHER_MIN_BASELINE_CYCLES = 3
 
 WATCHER_STATE_FILE = os.path.join("data", "portfolio_watcher_state.json")
 
