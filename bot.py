@@ -4243,7 +4243,8 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"*🌡️ Scout Min Score*\n\n"
             f"Current: `{cur}/100`\n\n"
             f"You'll only receive scouts for tokens scoring at or above this value.\n"
-            f"Lower = more scouts · Higher = fewer but stronger signals.",
+            f"Lower = more scouts · Higher = fewer but stronger signals.\n\n"
+            f"Tap a preset or use *✏️ Custom* to type any number (1–100).",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("40", callback_data="scanner:threshold:40"),
@@ -4258,8 +4259,22 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                  InlineKeyboardButton("85", callback_data="scanner:threshold:85"),
                  InlineKeyboardButton("90", callback_data="scanner:threshold:90"),
                  InlineKeyboardButton("100", callback_data="scanner:threshold:100")],
+                [InlineKeyboardButton("✏️ Custom", callback_data="scanner:custom_threshold")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
             ])
+        )
+
+    elif action == "custom_threshold":
+        set_state(uid, waiting_for="scanner_min_score")
+        cur = sc.get_user_min_score(uid)
+        await query.edit_message_text(
+            f"*✏️ Custom Scout Min Score*\n\n"
+            f"Current: `{cur}/100`\n\n"
+            f"Type any number between 1 and 100 and send it.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+            ]])
         )
 
     elif action == "threshold":
@@ -7194,6 +7209,27 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⏱️ Time Exit Settings", callback_data="gte:menu")
+            ]])
+        )
+
+    elif state == "scanner_min_score":
+        raw = text.strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= 100):
+            await update.message.reply_text(
+                "Please send a number between 1 and 100.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+                ]])
+            )
+            return
+        val = int(raw)
+        sc.set_user_min_score(uid, val)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Scout min score set to `{val}/100`\n\nYou'll receive scouts for tokens scoring ≥ {val}.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main"),
             ]])
         )
 
