@@ -1858,6 +1858,43 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
     mode = get_mode(uid)
     as_configs = load_auto_sell().get(str(uid), {})
 
+    # ── shared footer builders ────────────────────────────────────────────────
+    def _nav_row(page, total_pages):
+        if total_pages <= 1:
+            return []
+        nav = []
+        if page > 0:
+            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"portfolio:page:{page - 1}"))
+        if page < total_pages - 1:
+            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"portfolio:page:{page + 1}"))
+        return [nav] if nav else []
+
+    def _footer(paper: bool = False):
+        rows = [
+            [InlineKeyboardButton("🔄 Refresh",     callback_data="portfolio:refresh"),
+             InlineKeyboardButton("🤖 Auto-Sell",   callback_data="menu:autosell")],
+            [InlineKeyboardButton("💰 Sell Profit", callback_data="portfolio:sell_profit_confirm"),
+             InlineKeyboardButton("🔻 Sell Below%", callback_data="portfolio:sell_below_prompt"),
+             InlineKeyboardButton("💣 Sell All",    callback_data="portfolio:sell_all_confirm")],
+        ]
+        if paper:
+            rows.append([InlineKeyboardButton("🗑️ Reset", callback_data="settings:reset_paper"),
+                         InlineKeyboardButton("⬅️ Menu",  callback_data="menu:main")])
+        else:
+            rows.append([InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")])
+        return rows
+
+    def _token_row(sym, mint, as_enabled):
+        row = [
+            InlineKeyboardButton(f"⚡ {sym}", callback_data=f"qt:{mint}"),
+            InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
+            InlineKeyboardButton("🪙", url=f"https://pump.fun/{mint}"),
+        ]
+        if as_enabled:
+            row.append(InlineKeyboardButton("🤖", callback_data=f"as:view:{mint}"))
+        return row
+
+    # ── LIVE WALLET ───────────────────────────────────────────────────────────
     if mode == "live":
         pubkey = get_wallet_pubkey()
         if not pubkey:
@@ -1871,84 +1908,57 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
         total_pages   = max(1, math.ceil(len(accounts) / PAGE_SIZE)) if accounts else 1
         page_accounts = accounts[page * PAGE_SIZE:(page + 1) * PAGE_SIZE] if accounts else []
         page_info     = f"  •  Page {page + 1}/{total_pages}" if total_pages > 1 else ""
-        lines    = [
-            f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`{page_info}\n\n"
-            f"SOL: `{sol_bal:.4f}`\n"
-        ]
-        token_rows = []
-        total_sol_positions = 0.0
+        lines         = [f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`{page_info}\n\nSOL: `{sol_bal:.4f}`\n"]
+        token_rows    = []
+        total_sol_pos = 0.0
+
         if accounts:
             lines.append("*Positions — tap ⚡ to trade:*")
             for acc in page_accounts:
-                pair      = fetch_sol_pair(acc["mint"])
-                sym       = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
-                price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
-                mcap      = float(pair.get("marketCap", 0) or 0) if pair else 0
+                try:
+                    pair      = fetch_sol_pair(acc["mint"])
+                    sym       = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
+                    price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
+                    mcap      = float(pair.get("marketCap", 0) or 0) if pair else 0
+                    src_tag   = ""
+                    if not price_sol:
+                        _bc = pumpfun.fetch_bonding_curve_data(acc["mint"], SOLANA_RPC)
+                        if _bc and _bc.get("virtual_token_reserves") and _bc["virtual_token_reserves"] > 0:
+                            price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
+                            src_tag   = " _(pump)_"
+                        if not pair:
+                            coin = _fetch_pumpfun_coin(acc["mint"])
+                            if coin:
+                                sym  = coin.get("symbol", acc["mint"][:8])
+                                mcap = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
+                    val_sol      = price_sol * acc["ui_amount"]
+                    total_sol_pos += val_sol
+                    as_cfg       = as_configs.get(acc["mint"], {})
+                    as_tag       = " 🤖" if as_cfg.get("enabled") else ""
+                    mcap_str     = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
+                    val_str      = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+                    sol_in       = as_cfg.get("sol_amount", 0)
+                    sol_in_str   = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
+                    lines.append("━━━━━━━━━━━━━━━━━━")
+                    lines.append(f"*{sym}*{as_tag}{src_tag}")
+                    lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
+                    token_rows.append(_token_row(sym, acc["mint"], as_cfg.get("enabled")))
+                except Exception as e:
+                    print(f"[PORTFOLIO] Error displaying token {acc.get('mint','?')}: {e}")
+                    token_rows.append(_token_row(acc["mint"][:8], acc["mint"], False))
 
-                # Fallback: pump.fun bonding curve for tokens not yet on DexScreener
-                src_tag   = ""
-                if not price_sol:
-                    _bc = pumpfun.fetch_bonding_curve_data(acc["mint"], SOLANA_RPC)
-                    if _bc and _bc.get("virtual_token_reserves") and _bc["virtual_token_reserves"] > 0:
-                        # acc["ui_amount"] is already divided by decimals, so price must be SOL per UI token
-                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
-                        src_tag = " _(pump)_"
-                    if not pair:
-                        coin = _fetch_pumpfun_coin(acc["mint"])
-                        if coin:
-                            sym  = coin.get("symbol", acc["mint"][:8])
-                            mcap = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
-
-                val_sol   = price_sol * acc["ui_amount"]
-                total_sol_positions += val_sol
-                as_cfg    = as_configs.get(acc["mint"], {})
-                as_tag    = " 🤖" if as_cfg.get("enabled") else ""
-                mcap_str  = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
-                val_str   = f"{val_sol:.4f}◎" if val_sol else "unlisted"
-                sol_in    = as_cfg.get("sol_amount", 0)
-                sol_in_str = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
-                lines.append("━━━━━━━━━━━━━━━━━━")
-                lines.append(f"*{sym}*{as_tag}{src_tag}")
-                lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
-                token_rows.append([
-                    InlineKeyboardButton(f"⚡ {sym}",  callback_data=f"qt:{acc['mint']}"),
-                    InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{acc['mint']}"),
-                    InlineKeyboardButton("🪙", url=f"https://pump.fun/{acc['mint']}"),
-                ])
-                if as_cfg.get("enabled"):
-                    token_rows.append([
-                        InlineKeyboardButton(f"🤖 {sym} Auto-Sell Config", callback_data=f"as:view:{acc['mint']}")
-                    ])
-            if total_sol_positions:
+            if total_sol_pos:
                 lines.append("━━━━━━━━━━━━━━━━━━")
                 page_suffix = f" _(page {page + 1}/{total_pages})_" if total_pages > 1 else ""
-                lines.append(f"*Total Positions:* `{total_sol_positions:.4f}◎`{page_suffix}")
+                lines.append(f"*Total Positions:* `{total_sol_pos:.4f}◎`{page_suffix}")
         else:
             lines.append("No token positions found.")
 
-        kb = token_rows[:]   # each entry is already a [⚡, 📊, 🪙] row
-        if total_pages > 1:
-            nav = []
-            if page > 0:
-                nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"portfolio:page:{page - 1}"))
-            if page < total_pages - 1:
-                nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"portfolio:page:{page + 1}"))
-            if nav:
-                kb.append(nav)
-        kb += [
-            [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
-             InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
-            [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
-             InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
-            [InlineKeyboardButton("💰 Sell Profit", callback_data="portfolio:sell_profit_confirm"),
-             InlineKeyboardButton("🔻 Sell Below%", callback_data="portfolio:sell_below_prompt")],
-            [InlineKeyboardButton("💣 Sell All",  callback_data="portfolio:sell_all_confirm")],
-            [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
-        ]
+        kb = token_rows + _nav_row(page, total_pages) + _footer(paper=False)
         await send_fn("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
         return
 
-    # Paper portfolio
+    # ── PAPER PORTFOLIO ───────────────────────────────────────────────────────
     portfolio      = get_portfolio(uid)
     sol_bal        = portfolio.get("SOL", 0)
     all_positions  = [(k, v) for k, v in portfolio.items() if k != "SOL" and v > 0]
@@ -1962,76 +1972,64 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
     if page_positions:
         lines.append("*Positions — tap ⚡ to trade:*")
         for mint, raw_amt in page_positions:
-            pair = fetch_sol_pair(mint)
-            cfg  = as_configs.get(mint)
-            if pair:
-                sym       = pair.get("baseToken", {}).get("symbol", mint[:8])
-                price_sol = float(pair.get("priceNative", 0) or 0)
-                price_usd = float(pair.get("priceUsd", 0) or 0)
-                mcap      = float(pair.get("marketCap", 0) or 0)
-                dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
-                ui        = raw_amt / (10 ** dec)
-                # Fallback to bonding curve if DexScreener priceNative is missing
-                if not price_sol:
-                    _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
-                    if _bc and _bc.get("virtual_token_reserves"):
-                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
-                val_sol   = price_sol * ui
-                total_sol += val_sol
-                buy_price = cfg.get("buy_price_usd", 0) if cfg else 0
-                entry_pct = ((price_usd - buy_price) / buy_price * 100) if buy_price else 0
-                as_tag    = " 🤖" if cfg and cfg.get("enabled") else ""
-
-                if buy_price and entry_pct >= 100:
-                    pnl_badge = f" `+{entry_pct:.0f}%` 🔥"
-                elif buy_price and entry_pct > 0:
-                    pnl_badge = f" `+{entry_pct:.0f}%`"
-                elif buy_price and entry_pct < 0:
-                    pnl_badge = f" `{entry_pct:.0f}%` 📉"
+            try:
+                pair = fetch_sol_pair(mint)
+                cfg  = as_configs.get(mint)
+                if pair:
+                    sym       = pair.get("baseToken", {}).get("symbol", mint[:8])
+                    price_sol = float(pair.get("priceNative", 0) or 0)
+                    price_usd = float(pair.get("priceUsd", 0) or 0)
+                    mcap      = float(pair.get("marketCap", 0) or 0)
+                    dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
+                    ui        = raw_amt / (10 ** dec)
+                    if not price_sol:
+                        _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+                        if _bc and _bc.get("virtual_token_reserves"):
+                            price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
+                    val_sol    = price_sol * ui
+                    total_sol += val_sol
+                    buy_price  = cfg.get("buy_price_usd", 0) if cfg else 0
+                    entry_pct  = ((price_usd - buy_price) / buy_price * 100) if buy_price else 0
+                    as_tag     = " 🤖" if cfg and cfg.get("enabled") else ""
+                    if buy_price and entry_pct >= 100:
+                        pnl_badge = f" `+{entry_pct:.0f}%` 🔥"
+                    elif buy_price and entry_pct > 0:
+                        pnl_badge = f" `+{entry_pct:.0f}%`"
+                    elif buy_price and entry_pct < 0:
+                        pnl_badge = f" `{entry_pct:.0f}%` 📉"
+                    else:
+                        pnl_badge = ""
+                    mcap_str   = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
+                    val_str    = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+                    sol_in     = cfg.get("sol_amount", 0) if cfg else 0
+                    sol_in_str = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
+                    lines.append("━━━━━━━━━━━━━━━━━━")
+                    lines.append(f"*{sym}*{as_tag}{pnl_badge}")
+                    lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
+                    if cfg and cfg.get("enabled"):
+                        pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
+                        if pending:
+                            lines.append(f"  ↳ Next target: {pending[0]}")
+                    token_rows.append(_token_row(sym, mint, cfg and cfg.get("enabled")))
                 else:
-                    pnl_badge = ""
+                    bc        = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+                    ui        = raw_amt / 1e6
+                    price_sol = 0.0
+                    if bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
+                        price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9 * 1e6
+                    val_sol    = price_sol * ui
+                    total_sol += val_sol
+                    val_str    = f"{val_sol:.4f}◎" if val_sol else "?"
+                    src_tag    = " _(pump.fun)_" if price_sol else " _(unlisted)_"
+                    lines.append("━━━━━━━━━━━━━━━━━━")
+                    lines.append(f"*{mint[:8]}...*{src_tag}")
+                    lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`")
+                    cfg = as_configs.get(mint)
+                    token_rows.append(_token_row(mint[:6], mint, cfg and cfg.get("enabled")))
+            except Exception as e:
+                print(f"[PORTFOLIO] Error displaying token {mint}: {e}")
+                token_rows.append(_token_row(mint[:8], mint, False))
 
-                mcap_str    = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
-                val_str     = f"{val_sol:.4f}◎" if val_sol else "unlisted"
-                sol_in      = cfg.get("sol_amount", 0) if cfg else 0
-                sol_in_str  = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
-
-                lines.append("━━━━━━━━━━━━━━━━━━")
-                lines.append(f"*{sym}*{as_tag}{pnl_badge}")
-                lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
-                if cfg and cfg.get("enabled"):
-                    pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
-                    if pending:
-                        lines.append(f"  ↳ Next target: {pending[0]}")
-                token_rows.append([
-                    InlineKeyboardButton(f"⚡ {sym}", callback_data=f"qt:{mint}"),
-                    InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
-                    InlineKeyboardButton("🪙", url=f"https://pump.fun/{mint}"),
-                ])
-                if cfg and cfg.get("enabled"):
-                    token_rows.append([
-                        InlineKeyboardButton(f"🤖 {sym} Auto-Sell Config", callback_data=f"as:view:{mint}")
-                    ])
-            else:
-                # Not on DexScreener yet — try pump.fun bonding curve for SOL price
-                bc        = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
-                ui        = raw_amt / 1e6   # pump.fun tokens are always 6 decimals
-                price_sol = 0.0
-                if bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
-                    # price per UI token (not per raw unit): vsr/vtr gives SOL/raw, ×1e6 → SOL/UI-token
-                    price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9 * 1e6
-                val_sol   = price_sol * ui
-                total_sol += val_sol
-                val_str   = f"{val_sol:.4f}◎" if val_sol else "?"
-                src_tag   = " _(pump.fun)_" if price_sol else " _(unlisted)_"
-                lines.append("━━━━━━━━━━━━━━━━━━")
-                lines.append(f"*{mint[:8]}...*{src_tag}")
-                lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`")
-                token_rows.append([
-                    InlineKeyboardButton(f"⚡ {mint[:6]}", callback_data=f"qt:{mint}"),
-                    InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{mint}"),
-                    InlineKeyboardButton("🪙", url=f"https://pump.fun/{mint}"),
-                ])
         if total_sol:
             lines.append("━━━━━━━━━━━━━━━━━━")
             page_suffix = f" _(page {page + 1}/{total_pages})_" if total_pages > 1 else ""
@@ -2039,26 +2037,7 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
     else:
         lines.append("No positions yet.")
 
-    kb = token_rows[:]   # each entry is already a [⚡, 📊, 🪙] row
-    if total_pages > 1:
-        nav = []
-        if page > 0:
-            nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"portfolio:page:{page - 1}"))
-        if page < total_pages - 1:
-            nav.append(InlineKeyboardButton("➡️ Next", callback_data=f"portfolio:page:{page + 1}"))
-        if nav:
-            kb.append(nav)
-    kb += [
-        [InlineKeyboardButton("🟢 Buy",       callback_data="trade:buy"),
-         InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
-        [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
-         InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
-        [InlineKeyboardButton("💰 Sell Profit", callback_data="portfolio:sell_profit_confirm"),
-         InlineKeyboardButton("🔻 Sell Below%", callback_data="portfolio:sell_below_prompt")],
-        [InlineKeyboardButton("💣 Sell All",  callback_data="portfolio:sell_all_confirm")],
-        [InlineKeyboardButton("🗑️ Reset",     callback_data="settings:reset_paper"),
-         InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main")],
-    ]
+    kb = token_rows + _nav_row(page, total_pages) + _footer(paper=True)
     await send_fn("\n".join(lines), parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(kb))
 
 
@@ -4871,7 +4850,17 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                                        parse_mode="Markdown", reply_markup=trade_kb())
     elif action == "portfolio":
         await query.edit_message_text("Loading...")
-        await _show_portfolio(query.edit_message_text, uid)
+        try:
+            await _show_portfolio(query.edit_message_text, uid)
+        except Exception as e:
+            print(f"[PORTFOLIO] menu load error: {e}")
+            await query.edit_message_text(
+                "⚠️ Failed to load portfolio. Try again.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 Retry", callback_data="portfolio:refresh"),
+                    InlineKeyboardButton("⬅️ Menu",  callback_data="menu:main"),
+                ]])
+            )
     elif action == "autosell":
         await _show_autosell(query.edit_message_text, uid)
     elif action == "autobuy":
@@ -6335,13 +6324,33 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if action == "refresh":
         await query.answer("Refreshing...")
         await query.edit_message_text("Loading...")
-        await _show_portfolio(query.edit_message_text, uid)
+        try:
+            await _show_portfolio(query.edit_message_text, uid)
+        except Exception as e:
+            print(f"[PORTFOLIO] refresh error: {e}")
+            await query.edit_message_text(
+                "⚠️ Failed to load portfolio. Try again.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 Retry", callback_data="portfolio:refresh"),
+                    InlineKeyboardButton("⬅️ Menu",  callback_data="menu:main"),
+                ]])
+            )
 
     elif action == "page":
         await query.answer()
         target_page = int(query.data.split(":")[2]) if len(query.data.split(":")) > 2 else 0
         await query.edit_message_text("Loading...")
-        await _show_portfolio(query.edit_message_text, uid, page=target_page)
+        try:
+            await _show_portfolio(query.edit_message_text, uid, page=target_page)
+        except Exception as e:
+            print(f"[PORTFOLIO] page error: {e}")
+            await query.edit_message_text(
+                "⚠️ Failed to load portfolio. Try again.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🔄 Retry", callback_data="portfolio:refresh"),
+                    InlineKeyboardButton("⬅️ Menu",  callback_data="menu:main"),
+                ]])
+            )
 
     elif action == "sell_profit_confirm":
         # Confirm screen: sell all positions currently in profit
