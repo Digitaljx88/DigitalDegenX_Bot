@@ -7,7 +7,7 @@ import asyncio
 import json
 import os
 import time
-import requests
+import httpx
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
 
@@ -48,8 +48,9 @@ async def fetch_new_tokens_pump_fun(limit: int = 50) -> List[Dict]:
             "sort": "created",
             "order": "desc"
         }
-        
-        response = requests.get(url, params=params, timeout=10)
+
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url, params=params)
         if response.status_code == 200:
             data = response.json()
             return data.get("coins", []) if isinstance(data, dict) else data
@@ -66,12 +67,12 @@ async def fetch_token_liquidity(mint: str) -> Optional[float]:
     """
     try:
         url = f"https://api.dexscreener.com/latest/dex/tokens/{mint}"
-        response = requests.get(url, timeout=10)
-        
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url)
+
         if response.status_code == 200:
             data = response.json()
             if data.get("pairs"):
-                # Get first pair's liquidity
                 pair = data["pairs"][0]
                 liquidity = pair.get("liquidity", {}).get("usd") or pair.get("liquidity", {}).get("base")
                 return float(liquidity) if liquidity else None
@@ -88,12 +89,13 @@ async def fetch_token_age_seconds(mint: str) -> Optional[float]:
     """
     try:
         url = f"https://frontend-api-v3.pump.fun/coin/{mint}"
-        response = requests.get(url, timeout=10)
-        
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(url)
+
         if response.status_code == 200:
             data = response.json()
             created_timestamp = data.get("created_timestamp")
-            
+
             if created_timestamp:
                 age_seconds = time.time() - created_timestamp
                 return max(0, age_seconds)

@@ -769,8 +769,8 @@ def execute_swap_live(quote: dict) -> str:
         if "swapTransaction" not in swap:
             return f"Swap build failed: {swap.get('error', swap)}"
 
-        tx = VersionedTransaction.from_bytes(base64.b64decode(swap["swapTransaction"]))
-        tx.sign([keypair])
+        raw_tx = VersionedTransaction.from_bytes(base64.b64decode(swap["swapTransaction"]))
+        tx = VersionedTransaction(raw_tx.message, [keypair])
 
         resp = requests.post(SOLANA_RPC, json={
             "jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
@@ -1426,8 +1426,10 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     price_usd = result.get("price_usd", 0)
 
     if bc and not bc.get("complete"):
+        from solders.keypair import Keypair
         tok_est = pumpfun.calculate_buy_tokens(lamports, bc)
-        tx_sig  = pumpfun.buy_token(mint, sol_amount, SOLANA_RPC, WALLET_PRIVATE_KEY)
+        _kp     = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx_sig  = pumpfun.buy_pumpfun(mint, sol_amount, _kp, SOLANA_RPC)
         out_raw = tok_est
         route   = "pump.fun"
         decimals = 6
@@ -1445,8 +1447,14 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     if success:
         # Update portfolio tracking
         pubkey = get_wallet_pubkey()
+        portfolio = get_portfolio(uid)
         if pubkey:
             sol_bal = get_sol_balance(pubkey)
+            portfolio["SOL"] = sol_bal
+        else:
+            portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
+        portfolio[mint] = portfolio.get(mint, 0) + out_raw
+        update_portfolio(uid, portfolio)
         setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals)
         log_trade(uid, "live", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_raw,

@@ -33,7 +33,7 @@ except ImportError:
     WATCHER_SIGNAL_COOLDOWN_SECS = 300
     WATCHER_MIN_BASELINE_CYCLES = 3
 
-WATCHER_STATE_FILE = os.path.join("data", "portfolio_watcher_state.json")
+WATCHER_STATE_FILE = os.path.join(os.path.dirname(__file__), "data", "portfolio_watcher_state.json")
 
 # Local aliases for backward compatibility
 SIGNAL_WEIGHTS = WATCHER_SIGNAL_WEIGHTS
@@ -57,7 +57,7 @@ def _load_state() -> dict:
 
 def _save_state(state: dict):
     """Save watcher state to JSON file."""
-    os.makedirs("data", exist_ok=True)
+    os.makedirs(os.path.dirname(WATCHER_STATE_FILE), exist_ok=True)
     try:
         with open(WATCHER_STATE_FILE, "w") as f:
             json.dump(state, f, indent=2)

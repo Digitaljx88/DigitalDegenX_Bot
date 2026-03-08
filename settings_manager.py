@@ -14,7 +14,7 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-SETTINGS_FILE = "global_settings.json"
+SETTINGS_FILE = os.path.join(os.path.dirname(__file__), "data", "global_settings.json")
 HEAT_SCORE_SETTINGS_KEY = "heat_score_v2"
 
 # ─── Embedded defaults (not dependent on config.py) ──────────────────────────

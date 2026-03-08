@@ -24,6 +24,26 @@ import json
 from datetime import datetime, timedelta
 from typing import Optional
 
+try:
+    import birdeye as _birdeye
+except ImportError:
+    _birdeye = None
+
+try:
+    import geckoterminal as _gecko
+except ImportError:
+    _gecko = None
+
+try:
+    import wallet_tracker as _wallet_tracker
+except ImportError:
+    _wallet_tracker = None
+
+try:
+    import wallet_cluster as _wallet_cluster
+except ImportError:
+    _wallet_cluster = None
+
 
 def score_momentum(token: dict, cfg: dict = None) -> tuple[int, str, dict]:
     """
@@ -321,15 +341,23 @@ def score_wallet_behavior(token_mint: str, cfg: dict = None) -> tuple[int, str, 
     
     details = {}
     wallet_pts = 0
-    
-    # Placeholder: In production, would call wallet_tracker.check_seed_wallets(mint)
-    # and wallet_cluster.get_cluster_signals(mint)
-    
-    cluster_match = False  # wallet_cluster.get_cluster_signals(mint)
-    known_seed = False  # wallet_tracker.check_seed_wallets(mint)
-    
+
     cluster_boost = cfg.get("wallet_cluster_boost_pts", 5)
     seed_boost = cfg.get("wallet_known_seed_boost_pts", 8)
+
+    known_seed = False
+    if _wallet_tracker and hasattr(_wallet_tracker, "check_seed_wallets"):
+        try:
+            known_seed = bool(_wallet_tracker.check_seed_wallets(token_mint))
+        except Exception:
+            known_seed = False
+
+    cluster_match = False
+    if _wallet_cluster and hasattr(_wallet_cluster, "get_cluster_signals"):
+        try:
+            cluster_match = bool(_wallet_cluster.get_cluster_signals(token_mint))
+        except Exception:
+            cluster_match = False
     
     if known_seed:
         wallet_pts += seed_boost
@@ -422,15 +450,26 @@ def score_directional_bias(token_mint: str, cfg: dict = None) -> tuple[int, str,
         cfg = {}
     
     details = {}
-    
-    # Placeholder: In production, would call birdeye.get_buy_sell_pressure(token_mint)
+
     buy_ratio = 0.5  # Default neutral
     buy_count = 0
     sell_count = 0
-    
+
+    if _birdeye:
+        try:
+            import config as _cfg
+            api_key = getattr(_cfg, "BIRDEYE_API_KEY", "")
+            pressure = _birdeye.get_buy_sell_pressure(token_mint, api_key)
+            if not pressure.get("error"):
+                buy_ratio = pressure.get("buy_ratio", 0.5)
+                buy_count = pressure.get("buy_count", 0)
+                sell_count = pressure.get("sell_count", 0)
+        except Exception:
+            pass
+
     buy_threshold = cfg.get("bias_buy_threshold_pct", 70) / 100.0
     good_threshold = cfg.get("bias_buy_good_threshold_pct", 60) / 100.0
-    
+
     if buy_ratio >= buy_threshold:
         bias_pts = 10
     elif buy_ratio >= good_threshold:
@@ -439,16 +478,16 @@ def score_directional_bias(token_mint: str, cfg: dict = None) -> tuple[int, str,
         bias_pts = 3
     else:
         bias_pts = 0
-    
+
     details["buy_ratio_pct"] = buy_ratio * 100
     details["buy_count"] = buy_count
     details["sell_count"] = sell_count
-    
+
     final_pts = min(10, max(0, bias_pts))
-    
+
     direction = "BUY" if buy_ratio > 0.6 else ("SELL" if buy_ratio < 0.4 else "NEUTRAL")
     reason = f"Direction: {direction}, Buy Ratio: {buy_ratio*100:.0f}% ({buy_count}B/{sell_count}S)"
-    
+
     return final_pts, reason, details
 
 
@@ -466,16 +505,26 @@ def score_volume_trend(token_mint: str, cfg: dict = None) -> tuple[int, str, dic
         cfg = {}
     
     details = {}
-    
-    # Placeholder: In production, would call geckoterminal.get_volume_trend(token_mint)
+
     trend_intensity = 0  # -3 to +3
     vol_1h = 0
     vol_4h = 0
     vol_24h = 0
-    
+
+    if _gecko:
+        try:
+            trend_data = _gecko.get_volume_trend(token_mint)
+            if not trend_data.get("error"):
+                trend_intensity = trend_data.get("trend_intensity", 0)
+                vol_1h = trend_data.get("vol_1h", 0)
+                vol_4h = trend_data.get("vol_4h", 0)
+                vol_24h = trend_data.get("vol_24h", 0)
+        except Exception:
+            pass
+
     explosive_pts = cfg.get("trend_explosive_threshold", 5)
     strong_pts = cfg.get("trend_strong_threshold", 3)
-    
+
     if trend_intensity >= 2:  # Explosive
         trend_pts = explosive_pts
     elif trend_intensity >= 1:  # Strong
@@ -484,17 +533,17 @@ def score_volume_trend(token_mint: str, cfg: dict = None) -> tuple[int, str, dic
         trend_pts = 1
     else:
         trend_pts = 0
-    
+
     details["trend_intensity"] = trend_intensity
     details["vol_1h"] = vol_1h
     details["vol_4h"] = vol_4h
     details["vol_24h"] = vol_24h
-    
+
     final_pts = min(5, max(0, trend_pts))
-    
+
     trend_type = "EXPLOSIVE" if trend_intensity >= 2 else ("STRONG" if trend_intensity >= 1 else "MILD/NEUTRAL")
     reason = f"Trend: {trend_type} (intensity: {trend_intensity:+d}), 1h: ${vol_1h:,.0f}, 24h: ${vol_24h:,.0f}"
-    
+
     return final_pts, reason, details
 
 
