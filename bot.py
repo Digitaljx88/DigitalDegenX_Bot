@@ -818,6 +818,91 @@ def get_wallet_pubkey() -> str | None:
         return None
 
 
+def send_sol_onchain(to_address: str, lamports: int) -> str:
+    """Send SOL from the bot wallet to to_address. Returns tx signature or 'ERROR: ...'."""
+    if not WALLET_PRIVATE_KEY:
+        return "ERROR: No wallet configured"
+    try:
+        import struct, base64 as _b64
+        from solders.keypair import Keypair
+        from solders.pubkey import Pubkey
+        from solders.instruction import Instruction, AccountMeta
+        from solders.message import MessageV0
+        from solders.transaction import VersionedTransaction
+        kp       = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        to_pk    = Pubkey.from_string(to_address)
+        sys_prog = Pubkey.from_string("11111111111111111111111111111111")
+        # System program instruction 2 = transfer
+        ix_data  = struct.pack("<IQ", 2, lamports)
+        ix = Instruction(
+            program_id=sys_prog,
+            accounts=[AccountMeta(kp.pubkey(), True, True), AccountMeta(to_pk, False, True)],
+            data=ix_data,
+        )
+        bh = pumpfun.get_recent_blockhash(SOLANA_RPC)
+        if not bh:
+            return "ERROR: Could not fetch blockhash"
+        msg = MessageV0.try_compile(payer=kp.pubkey(), instructions=[ix],
+                                    address_lookup_table_accounts=[], recent_blockhash=bh)
+        tx = VersionedTransaction(msg, [kp])
+        resp = requests.post(SOLANA_RPC, json={
+            "jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
+            "params": [_b64.b64encode(bytes(tx)).decode(),
+                       {"encoding": "base64", "preflightCommitment": "confirmed"}],
+        }, timeout=30).json()
+        return resp.get("result") or f"ERROR: {resp.get('error', resp)}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
+def send_token_onchain(mint: str, to_address: str, raw_amount: int) -> str:
+    """Send SPL token from the bot wallet to to_address. Returns tx signature or 'ERROR: ...'."""
+    if not WALLET_PRIVATE_KEY:
+        return "ERROR: No wallet configured"
+    try:
+        import struct, base64 as _b64
+        from solders.keypair import Keypair
+        from solders.pubkey import Pubkey
+        from solders.instruction import Instruction, AccountMeta
+        from solders.message import MessageV0
+        from solders.transaction import VersionedTransaction
+        kp         = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        src_ata    = pumpfun.get_associated_token_address(str(kp.pubkey()), mint)
+        dst_ata    = pumpfun.get_associated_token_address(to_address, mint)
+        src_pk     = Pubkey.from_string(src_ata)
+        dst_pk     = Pubkey.from_string(dst_ata)
+        mint_pk    = Pubkey.from_string(mint)
+        dst_own_pk = Pubkey.from_string(to_address)
+        token_prog = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        instructions = []
+        if not pumpfun.account_exists(dst_ata, SOLANA_RPC):
+            instructions.append(pumpfun.make_create_ata_idempotent(
+                kp.pubkey(), dst_own_pk, mint_pk, dst_pk))
+        # Token transfer instruction index 3
+        transfer_data = bytes([3]) + struct.pack("<Q", raw_amount)
+        instructions.append(Instruction(
+            program_id=token_prog,
+            accounts=[AccountMeta(src_pk, False, True),
+                      AccountMeta(dst_pk, False, True),
+                      AccountMeta(kp.pubkey(), True, False)],
+            data=transfer_data,
+        ))
+        bh = pumpfun.get_recent_blockhash(SOLANA_RPC)
+        if not bh:
+            return "ERROR: Could not fetch blockhash"
+        msg = MessageV0.try_compile(payer=kp.pubkey(), instructions=instructions,
+                                    address_lookup_table_accounts=[], recent_blockhash=bh)
+        tx = VersionedTransaction(msg, [kp])
+        resp = requests.post(SOLANA_RPC, json={
+            "jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
+            "params": [_b64.b64encode(bytes(tx)).decode(),
+                       {"encoding": "base64", "preflightCommitment": "confirmed"}],
+        }, timeout=30).json()
+        return resp.get("result") or f"ERROR: {resp.get('error', resp)}"
+    except Exception as e:
+        return f"ERROR: {e}"
+
+
 def get_sol_balance(pubkey: str) -> float:
     try:
         resp = requests.post(SOLANA_RPC, json={
@@ -3844,11 +3929,19 @@ async def _show_wallet_menu(send_fn):
     else:
         text = "*👛 Wallet*\n\nNo wallet configured yet."
 
+    wallet_rows = []
+    if WALLET_PRIVATE_KEY:
+        wallet_rows += [
+            [InlineKeyboardButton("📤 Send SOL",   callback_data="wallet:send_sol"),
+             InlineKeyboardButton("📤 Send Token", callback_data="wallet:send_token")],
+            [InlineKeyboardButton("📥 Receive",    callback_data="wallet:receive")],
+        ]
     await send_fn(
         text, parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
             [InlineKeyboardButton("✨ Create New Wallet", callback_data="wallet:create"),
              InlineKeyboardButton("📥 Import Wallet",     callback_data="wallet:import")],
+            *wallet_rows,
             [InlineKeyboardButton("🔑 Export Key ⚠️",    callback_data="wallet:export")],
             [InlineKeyboardButton("👁️ Tracked Wallets",   callback_data="wallet:tracked")],
             [InlineKeyboardButton("⬅️ Main Menu",         callback_data="menu:main")],
@@ -4179,6 +4272,139 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.edit_message_text(
                 f"❌ Error: {str(e)}",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:tracked")]])
+            )
+
+    elif action == "receive":
+        pubkey = get_wallet_pubkey()
+        if not pubkey:
+            await query.edit_message_text("No wallet configured.",
+                                          reply_markup=back_kb("wallet:menu"))
+            return
+        await query.edit_message_text(
+            f"📥 *Receive SOL & Tokens*\n\n"
+            f"Send SOL or any SPL token to your address:\n\n"
+            f"`{pubkey}`\n\n"
+            f"[View on Solscan](https://solscan.io/account/{pubkey})",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]),
+            disable_web_page_preview=False,
+        )
+
+    elif action == "send_sol":
+        if not WALLET_PRIVATE_KEY:
+            await query.answer("No wallet configured.", show_alert=True)
+            return
+        set_state(uid, waiting_for="wallet_send_sol_to")
+        await query.edit_message_text(
+            "📤 *Send SOL*\n\nEnter the recipient Solana address:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]]),
+        )
+
+    elif action == "send_sol_exec":
+        to_addr = get_state(uid, "send_sol_to")
+        amount  = get_state(uid, "send_sol_amount")
+        clear_state(uid)
+        if not to_addr or not amount:
+            await query.edit_message_text("Session expired. Please try again.",
+                                          reply_markup=back_kb("wallet:menu"))
+            return
+        lamports = int(float(amount) * 1_000_000_000)
+        await query.edit_message_text("⏳ Broadcasting transaction...")
+        sig = send_sol_onchain(to_addr, lamports)
+        if sig.startswith("ERROR"):
+            await query.edit_message_text(
+                f"❌ *Send Failed*\n\n`{sig}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]),
+            )
+        else:
+            await query.edit_message_text(
+                f"✅ *SOL Sent!*\n\n"
+                f"Amount: `{amount} SOL`\n"
+                f"To: `{to_addr[:8]}...{to_addr[-6:]}`\n"
+                f"TX: `{sig[:20]}...`\n\n"
+                f"[View on Solscan](https://solscan.io/tx/{sig})",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Wallet", callback_data="wallet:menu")]]),
+                disable_web_page_preview=True,
+            )
+
+    elif action == "send_token":
+        if not WALLET_PRIVATE_KEY:
+            await query.answer("No wallet configured.", show_alert=True)
+            return
+        pubkey   = get_wallet_pubkey()
+        accounts = get_token_accounts(pubkey) if pubkey else []
+        if not accounts:
+            await query.edit_message_text(
+                "No token positions found in this wallet.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]),
+            )
+            return
+        rows = []
+        for acc in accounts[:20]:
+            pair = fetch_sol_pair(acc["mint"])
+            sym  = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
+            rows.append([InlineKeyboardButton(
+                f"{sym} ({acc['ui_amount']:,.2f})",
+                callback_data=f"wallet:send_token_pick:{acc['mint']}"
+            )])
+        rows.append([InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")])
+        await query.edit_message_text(
+            "📤 *Send Token — Select token to send:*",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup(rows),
+        )
+
+    elif action == "send_token_pick":
+        mint = query.data.split(":", 2)[2]
+        pair = fetch_sol_pair(mint)
+        sym  = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
+        set_state(uid, send_token_mint=mint, send_token_sym=sym, waiting_for="wallet_send_token_to")
+        # Grab decimals & balance now
+        pubkey  = get_wallet_pubkey()
+        accs    = get_token_accounts(pubkey) if pubkey else []
+        acc_inf = next((a for a in accs if a["mint"] == mint), None)
+        if acc_inf:
+            set_state(uid, send_token_decimals=acc_inf["decimals"],
+                          send_token_max_ui=acc_inf["ui_amount"])
+        await query.edit_message_text(
+            f"📤 *Send {sym}*\n\nEnter the recipient Solana address:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]]),
+        )
+
+    elif action == "send_token_exec":
+        mint    = get_state(uid, "send_token_mint")
+        to_addr = get_state(uid, "send_token_to")
+        raw_amt = get_state(uid, "send_token_raw")
+        sym     = get_state(uid, "send_token_sym", "TOKEN")
+        ui_amt  = get_state(uid, "send_token_ui", 0)
+        clear_state(uid)
+        if not mint or not to_addr or not raw_amt:
+            await query.edit_message_text("Session expired. Please try again.",
+                                          reply_markup=back_kb("wallet:menu"))
+            return
+        await query.edit_message_text("⏳ Broadcasting transaction...")
+        sig = send_token_onchain(mint, to_addr, int(raw_amt))
+        if sig.startswith("ERROR"):
+            await query.edit_message_text(
+                f"❌ *Send Failed*\n\n`{sig}`",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")]]),
+            )
+        else:
+            await query.edit_message_text(
+                f"✅ *Tokens Sent!*\n\n"
+                f"Token: `{sym}`\n"
+                f"Amount: `{float(ui_amt):,.4f}`\n"
+                f"To: `{to_addr[:8]}...{to_addr[-6:]}`\n"
+                f"TX: `{sig[:20]}...`\n\n"
+                f"[View on Solscan](https://solscan.io/tx/{sig})",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Wallet", callback_data="wallet:menu")]]),
+                disable_web_page_preview=True,
             )
 
 
@@ -5003,8 +5229,14 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reset_portfolio(uid)
     label = "📄 Paper" if chosen == "paper" else "🔴 Live"
     note  = "Switched to paper trading. Virtual portfolio reset to 10 SOL." if (chosen == "paper" and prev != "paper") else ("📄 Already in paper mode." if chosen == "paper" else "⚠️ Real trades active.")
-    await query.edit_message_text(f"✅ Mode: *{label}*\n\n{note}", parse_mode="Markdown",
-                                   reply_markup=back_kb())
+    await query.edit_message_text(
+        f"✅ Mode: *{label}*\n\n{note}",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("📊 View Portfolio", callback_data="portfolio:refresh")],
+            [InlineKeyboardButton("⬅️ Main Menu",      callback_data="menu:main")],
+        ])
+    )
 
 
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -6949,6 +7181,128 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         InlineKeyboardButton("⚙️ View Config", callback_data=f"as:view:{mint}")
                     ]])
                 )
+
+    elif state == "wallet_send_sol_to":
+        to_addr = text.strip()
+        try:
+            from solders.pubkey import Pubkey as _PK
+            _PK.from_string(to_addr)
+        except Exception:
+            await update.message.reply_text(
+                "❌ Invalid Solana address. Please send a valid base58 address.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]])
+            )
+            return
+        set_state(uid, send_sol_to=to_addr, waiting_for="wallet_send_sol_amount")
+        pubkey  = get_wallet_pubkey()
+        sol_bal = get_sol_balance(pubkey) if pubkey else 0
+        await update.message.reply_text(
+            f"📤 Sending to: `{to_addr[:8]}...{to_addr[-6:]}`\n"
+            f"Wallet balance: `{sol_bal:.4f} SOL`\n\n"
+            f"Enter SOL amount to send (e.g. `0.5`):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]])
+        )
+
+    elif state == "wallet_send_sol_amount":
+        try:
+            amount = float(text.strip())
+            if amount <= 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Enter a valid positive number (e.g. `0.5`).",
+                parse_mode="Markdown"
+            )
+            return
+        to_addr = get_state(uid, "send_sol_to")
+        pubkey  = get_wallet_pubkey()
+        sol_bal = get_sol_balance(pubkey) if pubkey else 0
+        if amount > sol_bal:
+            await update.message.reply_text(
+                f"❌ Insufficient SOL. Have `{sol_bal:.4f}`, need `{amount}`.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]])
+            )
+            return
+        set_state(uid, send_sol_amount=str(amount))
+        # Don't clear state — exec button reads it
+        await update.message.reply_text(
+            f"📤 *Confirm Send SOL*\n\n"
+            f"Amount: `{amount} SOL`\n"
+            f"To: `{to_addr}`\n\n"
+            f"⚠️ This transaction is irreversible.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Confirm Send", callback_data="wallet:send_sol_exec"),
+                 InlineKeyboardButton("❌ Cancel",       callback_data="wallet:menu")],
+            ])
+        )
+
+    elif state == "wallet_send_token_to":
+        to_addr = text.strip()
+        try:
+            from solders.pubkey import Pubkey as _PK
+            _PK.from_string(to_addr)
+        except Exception:
+            await update.message.reply_text(
+                "❌ Invalid Solana address.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]])
+            )
+            return
+        set_state(uid, send_token_to=to_addr, waiting_for="wallet_send_token_amount")
+        sym     = get_state(uid, "send_token_sym", "TOKEN")
+        max_ui  = get_state(uid, "send_token_max_ui", 0)
+        await update.message.reply_text(
+            f"📤 *Send {sym}*\n"
+            f"To: `{to_addr[:8]}...{to_addr[-6:]}`\n"
+            f"Balance: `{float(max_ui):,.4f}`\n\n"
+            f"Enter amount to send, or type `all` for full balance:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]])
+        )
+
+    elif state == "wallet_send_token_amount":
+        mint     = get_state(uid, "send_token_mint", "")
+        sym      = get_state(uid, "send_token_sym", "TOKEN")
+        to_addr  = get_state(uid, "send_token_to", "")
+        decimals = int(get_state(uid, "send_token_decimals", 6) or 6)
+        max_ui   = float(get_state(uid, "send_token_max_ui", 0) or 0)
+        raw_text = text.strip().lower()
+        if raw_text == "all":
+            ui_amt = max_ui
+        else:
+            try:
+                ui_amt = float(raw_text)
+                if ui_amt <= 0:
+                    raise ValueError
+            except ValueError:
+                await update.message.reply_text(
+                    "Enter a valid amount or type `all`.",
+                    parse_mode="Markdown"
+                )
+                return
+        if ui_amt > max_ui:
+            await update.message.reply_text(
+                f"❌ Insufficient balance. Have `{max_ui:,.4f}`, requested `{ui_amt:,.4f}`.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wallet:menu")]])
+            )
+            return
+        raw_amt = int(ui_amt * (10 ** decimals))
+        set_state(uid, send_token_raw=raw_amt, send_token_ui=ui_amt)
+        await update.message.reply_text(
+            f"📤 *Confirm Send Token*\n\n"
+            f"Token: `{sym}`\n"
+            f"Amount: `{ui_amt:,.4f}`\n"
+            f"To: `{to_addr}`\n\n"
+            f"⚠️ This transaction is irreversible.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Confirm Send", callback_data="wallet:send_token_exec"),
+                 InlineKeyboardButton("❌ Cancel",       callback_data="wallet:menu")],
+            ])
+        )
 
     elif state == "wallet_import_key":
         clear_state(uid)
