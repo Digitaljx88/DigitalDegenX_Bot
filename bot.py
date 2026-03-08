@@ -914,6 +914,90 @@ def get_sol_balance(pubkey: str) -> float:
         return 0.0
 
 
+# ── Async RPC helpers (for parallel auto-buy execution) ───────────────────────
+
+async def get_sol_balance_async(pubkey: str, timeout: int = 5) -> float:
+    """Non-blocking SOL balance fetch. Uses 5s timeout for fast parallel execution."""
+    try:
+        loop = asyncio.get_event_loop()
+        resp = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: requests.post(SOLANA_RPC, json={
+                "jsonrpc": "2.0", "id": 1, "method": "getBalance",
+                "params": [pubkey],
+            }, timeout=timeout).json()),
+            timeout=timeout + 1,
+        )
+        return resp["result"]["value"] / 1e9
+    except Exception as e:
+        print(f"[WARN] get_sol_balance_async failed: {e}", flush=True)
+        return 0.0
+
+
+async def fetch_bonding_curve_async(mint: str, rpc_url: str = None, timeout: int = 5) -> dict | None:
+    """Non-blocking bonding curve fetch. Uses 5s timeout for fast parallel execution."""
+    if rpc_url is None:
+        rpc_url = SOLANA_RPC
+    try:
+        loop = asyncio.get_event_loop()
+        result = await asyncio.wait_for(
+            loop.run_in_executor(None, lambda: pumpfun.fetch_bonding_curve_data(mint, rpc_url)),
+            timeout=timeout + 1,
+        )
+        return result
+    except Exception as e:
+        print(f"[WARN] fetch_bonding_curve_async failed for {mint[:8]}: {e}", flush=True)
+        return None
+
+
+async def _rpc_with_retry(coro_fn, max_retries: int = 2, base_delay: float = 0.5, label: str = "rpc"):
+    """
+    Call an async coroutine function with exponential backoff retries.
+    coro_fn: zero-arg async callable that returns the RPC result.
+    Delays: 0.5s, 1.0s on subsequent retries.
+    """
+    last_exc = None
+    for attempt in range(max_retries):
+        try:
+            return await coro_fn()
+        except Exception as e:
+            last_exc = e
+            if attempt < max_retries - 1:
+                delay = base_delay * (2 ** attempt)
+                print(f"[RETRY] {label} attempt {attempt + 1} failed ({e}), retrying in {delay}s", flush=True)
+                await asyncio.sleep(delay)
+    print(f"[RETRY] {label} exhausted {max_retries} attempts: {last_exc}", flush=True)
+    raise last_exc
+
+
+async def poll_tx_confirmation(tx_sig: str, rpc_url: str = None,
+                                max_polls: int = 30, poll_interval: float = 1.0) -> bool:
+    """
+    Poll getTransaction() every second until confirmed on-chain or timeout.
+    Returns True if confirmed, False if dropped/timeout (treat as failed).
+    """
+    if rpc_url is None:
+        rpc_url = SOLANA_RPC
+    loop = asyncio.get_event_loop()
+    for _ in range(max_polls):
+        try:
+            resp = await asyncio.wait_for(
+                loop.run_in_executor(None, lambda: requests.post(rpc_url, json={
+                    "jsonrpc": "2.0", "id": 1,
+                    "method": "getTransaction",
+                    "params": [tx_sig, {"encoding": "json", "commitment": "confirmed",
+                                        "maxSupportedTransactionVersion": 0}],
+                }, timeout=5).json()),
+                timeout=6,
+            )
+            val = resp.get("result")
+            if val and val.get("blockTime"):
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(poll_interval)
+    return False
+
+
 def get_token_accounts(pubkey: str) -> list[dict]:
     try:
         resp = requests.post(SOLANA_RPC, json={
@@ -1549,40 +1633,61 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     if not WALLET_PRIVATE_KEY:
         return
 
-    # Check live wallet balance before attempting the swap
+    # Check live wallet balance & fetch bonding curve in parallel — saves 3-5s vs sequential
     pubkey = get_wallet_pubkey()
-    if pubkey:
-        live_sol = get_sol_balance(pubkey)
-        if live_sol < sol_amount:
-            try:
-                await bot.send_message(
-                    uid,
-                    f"⚠️ *Auto-Buy Skipped* — insufficient wallet SOL\n\n"
-                    f"Need: `{sol_amount} SOL` | Wallet: `{live_sol:.4f} SOL`\n"
-                    f"Token: *{name}* (${symbol}) — score `{score}/100`\n\n"
-                    f"_Top up your wallet or reduce SOL amount per trade._",
-                    parse_mode="Markdown",
-                )
-            except Exception:
-                pass
-            return
+    if not pubkey:
+        return
+
+    # ── Phase 1: PARALLEL RPC — balance + bonding curve simultaneously ─────────
+    try:
+        live_sol, bc = await asyncio.gather(
+            _rpc_with_retry(lambda: get_sol_balance_async(pubkey, timeout=5),
+                            max_retries=2, base_delay=0.5, label="getBalance"),
+            _rpc_with_retry(lambda: fetch_bonding_curve_async(mint, SOLANA_RPC, timeout=5),
+                            max_retries=2, base_delay=0.5, label="getBondingCurve"),
+            return_exceptions=True,
+        )
+    except Exception as e:
+        print(f"[AUTOBUY] uid={uid} parallel RPC gather failed: {e}", flush=True)
+        return
+
+    # If either gather result is an exception, substitute safe defaults
+    if isinstance(live_sol, Exception):
+        print(f"[AUTOBUY] uid={uid} balance fetch failed: {live_sol}", flush=True)
+        live_sol = 0.0
+    if isinstance(bc, Exception):
+        bc = None
+
+    if live_sol < sol_amount:
+        try:
+            await bot.send_message(
+                uid,
+                f"⚠️ *Auto-Buy Skipped* — insufficient wallet SOL\n\n"
+                f"Need: `{sol_amount} SOL` | Wallet: `{live_sol:.4f} SOL`\n"
+                f"Token: *{name}* (${symbol}) — score `{score}/100`\n\n"
+                f"_Top up your wallet or reduce SOL amount per trade._",
+                parse_mode="Markdown",
+            )
+        except Exception:
+            pass
+        return
 
     lamports = int(sol_amount * 1_000_000_000)
 
-    # Try pump.fun bonding curve first
-    bc     = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+    # ── Route decision — pump.fun if BC live, else Jupiter ────────────────────
     tx_sig = None
     price_usd = result.get("price_usd", 0)
-
     if bc and not bc.get("complete"):
+        print(f"[AUTOBUY] uid={uid} route=pump.fun for {symbol}", flush=True)
         from solders.keypair import Keypair
-        tok_est = pumpfun.calculate_buy_tokens(lamports, bc)
-        _kp     = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        tx_sig  = pumpfun.buy_pumpfun(mint, sol_amount, _kp, SOLANA_RPC)
-        out_raw = tok_est
-        route   = "pump.fun"
+        tok_est  = pumpfun.calculate_buy_tokens(lamports, bc)
+        _kp      = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        tx_sig   = pumpfun.buy_pumpfun(mint, sol_amount, _kp, SOLANA_RPC)
+        out_raw  = tok_est
+        route    = "pump.fun"
         decimals = 6
     else:
+        print(f"[AUTOBUY] uid={uid} route=jupiter for {symbol} (BC={'graduated' if bc else 'none'})", flush=True)
         quote = jupiter_quote(SOL_MINT, mint, lamports)
         if not quote or "error" in quote:
             return
@@ -1594,14 +1699,31 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     success = tx_sig and not tx_sig.startswith("ERROR")
 
     if success:
-        # Update portfolio tracking
-        pubkey = get_wallet_pubkey()
+        # ── Phase 3: TX CONFIRMATION — poll on-chain before updating portfolio ──
+        print(f"[AUTOBUY] uid={uid} TX broadcast {tx_sig[:20]}... polling for confirmation", flush=True)
+        confirmed = await poll_tx_confirmation(tx_sig, SOLANA_RPC, max_polls=30, poll_interval=1.0)
+        if not confirmed:
+            print(f"[AUTOBUY] uid={uid} TX not confirmed after 30s — {tx_sig[:20]}", flush=True)
+            try:
+                await bot.send_message(
+                    uid,
+                    f"⚠️ *Auto-Buy TX Unconfirmed*\n\n"
+                    f"🪙 *{name}* (${symbol})\n"
+                    f"🔗 TX: `{tx_sig[:30]}...`\n\n"
+                    f"Transaction was broadcast but not confirmed on-chain within 30s.\n"
+                    f"Portfolio NOT updated. Check Solscan to verify status.",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("🔍 Solscan", url=f"https://solscan.io/tx/{tx_sig}"),
+                    ]])
+                )
+            except Exception:
+                pass
+            return
+
+        # Update portfolio tracking (only after on-chain confirmation)
         portfolio = get_portfolio(uid)
-        if pubkey:
-            sol_bal = get_sol_balance(pubkey)
-            portfolio["SOL"] = sol_bal
-        else:
-            portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
+        portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
         portfolio[mint] = portfolio.get(mint, 0) + out_raw
         update_portfolio(uid, portfolio)
         setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals, sol_amount=sol_amount)
