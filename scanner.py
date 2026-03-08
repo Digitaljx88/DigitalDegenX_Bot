@@ -47,9 +47,8 @@ DEXSCREENER_PROFILES = "https://api.dexscreener.com/token-profiles/latest/v1"
 DEXSCREENER_TOKEN    = "https://api.dexscreener.com/latest/dex/tokens/"
 RUGCHECK_REPORT      = "https://api.rugcheck.xyz/v1/tokens/{mint}/report"
 
-ALERT_COOLDOWN_SECS  = 3600   # one alert per token per hour max
-MCAP_MIN             = 1_000
-MCAP_MAX             = 10_000_000
+MCAP_MIN             = 1_000       # global fetch floor — per-user filter applies on top
+MCAP_MAX             = 50_000_000  # global fetch ceiling
 
 # ── Narrative keywords ────────────────────────────────────────────────────────
 NARRATIVES = {
@@ -72,7 +71,6 @@ def load_state() -> dict:
         return {
             "scanning": True,
             "watchlist": {},
-            "alerted": {},
             "scan_targets": [],
             "seen_tokens": {},
         }
@@ -83,22 +81,34 @@ def save_state(s: dict):
         json.dump(s, f, indent=2)
 
 
+_log_cache: list | None = None
+
+
 def load_log() -> list:
-    try:
-        with open(DAILY_LOG_FILE) as f:
-            return json.load(f)
-    except (FileNotFoundError, json.JSONDecodeError):
-        return []
+    global _log_cache
+    if _log_cache is None:
+        try:
+            with open(DAILY_LOG_FILE) as f:
+                _log_cache = json.load(f)
+        except (FileNotFoundError, json.JSONDecodeError):
+            _log_cache = []
+    return _log_cache
+
+
+def flush_log():
+    """Write the in-memory log cache to disk. Call once per scan cycle."""
+    global _log_cache
+    if _log_cache is not None:
+        with open(DAILY_LOG_FILE, "w") as f:
+            json.dump(_log_cache, f, indent=2)
 
 
 def append_log(entry: dict):
     log = load_log()
     log.append(entry)
-    # Keep last 500 entries
+    # Keep last 500 entries (trim in-memory only; disk write deferred to flush_log)
     if len(log) > 500:
-        log = log[-500:]
-    with open(DAILY_LOG_FILE, "w") as f:
-        json.dump(log, f, indent=2)
+        _log_cache[:] = log[-500:]
 
 
 def is_scanning() -> bool:
@@ -114,17 +124,6 @@ def set_scanning(val: bool):
 def get_watchlist() -> dict:
     return load_state().get("watchlist", {})
 
-
-def cooldown_ok(mint: str) -> bool:
-    alerted = load_state().get("alerted", {})
-    last    = alerted.get(mint, 0)
-    return (time.time() - last) >= ALERT_COOLDOWN_SECS
-
-
-def mark_alerted(mint: str):
-    s = load_state()
-    s.setdefault("alerted", {})[mint] = time.time()
-    save_state(s)
 
 
 def get_user_min_score(uid: int) -> int:
@@ -180,13 +179,23 @@ def add_to_watchlist(mint: str, data: dict):
     save_state(s)
 
 
+SEEN_TOKEN_TTL = 3600  # each token alerts once per hour — prevents repeats, new tokens alert immediately
+
+
 def has_seen_token(mint: str) -> bool:
-    return mint in load_state().get("seen_tokens", {})
+    seen = load_state().get("seen_tokens", {})
+    ts = seen.get(mint)
+    if ts is None:
+        return False
+    return (time.time() - ts) < SEEN_TOKEN_TTL
 
 
 def mark_seen_token(mint: str):
     s = load_state()
-    s.setdefault("seen_tokens", {})[mint] = time.time()
+    # Prune expired entries while we're here
+    now = time.time()
+    s["seen_tokens"] = {m: t for m, t in s.get("seen_tokens", {}).items() if (now - t) < SEEN_TOKEN_TTL}
+    s["seen_tokens"][mint] = now
     save_state(s)
 
 
@@ -285,16 +294,101 @@ def fetch_new_tokens() -> list[dict]:
     except Exception:
         pass
 
-    # Source 4: Direct lookup for profile/boost mints missing market data
+    # Source 4: Parallel lookup for profile/boost mints missing market data
     profile_mints = [m for m, v in tokens.items() if not v.get("name")]
-    for mint in profile_mints[:25]:
-        try:
-            pairs = requests.get(DEXSCREENER_TOKEN + mint, timeout=10).json().get("pairs") or []
-            _parse_pairs(pairs, tokens)
-        except Exception:
-            continue
+    if profile_mints:
+        def _fetch_mint_pairs(mint: str) -> list:
+            try:
+                return requests.get(DEXSCREENER_TOKEN + mint, timeout=10).json().get("pairs") or []
+            except Exception:
+                return []
 
-    # Filter: must have name + mcap in range + created within 24h
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as _ex:
+            all_pair_batches = list(_ex.map(_fetch_mint_pairs, profile_mints[:25]))
+        for pairs in all_pair_batches:
+            if pairs:
+                _parse_pairs(pairs, tokens)
+
+    # Source 5: pump.fun newest coins (pre-graduation tokens with low mcap)
+    try:
+        pf_new = requests.get(
+            "https://frontend-api.pump.fun/coins?sortBy=created_timestamp&order=DESC&limit=50",
+            timeout=10
+        ).json()
+        if isinstance(pf_new, list):
+            now_ms = time.time() * 1000
+            for coin in pf_new:
+                mint = coin.get("mint", "")
+                if not mint:
+                    continue
+                mcap = float(coin.get("usd_market_cap") or 0)
+                # created_timestamp from pump.fun is in milliseconds
+                created_ts = coin.get("created_timestamp") or 0
+                if created_ts < 1e12:  # convert seconds to ms if needed
+                    created_ts *= 1000
+                if created_ts < cutoff_ms:
+                    continue
+                entry = tokens.setdefault(mint, {"mint": mint})
+                entry.setdefault("name",         coin.get("name", ""))
+                entry.setdefault("symbol",        coin.get("symbol", ""))
+                entry.setdefault("mcap",          mcap)
+                entry.setdefault("pair_created",  created_ts)
+                entry.setdefault("description",   coin.get("description", ""))
+                entry.setdefault("twitter_url",   coin.get("twitter") or None)
+                entry.setdefault("price_usd",     0.0)
+                entry.setdefault("volume_h1",     0.0)
+                entry.setdefault("volume_m5",     0.0)
+                entry.setdefault("liquidity",     0.0)
+                entry.setdefault("dex",           "pumpfun")
+    except Exception:
+        pass
+
+    # Source 6: pump.fun most active right now (highest recent engagement)
+    try:
+        pf_hot = requests.get(
+            "https://frontend-api.pump.fun/coins?sortBy=last_reply&order=DESC&limit=50",
+            timeout=10
+        ).json()
+        if isinstance(pf_hot, list):
+            for coin in pf_hot:
+                mint = coin.get("mint", "")
+                if not mint:
+                    continue
+                mcap = float(coin.get("usd_market_cap") or 0)
+                created_ts = coin.get("created_timestamp") or 0
+                if created_ts < 1e12:
+                    created_ts *= 1000
+                if created_ts < cutoff_ms:
+                    continue
+                entry = tokens.setdefault(mint, {"mint": mint})
+                entry.setdefault("name",        coin.get("name", ""))
+                entry.setdefault("symbol",      coin.get("symbol", ""))
+                entry.setdefault("mcap",        mcap)
+                entry.setdefault("pair_created", created_ts)
+                entry.setdefault("description", coin.get("description", ""))
+                entry.setdefault("twitter_url", coin.get("twitter") or None)
+                entry.setdefault("price_usd",   0.0)
+                entry.setdefault("volume_h1",   0.0)
+                entry.setdefault("volume_m5",   0.0)
+                entry.setdefault("liquidity",   0.0)
+                entry.setdefault("dex",         "pumpfun")
+    except Exception:
+        pass
+
+    # Source 7: DexScreener keyword searches for trending narratives
+    _trending_queries = ["pump", "new", "sol", "ai", "meme", "dog", "cat", "pepe"]
+    def _dex_search(q: str) -> list:
+        try:
+            return requests.get(DEXSCREENER_SEARCH + q, timeout=10).json().get("pairs") or []
+        except Exception:
+            return []
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _ex7:
+        _search_results = list(_ex7.map(_dex_search, _trending_queries))
+    for pairs in _search_results:
+        _parse_pairs(pairs[:20], tokens)
+
+    # Filter: must have name + mcap in range + created within cutoff
     result = [
         v for v in tokens.values()
         if v.get("name")
@@ -928,7 +1022,8 @@ def priority_label(score: int) -> str:
     if score >= 80: return "🟠 HOT"
     if score >= 70: return "🟡 WARM"
     if score >= 50: return "⚪ WATCH"
-    return "❌ SKIP"
+    if score >= 35: return "🌱 SCOUTED"
+    return "📡 TRACKED"
 
 
 def age_str(pair_created_ms: int) -> str:
@@ -1116,6 +1211,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
 
     for token, rc_raw in zip(to_process, rugcheck_results):
         mint = token["mint"]
+        mcap = token.get("mcap", 0)
         rc   = rc_raw if isinstance(rc_raw, dict) else {}
 
         # Score using v2 engine
@@ -1164,54 +1260,47 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             "dq":        result.get("disqualified"),
         })
 
+        # Mark as seen right after scoring so we don't re-score on every 15s cycle.
+        # TTL matches alert cooldown (1h) so tokens become eligible again once cooldown expires.
+        mark_seen_token(mint)
+
         if result["disqualified"]:
             continue
 
         # Now determine which users get alerts using their v2 settings
-        # For each user, get their alert thresholds and check if token qualifies
-        user_scores = {}  # cache v2 scores per user
-        user_tiers = {}   # cache tier classification per user
+        user_tiers = {}
         any_user_qualifies = False
-        
+
         for uid in chat_ids:
-            # Get user's v2 settings
             try:
                 user_cfg = settings_manager.get_user_settings(uid)
-                scouted_threshold = user_cfg.get("alert_scouted_threshold", 50)
-                warm_threshold = user_cfg.get("alert_warm_threshold", 70)
-                hot_threshold = user_cfg.get("alert_hot_threshold", 80)
-                ultra_hot_threshold = user_cfg.get("alert_ultra_hot_threshold", 90)
+                watch_threshold = user_cfg.get("alert_scouted_threshold", 35)
+                alert_threshold = user_cfg.get("alert_warm_threshold", 55)
+                user_mcap_min   = user_cfg.get("scanner_mcap_min", 5_000)
+                user_mcap_max   = user_cfg.get("scanner_mcap_max", 10_000_000)
             except Exception:
-                # Fallback if settings_manager has issues
-                scouted_threshold, warm_threshold, hot_threshold, ultra_hot_threshold = 50, 70, 80, 90
-            
-            user_scores[uid] = (scouted_threshold, warm_threshold, hot_threshold, ultra_hot_threshold)
-            
+                watch_threshold, alert_threshold = 35, 55
+                user_mcap_min, user_mcap_max = 5_000, 10_000_000
+
+            # Skip if token mcap is outside this user's configured range
+            if not (user_mcap_min <= mcap <= user_mcap_max):
+                user_tiers[uid] = None
+                continue
+
             # Classify into tier — use effective_score (includes velocity boost)
             eff = result.get("effective_score", score)
-            if eff >= ultra_hot_threshold:
-                user_tiers[uid] = "ULTRA_HOT"
+            if eff >= alert_threshold:
+                user_tiers[uid] = "HOT"       # full DM alert
                 any_user_qualifies = True
-            elif eff >= hot_threshold:
-                user_tiers[uid] = "HOT"
-                any_user_qualifies = True
-            elif eff >= warm_threshold:
-                user_tiers[uid] = "WARM"
-                any_user_qualifies = True
-            elif eff >= scouted_threshold:
-                user_tiers[uid] = "SCOUTED"
+            elif eff >= watch_threshold:
+                user_tiers[uid] = "SCOUTED"   # compact watchlist ping
                 any_user_qualifies = True
             else:
-                user_tiers[uid] = None  # Below user's threshold
-
-        eff = result.get("effective_score", score)
-        # Only mark as seen if at least one user qualifies or score is high enough
-        if any_user_qualifies or (alert_channel and eff >= CH_SCOUTED_THR):
-            mark_seen_token(mint)
+                user_tiers[uid] = None
 
         # Separate scouted from hot alerts
         scouted_uids = [uid for uid, tier in user_tiers.items() if tier == "SCOUTED"]
-        hot_uids = [uid for uid, tier in user_tiers.items() if tier in ("HOT", "WARM", "ULTRA_HOT")]
+        hot_uids     = [uid for uid, tier in user_tiers.items() if tier in ("HOT", "WARM", "ULTRA_HOT")]
 
         # ─── Send SCOUTED alerts ───────────────────────────────────────────
         if scouted_uids or (alert_channel and score >= CH_SCOUTED_THR):
@@ -1220,16 +1309,12 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 "score": score, "mcap": mcap, "mint": mint,
                 "ts": time.time(),
             })
-            
-            if (scouted_uids or alert_channel) and cooldown_ok(mint):
-                mark_alerted(mint)
-                log = load_log()
-                for e in reversed(log):
+
+            if scouted_uids or alert_channel:
+                for e in reversed(load_log()):
                     if e["mint"] == mint:
                         e["alerted"] = True
                         break
-                with open(DAILY_LOG_FILE, "w") as f:
-                    json.dump(log, f, indent=2)
 
                 scout_msg = format_scouted_alert(result)[:4000]
                 from telegram import InlineKeyboardMarkup, InlineKeyboardButton
@@ -1276,22 +1361,21 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                     except Exception:
                         pass
 
-        # ─── Send HOT alerts (70+) ──────────────────────────────────────────
-        should_alert_hot = (hot_uids or alert_channel) and cooldown_ok(mint)
+        # ─── Send HOT alerts ────────────────────────────────────────────────
+        should_alert_hot = bool(hot_uids or alert_channel)
 
         if should_alert_hot:
-            mark_alerted(mint)
-
-            # Update log entry
-            log = load_log()
-            for e in reversed(log):
+            # Update log entry (in-memory; flushed to disk at end of scan)
+            for e in reversed(load_log()):
                 if e["mint"] == mint:
                     e["alerted"] = True
                     break
-            with open(DAILY_LOG_FILE, "w") as f:
-                json.dump(log, f, indent=2)
 
-            msg = format_alert(result)[:4000]   # Telegram 4096 char limit
+            try:
+                msg = format_alert(result)[:4000]
+            except Exception as _fe:
+                print(f"[SCANNER] format_alert error for {sym}: {_fe}", flush=True)
+                continue
             from telegram import InlineKeyboardMarkup, InlineKeyboardButton
             kb  = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
@@ -1308,14 +1392,22 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                         parse_mode="Markdown", reply_markup=kb,
                         disable_web_page_preview=True
                     )
-                except Exception:
-                    try:
-                        await bot.send_message(
-                            chat_id=uid, text=msg,
-                            reply_markup=kb, disable_web_page_preview=True
-                        )
-                    except Exception as e:
-                        print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
+                except Exception as _e1:
+                    _e1s = str(_e1)
+                    if "Flood control" in _e1s or "Too Many Requests" in _e1s:
+                        import re as _re
+                        _wait = int((_re.search(r"Retry in (\d+)", _e1s) or [None, 5])[1])
+                        print(f"[SCANNER] flood control — waiting {_wait}s", flush=True)
+                        await asyncio.sleep(_wait + 1)
+                        try:
+                            await bot.send_message(chat_id=uid, text=msg, reply_markup=kb, disable_web_page_preview=True)
+                        except Exception as e:
+                            print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
+                    else:
+                        try:
+                            await bot.send_message(chat_id=uid, text=msg, reply_markup=kb, disable_web_page_preview=True)
+                        except Exception as e:
+                            print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
 
             # Post to alert channel (URL buttons only — callback buttons don't work in channels)
             if alert_channel and score >= CH_HOT_THR:
@@ -1353,6 +1445,9 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 await on_alert(bot, result)
             except Exception:
                 pass
+
+    # Flush log cache to disk once per scan cycle (replaces per-token writes)
+    flush_log()
 
 
 

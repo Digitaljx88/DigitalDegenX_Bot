@@ -31,6 +31,8 @@ from config import (
     TELEGRAM_TOKEN, SOLANA_RPC, WALLET_PRIVATE_KEY,
     ADMIN_IDS, PAPER_START_SOL, ALERT_CHECK_SECS,
     HELIUS_API_KEY,
+    PRIORITY_FEE_MICRO_LAMPORTS, PRIORITY_FEE_COMPUTE_UNITS,
+    JITO_ENABLED, JITO_TIP_LAMPORTS, JITO_ENDPOINT,
 )
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
@@ -46,6 +48,26 @@ DEXSCREENER_TOKEN  = "https://api.dexscreener.com/latest/dex/tokens/"
 JUPITER_QUOTE_URL  = "https://lite-api.jup.ag/swap/v1/quote"
 JUPITER_SWAP_URL   = "https://lite-api.jup.ag/swap/v1/swap"
 SOL_MINT           = "So11111111111111111111111111111111111111112"
+
+# Jito tip accounts (rotate randomly to spread load)
+JITO_TIP_ACCOUNTS = [
+    "96gYZGLnJYVFmbjzopPSU6QiEV5fGqZNyN9nmNhvrZU5",
+    "HFqU5x63VTqvQss8hp11i4wVV8bD44PvwucfZ2bU7gRe",
+    "Cw8CFyM9FkoMi7K7Crf6HNQqf4uEMzpKw6QNghXLvLkY",
+    "ADaUMid9yfUytqMBgopwjb2DTLSokTSzL1TE1uU5Lqf",
+    "DfXygSm4jCyNCybVYYK6DwvWqjKee8pbDmJGcLWNDXjh",
+    "ADuUkR4vqLUMWXxW9gh6D6L8pMSawimctcNZ5pGwDcEt",
+    "DttWaMuVvTiduZRnguLF7jNxTgiMBZ1hyAumKUiL2KRL",
+    "3AVi9Tg9Uo68tJfuvoKvqKNWKkC5wPdSSdeBnizKZ6jT",
+]
+
+# Priority fee presets (µlamports / CU)
+PRIORITY_FEE_PRESETS = {
+    "low":    100_000,
+    "medium": 500_000,
+    "high":   1_000_000,
+    "turbo":  3_000_000,
+}
 TOKEN_PROGRAM      = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
 
 DATA_DIR           = os.path.join(os.path.dirname(__file__), "data")
@@ -53,6 +75,7 @@ PORTFOLIO_FILE     = os.path.join(DATA_DIR, "portfolios.json")
 AUTO_SELL_FILE     = os.path.join(DATA_DIR, "auto_sell.json")
 AUTO_BUY_FILE      = os.path.join(DATA_DIR, "auto_buy.json")
 TRADE_LOG_FILE     = os.path.join(DATA_DIR, "trade_log.json")
+USER_WALLET_ALERTS_FILE = os.path.join(DATA_DIR, "user_wallet_alerts.json")
 GLOBAL_SETTINGS_FILE = os.path.join(DATA_DIR, "global_settings.json")
 MODES_FILE           = os.path.join(DATA_DIR, "user_modes.json")
 
@@ -187,6 +210,53 @@ def get_global_sl() -> dict:
 def set_global_sl(data: dict):
     gs = load_global_settings()
     gs["stop_loss"] = data
+    save_global_settings(gs)
+
+def get_user_slippage(uid: int) -> int:
+    """Return user's slippage in basis points (default 150 = 1.5%)."""
+    return load_global_settings().get("user_trade_settings", {}).get(str(uid), {}).get("slippage_bps", 150)
+
+def set_user_slippage(uid: int, bps: int):
+    """Persist user's slippage setting (10–5000 bps)."""
+    gs  = load_global_settings()
+    uts = gs.setdefault("user_trade_settings", {}).setdefault(str(uid), {})
+    uts["slippage_bps"] = max(10, min(5000, int(bps)))
+    save_global_settings(gs)
+
+def get_user_jito(uid: int) -> bool:
+    """Return whether Jito MEV protection is enabled for this user (default: global config)."""
+    return load_global_settings().get("user_trade_settings", {}).get(str(uid), {}).get(
+        "jito_enabled", JITO_ENABLED
+    )
+
+def set_user_jito(uid: int, enabled: bool):
+    """Toggle Jito MEV protection for this user."""
+    gs  = load_global_settings()
+    gs.setdefault("user_trade_settings", {}).setdefault(str(uid), {})["jito_enabled"] = enabled
+    save_global_settings(gs)
+
+def get_user_jito_tip(uid: int) -> int:
+    """Return user's Jito tip in lamports (default: JITO_TIP_LAMPORTS from config)."""
+    return load_global_settings().get("user_trade_settings", {}).get(str(uid), {}).get(
+        "jito_tip_lamports", JITO_TIP_LAMPORTS
+    )
+
+def set_user_jito_tip(uid: int, lamports: int):
+    """Persist user's Jito tip setting."""
+    gs  = load_global_settings()
+    gs.setdefault("user_trade_settings", {}).setdefault(str(uid), {})["jito_tip_lamports"] = max(1_000, min(10_000_000, int(lamports)))
+    save_global_settings(gs)
+
+def get_user_priority_fee(uid: int) -> int:
+    """Return user's priority fee in µlamports/CU (default: PRIORITY_FEE_MICRO_LAMPORTS)."""
+    return load_global_settings().get("user_trade_settings", {}).get(str(uid), {}).get(
+        "priority_fee", PRIORITY_FEE_MICRO_LAMPORTS
+    )
+
+def set_user_priority_fee(uid: int, micro_lamports: int):
+    """Persist user's priority fee setting."""
+    gs  = load_global_settings()
+    gs.setdefault("user_trade_settings", {}).setdefault(str(uid), {})["priority_fee"] = max(0, int(micro_lamports))
     save_global_settings(gs)
 
 def get_global_trailing_stop() -> dict:
@@ -375,6 +445,34 @@ def load_trade_log() -> list:
 def save_trade_log(trades: list):
     _save(TRADE_LOG_FILE, {"trades": trades})
 
+
+# ─── User wallet alert tracker ────────────────────────────────────────────────
+
+def load_user_wallet_alerts() -> dict:
+    return _load(USER_WALLET_ALERTS_FILE)
+
+def save_user_wallet_alerts(d: dict):
+    _save(USER_WALLET_ALERTS_FILE, d)
+
+def get_user_alert_wallets(uid: int) -> list:
+    return load_user_wallet_alerts().get(str(uid), [])
+
+def add_user_alert_wallet(uid: int, address: str, label: str) -> bool:
+    d = load_user_wallet_alerts()
+    wallets = d.get(str(uid), [])
+    if any(w["address"] == address for w in wallets):
+        return False
+    wallets.append({"address": address, "label": label or address[:8], "last_tokens": {}})
+    d[str(uid)] = wallets
+    save_user_wallet_alerts(d)
+    return True
+
+def remove_user_alert_wallet(uid: int, address: str):
+    d = load_user_wallet_alerts()
+    d[str(uid)] = [w for w in d.get(str(uid), []) if w["address"] != address]
+    save_user_wallet_alerts(d)
+
+
 def _detect_narrative(name: str, symbol: str, desc: str = "") -> str:
     """Inline keyword match — mirrors scanner.py NARRATIVES dict."""
     NARRATIVES = {
@@ -524,6 +622,23 @@ def clear_state(uid: int):
 
 # ─── Market data ──────────────────────────────────────────────────────────────
 
+# Portfolio price cache: mint → {"ts": float, "pair": dict|None, "bc": dict|None, "coin": dict|None}
+_portfolio_price_cache: dict[str, dict] = {}
+_PORTFOLIO_CACHE_TTL = 60  # seconds
+
+
+def _get_cached_price(mint: str) -> dict | None:
+    """Return cached price data if still fresh, else None."""
+    entry = _portfolio_price_cache.get(mint)
+    if entry and (time.time() - entry["ts"]) < _PORTFOLIO_CACHE_TTL:
+        return entry
+    return None
+
+
+def _set_cached_price(mint: str, pair, bc, coin):
+    _portfolio_price_cache[mint] = {"ts": time.time(), "pair": pair, "bc": bc, "coin": coin}
+
+
 def fetch_sol_pair(query: str) -> dict | None:
     url = (DEXSCREENER_TOKEN + query) if len(query) > 30 else (DEXSCREENER_SEARCH + query)
     try:
@@ -552,6 +667,29 @@ def _fetch_pumpfun_coin(mint: str) -> dict | None:
     except Exception:
         pass
     return None
+
+
+async def _fetch_portfolio_token_data(mint: str) -> dict:
+    """Fetch all display data for one portfolio token concurrently.
+    Returns dict with keys: pair, bc, coin (all may be None).
+    Uses short-lived cache to prevent rate-limit "?" failures."""
+    cached = _get_cached_price(mint)
+    if cached:
+        return cached
+
+    loop = asyncio.get_event_loop()
+    pair = await loop.run_in_executor(None, fetch_sol_pair, mint)
+    bc   = None
+    coin = None
+
+    if not pair or not float(pair.get("priceNative", 0) or 0):
+        bc = await loop.run_in_executor(None, pumpfun.fetch_bonding_curve_data, mint, SOLANA_RPC)
+
+    if not pair:
+        coin = await loop.run_in_executor(None, _fetch_pumpfun_coin, mint)
+
+    _set_cached_price(mint, pair, bc, coin)
+    return _portfolio_price_cache[mint]
 
 
 def fetch_token_price(mint: str) -> tuple[float | None, float | None]:
@@ -723,8 +861,140 @@ def autosell_token_kb(uid: int, mint: str) -> InlineKeyboardMarkup:
     ])
 
 
+def _fee_label(micro_lamports: int) -> str:
+    """Human label for a priority fee value."""
+    for name, val in PRIORITY_FEE_PRESETS.items():
+        if micro_lamports == val:
+            return name.capitalize()
+    return f"{micro_lamports // 1000}K µL"
+
+
+def _format_pnl_card(symbol: str, mint: str, sol_in: float, sol_out: float,
+                     buy_ts: float, sell_ts: float, mode: str) -> str:
+    """Format a P&L share card string for a completed sell."""
+    pnl_sol = sol_out - sol_in
+    pnl_pct = (pnl_sol / sol_in * 100) if sol_in > 0 else 0
+    sign    = "+" if pnl_pct >= 0 else ""
+    emoji   = "📈" if pnl_sol >= 0 else "📉"
+    hold_s  = sell_ts - buy_ts if buy_ts else 0
+    if hold_s < 60:        hold_str = f"{int(hold_s)}s"
+    elif hold_s < 3600:    hold_str = f"{int(hold_s/60)}m"
+    elif hold_s < 86400:   hold_str = f"{int(hold_s/3600)}h {int((hold_s%3600)/60)}m"
+    else:                  hold_str = f"{int(hold_s/86400)}d"
+    mode_tag = "📄 Paper" if mode == "paper" else "🔴 Live"
+    return (
+        f"{'━'*22}\n"
+        f"🎰 *${symbol}* Trade Complete {emoji}\n"
+        f"{'━'*22}\n"
+        f"Entry:  `{sol_in:.4f} ◎`\n"
+        f"Exit:   `{sol_out:.4f} ◎`\n"
+        f"P&L:    `{sign}{pnl_sol:.4f} ◎` ({sign}{pnl_pct:.1f}%)\n"
+        f"Hold:   `{hold_str}`\n"
+        f"Mode:   {mode_tag}\n"
+        f"{'━'*22}"
+    )
+
+SAFETY_CHECK_TIMEOUT = 8  # seconds before we give up and allow the trade
+
+async def check_token_safety(mint: str) -> dict:
+    """
+    Fetch RugCheck report for mint and return a safety summary.
+    Returns dict with keys:
+      - safe: bool  (False = blocked, True = allow)
+      - warnings: list[str]  (non-blocking yellow flags)
+      - block_reason: str | None  (set if safe=False)
+      - score: int  (RugCheck score, lower = riskier; 0 if unavailable)
+    """
+    from scanner import fetch_rugcheck
+    import asyncio
+    try:
+        loop = asyncio.get_event_loop()
+        rc = await asyncio.wait_for(
+            loop.run_in_executor(None, fetch_rugcheck, mint),
+            timeout=SAFETY_CHECK_TIMEOUT
+        )
+    except Exception:
+        # Network/timeout — allow trade but note we couldn't verify
+        return {"safe": True, "warnings": ["Safety check timed out — trade unverified"], "block_reason": None, "score": 0}
+
+    if not rc:
+        return {"safe": True, "warnings": ["RugCheck data unavailable"], "block_reason": None, "score": 0}
+
+    warnings    = []
+    block_reason = None
+    score        = rc.get("score", 0) or 0
+
+    # Hard blocks — these always cancel the trade
+    if rc.get("rugged"):
+        block_reason = "Token flagged as RUGGED on RugCheck"
+
+    # Mint authority still enabled = dev can print infinite tokens
+    mint_auth = rc.get("mintAuthority")
+    if not block_reason and mint_auth and mint_auth not in ("", "null", None):
+        block_reason = "Mint authority NOT revoked — dev can print tokens"
+
+    # Danger-level risks from RugCheck
+    danger_risks = [r["name"] for r in (rc.get("risks") or []) if r.get("level") == "danger"]
+    if not block_reason and danger_risks:
+        block_reason = f"RugCheck DANGER: {', '.join(danger_risks[:3])}"
+
+    # Warnings — non-blocking yellow flags
+    freeze_auth = rc.get("freezeAuthority")
+    if freeze_auth and freeze_auth not in ("", "null", None):
+        warnings.append("Freeze authority active — trading could be frozen")
+
+    warn_risks = [r["name"] for r in (rc.get("risks") or []) if r.get("level") == "warn"]
+    if warn_risks:
+        warnings.append(f"RugCheck warnings: {', '.join(warn_risks[:3])}")
+
+    top_holders = rc.get("topHolders") or []
+    if top_holders:
+        top_pct = top_holders[0].get("pct", 0) or 0
+        if top_pct > 20:
+            warnings.append(f"Top holder owns {top_pct:.1f}% of supply")
+
+    return {
+        "safe":         block_reason is None,
+        "warnings":     warnings,
+        "block_reason": block_reason,
+        "score":        score,
+    }
+
+
+def get_safety_check_enabled(uid: int) -> bool:
+    """Return whether safety check is enabled for this user (default: True)."""
+    gs = load_global_settings()
+    return gs.get("user_trade_settings", {}).get(str(uid), {}).get("safety_check", True)
+
+
+def set_safety_check_enabled(uid: int, enabled: bool):
+    """Toggle per-user safety check."""
+    gs = load_global_settings()
+    gs.setdefault("user_trade_settings", {}).setdefault(str(uid), {})["safety_check"] = enabled
+    save_global_settings(gs)
+
+
+def get_user_quick_buy_amounts(uid: int) -> list:
+    """Return user's quick-buy SOL presets (default: [0.1, 0.25, 0.5, 1.0])."""
+    gs = load_global_settings()
+    return gs.get("user_trade_settings", {}).get(str(uid), {}).get("quick_buy_amounts", [0.1, 0.25, 0.5, 1.0])
+
+def set_user_quick_buy_amounts(uid: int, amounts: list):
+    gs = load_global_settings()
+    gs.setdefault("user_trade_settings", {}).setdefault(str(uid), {})["quick_buy_amounts"] = amounts
+    save_global_settings(gs)
+
+
 def settings_kb(uid: int) -> InlineKeyboardMarkup:
-    mode = get_mode(uid)
+    mode      = get_mode(uid)
+    slip      = get_user_slippage(uid)
+    slip_pct  = slip / 100
+    slip_label = f"{slip_pct:.1f}%" if slip % 100 else f"{int(slip_pct)}%"
+    jito      = get_user_jito(uid)
+    jito_tip  = get_user_jito_tip(uid)
+    jito_label = f"{'🟢 ON' if jito else '🔴 OFF'} · tip {jito_tip // 1000}K L"
+    pfee      = get_user_priority_fee(uid)
+    pfee_label = _fee_label(pfee)
     return InlineKeyboardMarkup([
         [InlineKeyboardButton(
             ("✅ " if mode == "paper" else "") + "📄 Paper Trading",
@@ -734,6 +1004,11 @@ def settings_kb(uid: int) -> InlineKeyboardMarkup:
             ("✅ " if mode == "live" else "") + "🔴 Live Trading",
             callback_data="mode:live"
         )],
+        [InlineKeyboardButton(f"⚡ Slippage: {slip_label}",        callback_data="settings:slippage"),
+         InlineKeyboardButton(f"🚀 Priority: {pfee_label}",        callback_data="settings:priority")],
+        [InlineKeyboardButton(f"🛡️ Jito MEV: {jito_label}",       callback_data="settings:jito")],
+        [InlineKeyboardButton(f"🔍 Safety Check: {'🟢 ON' if get_safety_check_enabled(uid) else '🔴 OFF'}", callback_data="settings:safety_toggle"),
+         InlineKeyboardButton("💰 Buy Amounts", callback_data="settings:quick_amounts")],
         [InlineKeyboardButton("🗑️ Reset Paper Portfolio", callback_data="settings:reset_paper")],
         [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
     ])
@@ -764,17 +1039,59 @@ def price_card_kb(mint: str) -> InlineKeyboardMarkup:
 
 # ─── Trading ──────────────────────────────────────────────────────────────────
 
-def jupiter_quote(in_mint: str, out_mint: str, amount: int) -> dict | None:
+def jupiter_quote(in_mint: str, out_mint: str, amount: int, slippage_bps: int = 150) -> dict | None:
     try:
         return requests.get(JUPITER_QUOTE_URL, params={
             "inputMint": in_mint, "outputMint": out_mint,
-            "amount": amount, "slippageBps": 150,
+            "amount": amount, "slippageBps": slippage_bps,
         }, timeout=10).json()
     except Exception:
         return None
 
 
-def execute_swap_live(quote: dict) -> str:
+def _build_jito_tip_tx(keypair, tip_lamports: int) -> str | None:
+    """Build a base64-encoded SOL-transfer tip transaction for a Jito bundle."""
+    import struct, base64 as _b64, random
+    try:
+        from solders.pubkey import Pubkey
+        from solders.instruction import Instruction, AccountMeta
+        from solders.message import MessageV0
+        from solders.transaction import VersionedTransaction
+        from solders.hash import Hash
+
+        tip_account = random.choice(JITO_TIP_ACCOUNTS)
+        bh_resp = requests.post(SOLANA_RPC, json={
+            "jsonrpc": "2.0", "id": 1,
+            "method": "getLatestBlockhash",
+            "params": [{"commitment": "confirmed"}],
+        }, timeout=10).json()
+        bh = bh_resp["result"]["value"]["blockhash"]
+
+        # System program transfer instruction: discriminant=2, u64 LE amount
+        ix_data = struct.pack("<BQ", 2, tip_lamports)
+        transfer_ix = Instruction(
+            program_id=Pubkey.from_string("11111111111111111111111111111111"),
+            accounts=[
+                AccountMeta(pubkey=keypair.pubkey(), is_signer=True,  is_writable=True),
+                AccountMeta(pubkey=Pubkey.from_string(tip_account),   is_signer=False, is_writable=True),
+            ],
+            data=bytes(ix_data),
+        )
+        msg = MessageV0.try_compile(
+            payer=keypair.pubkey(),
+            instructions=[transfer_ix],
+            address_lookup_table_accounts=[],
+            recent_blockhash=Hash.from_string(bh),
+        )
+        tip_tx = VersionedTransaction(msg, [keypair])
+        return _b64.b64encode(bytes(tip_tx)).decode()
+    except Exception as e:
+        print(f"[JITO] tip tx build failed: {e}", flush=True)
+        return None
+
+
+def execute_swap_live(quote: dict, uid: int = 0) -> str:
+    """Sign and submit a Jupiter swap. Uses Jito MEV protection and per-user priority fee when enabled."""
     if not WALLET_PRIVATE_KEY:
         return "ERROR: No WALLET_PRIVATE_KEY in config.py"
     try:
@@ -782,23 +1099,55 @@ def execute_swap_live(quote: dict) -> str:
         from solders.transaction import VersionedTransaction
         import base64
 
-        keypair = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        keypair      = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
+        prio_fee     = get_user_priority_fee(uid) if uid else PRIORITY_FEE_MICRO_LAMPORTS
+        use_jito     = get_user_jito(uid) if uid else JITO_ENABLED
+        tip_lamports = get_user_jito_tip(uid) if uid else JITO_TIP_LAMPORTS
+
+        # Priority fee in lamports = (µlamports/CU × CU_budget) / 1_000_000
+        prio_lamports = int(prio_fee * PRIORITY_FEE_COMPUTE_UNITS / 1_000_000)
+
         swap = requests.post(JUPITER_SWAP_URL, json={
-            "quoteResponse": quote,
-            "userPublicKey": str(keypair.pubkey()),
-            "wrapAndUnwrapSol": True,
+            "quoteResponse":          quote,
+            "userPublicKey":          str(keypair.pubkey()),
+            "wrapAndUnwrapSol":       True,
+            "prioritizationFeeLamports": prio_lamports,
         }, timeout=15).json()
 
         if "swapTransaction" not in swap:
             return f"Swap build failed: {swap.get('error', swap)}"
 
-        raw_tx = VersionedTransaction.from_bytes(base64.b64decode(swap["swapTransaction"]))
-        tx = VersionedTransaction(raw_tx.message, [keypair])
+        raw_tx  = VersionedTransaction.from_bytes(base64.b64decode(swap["swapTransaction"]))
+        tx      = VersionedTransaction(raw_tx.message, [keypair])
+        tx_b64  = base64.b64encode(bytes(tx)).decode()
 
+        # ── Jito bundle path ──────────────────────────────────────────────────
+        if use_jito:
+            tip_b64 = _build_jito_tip_tx(keypair, tip_lamports)
+            if tip_b64:
+                try:
+                    bundle_resp = requests.post(JITO_ENDPOINT, json={
+                        "jsonrpc": "2.0", "id": 1,
+                        "method": "sendBundle",
+                        "params": [[tx_b64, tip_b64]],
+                    }, timeout=20).json()
+                    if "result" in bundle_resp:
+                        bundle_id = bundle_resp["result"]
+                        print(f"[JITO] bundle submitted: {bundle_id}", flush=True)
+                        # Jito returns a bundle ID, not a tx sig — return it prefixed
+                        return f"JITO_BUNDLE:{bundle_id}"
+                    err = bundle_resp.get("error", {})
+                    print(f"[JITO] bundle error, falling back to RPC: {err}", flush=True)
+                except Exception as je:
+                    print(f"[JITO] bundle submission failed ({je}), falling back to RPC", flush=True)
+            else:
+                print("[JITO] tip tx build failed, falling back to RPC", flush=True)
+
+        # ── Standard RPC path ─────────────────────────────────────────────────
         resp = requests.post(SOLANA_RPC, json={
             "jsonrpc": "2.0", "id": 1, "method": "sendTransaction",
             "params": [
-                base64.b64encode(bytes(tx)).decode(),
+                tx_b64,
                 {"encoding": "base64", "preflightCommitment": "confirmed"},
             ],
         }, timeout=30).json()
@@ -806,6 +1155,46 @@ def execute_swap_live(quote: dict) -> str:
         return resp.get("result") or f"RPC error: {resp.get('error', resp)}"
     except Exception as e:
         return f"Transaction error: {e}"
+
+
+def _is_slippage_error(sig: str) -> bool:
+    """Detect if a swap result string indicates a slippage tolerance error."""
+    if not sig:
+        return False
+    low = sig.lower()
+    return any(k in low for k in (
+        "slippage", "0x1771", "6001", "tolerance exceeded",
+        "price changed", "custom program error: 0x1"
+    ))
+
+
+async def _swap_with_retry(
+    in_mint: str, out_mint: str, amount_raw: int, uid: int,
+    loop, max_retries: int = 2, bump_factor: float = 1.5,
+    status_fn=None,
+) -> tuple:
+    """
+    Fetch Jupiter quote + execute swap, auto-retrying with higher slippage on slippage failures.
+    Returns: (sig, quote, attempts, final_slippage_bps)
+    """
+    slippage = get_user_slippage(uid)
+    quote = None
+    sig   = "ERROR: no attempts made"
+    for attempt in range(1, max_retries + 2):
+        quote = await loop.run_in_executor(
+            None, lambda s=slippage: jupiter_quote(in_mint, out_mint, amount_raw, s)
+        )
+        if not quote or "outAmount" not in quote:
+            return "ERROR: quote failed", None, attempt, slippage
+        if status_fn and attempt > 1:
+            await status_fn(f"🔄 Retry {attempt - 1}/{max_retries} — slippage bumped to {slippage / 100:.1f}%...")
+        sig = await loop.run_in_executor(None, lambda q=quote: execute_swap_live(q, uid))
+        if not _is_slippage_error(sig):
+            return sig, quote, attempt, slippage
+        if attempt <= max_retries:
+            slippage = min(5000, int(slippage * bump_factor))
+            print(f"[RETRY] slippage error attempt {attempt}, bumping to {slippage} bps", flush=True)
+    return sig, quote, max_retries + 1, slippage
 
 
 def get_wallet_pubkey() -> str | None:
@@ -1035,10 +1424,25 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
     sell_amount = max(1, int(raw_held * sell_pct / 100))
 
     if mode == "paper":
-        quote = jupiter_quote(mint, SOL_MINT, sell_amount)
-        if not quote or "outAmount" not in quote:
+        # Paper mode: execute at current market price (no Jupiter price impact)
+        # This is standard paper-trading behaviour — simulates ideal fill at market
+        as_cfg    = load_auto_sell().get(str(uid), {}).get(mint, {})
+        dec       = as_cfg.get("decimals", 6)
+        sol_received = 0.0
+        if price_usd:
+            sol_usd_rate  = pf.get_sol_price() or 150.0
+            price_sol_now = price_usd / sol_usd_rate if sol_usd_rate else 0.0
+            ui            = sell_amount / (10 ** dec)
+            sol_received  = price_sol_now * ui * 0.99  # 1 % simulated fee
+        if not sol_received:
+            # Fallback: fetch live price directly
+            _p = fetch_sol_pair(mint)
+            if _p:
+                _psol = float(_p.get("priceNative", 0) or 0)
+                _dec  = int(_p.get("baseToken", {}).get("decimals", dec) or dec)
+                sol_received = (_psol * sell_amount / (10 ** _dec)) * 0.99
+        if not sol_received:
             return
-        sol_received = int(quote["outAmount"]) / 1e9
         portfolio[mint] = raw_held - sell_amount
         portfolio["SOL"] = portfolio.get("SOL", 0) + sol_received
         if portfolio[mint] <= 0:
@@ -1064,10 +1468,10 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
         )
     else:
         # Live mode
-        quote = jupiter_quote(mint, SOL_MINT, sell_amount)
+        quote = jupiter_quote(mint, SOL_MINT, sell_amount, get_user_slippage(uid))
         if not quote or "outAmount" not in quote:
             return
-        sig = execute_swap_live(quote)
+        sig = execute_swap_live(quote, uid)
         sol_received = int(quote.get("outAmount", 0)) / 1e9
         if "ERROR" in sig or "error" in sig.lower():
             await bot.send_message(
@@ -1110,6 +1514,23 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
     if not all_configs:
         return
 
+    # ── Pre-fetch prices in parallel for all enabled positions ──────────────────
+    _candidate_mints: set[str] = {
+        mint
+        for tokens in all_configs.values()
+        for mint, cfg in tokens.items()
+        if cfg.get("enabled", True) and cfg.get("buy_price_usd", 0)
+    }
+    _loop = asyncio.get_event_loop()
+    _price_raw = await asyncio.gather(
+        *[_loop.run_in_executor(None, fetch_token_price, m) for m in _candidate_mints],
+        return_exceptions=True,
+    )
+    _price_cache: dict[str, tuple] = {
+        m: (r if not isinstance(r, Exception) else (None, None))
+        for m, r in zip(_candidate_mints, _price_raw)
+    }
+
     for uid_str, tokens in all_configs.items():
         uid  = int(uid_str)
         mode = get_mode(uid)
@@ -1123,6 +1544,8 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                     _live_held_mints = {a["mint"] for a in (get_token_accounts(_pubkey) or [])}
                 except Exception:
                     _live_held_mints = None  # skip stale check this cycle if RPC fails
+        else:
+            portfolio = get_portfolio(uid)  # load once per user, not once per token
 
         for mint, cfg in list(tokens.items()):
             if not cfg.get("enabled", True):
@@ -1139,13 +1562,12 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                     print(f"[AUTO-SELL] Cleaned up stale live entry: uid={uid}, mint={mint[:8]}", flush=True)
                     continue
             else:
-                portfolio = get_portfolio(uid)
                 if mint not in portfolio or portfolio[mint] <= 0:
                     remove_auto_sell(uid, mint)
                     print(f"[AUTO-SELL] Cleaned up stale paper entry: uid={uid}, mint={mint[:8]}", flush=True)
                     continue
 
-            price, mcap = fetch_token_price(mint)
+            price, mcap = _price_cache.get(mint, (None, None))
             if price is None:
                 continue
 
@@ -1597,6 +2019,14 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         price_usd  = result.get("price_usd", 0)
         decimals   = 6  # default; DexScreener not re-fetched here
 
+        # Derive buy price from quote when unavailable (e.g. newly graduated tokens)
+        if not price_usd and out_amount > 0:
+            import pumpfun as _pf_mod
+            _sol_usd = (_pf_mod.get_sol_price() or 150.0)
+            ui_tokens = out_amount / (10 ** decimals)
+            if ui_tokens > 0:
+                price_usd = (sol_amount * _sol_usd) / ui_tokens
+
         portfolio["SOL"]  = sol_bal - sol_amount
         portfolio[mint]   = portfolio.get(mint, 0) + out_amount
         update_portfolio(uid, portfolio)
@@ -1674,6 +2104,38 @@ async def execute_auto_buy(bot, uid: int, result: dict):
 
     lamports = int(sol_amount * 1_000_000_000)
 
+    # ── Token safety check (live mode only) ───────────────────────────────────
+    if get_safety_check_enabled(uid):
+        safety = await check_token_safety(mint)
+        if not safety["safe"]:
+            print(f"[AUTOBUY] uid={uid} BLOCKED {symbol} — {safety['block_reason']}", flush=True)
+            try:
+                await bot.send_message(
+                    uid,
+                    f"🚫 *Auto-Buy Blocked* — Safety Check Failed\n\n"
+                    f"🪙 *{name}* (${symbol})\n"
+                    f"❌ *{safety['block_reason']}*\n\n"
+                    f"_Disable safety check in Settings to override._",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
+                        InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
+                    ]])
+                )
+            except Exception:
+                pass
+            return
+        if safety["warnings"]:
+            warn_text = "\n".join(f"⚠️ {w}" for w in safety["warnings"])
+            try:
+                await bot.send_message(
+                    uid,
+                    f"⚠️ *Safety Warnings* — {name} (${symbol})\n\n{warn_text}\n\n_Proceeding with auto-buy..._",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+
     # ── Route decision — pump.fun if BC live, else Jupiter ────────────────────
     tx_sig = None
     price_usd = result.get("price_usd", 0)
@@ -1688,10 +2150,10 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         decimals = 6
     else:
         print(f"[AUTOBUY] uid={uid} route=jupiter for {symbol} (BC={'graduated' if bc else 'none'})", flush=True)
-        quote = jupiter_quote(SOL_MINT, mint, lamports)
+        quote = jupiter_quote(SOL_MINT, mint, lamports, get_user_slippage(uid))
         if not quote or "error" in quote:
             return
-        tx_sig   = execute_swap_live(quote)
+        tx_sig   = execute_swap_live(quote, uid)
         out_raw  = int(quote.get("outAmount", 0))
         route    = "jupiter"
         decimals = 6
@@ -1722,6 +2184,13 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             return
 
         # Update portfolio tracking (only after on-chain confirmation)
+        # Derive buy price from quote when unavailable (e.g. newly graduated tokens)
+        if not price_usd and out_raw > 0:
+            import pumpfun as _pf_mod
+            _sol_usd = (_pf_mod.get_sol_price() or 150.0)
+            ui_tokens = out_raw / (10 ** decimals)
+            if ui_tokens > 0:
+                price_usd = (sol_amount * _sol_usd) / ui_tokens
         portfolio = get_portfolio(uid)
         portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
         portfolio[mint] = portfolio.get(mint, 0) + out_raw
@@ -1836,7 +2305,8 @@ async def do_trade_flow(msg, uid: int, context, action: str,
             out_tokens = pumpfun.calculate_buy_tokens(lamports, bc_fallback)
             quote = {"outAmount": out_tokens, "priceImpactPct": "N/A"}
         else:
-            quote = jupiter_quote(SOL_MINT, token_mint, lamports)
+            _slip = get_user_slippage(uid) if mode == "live" else 150
+            quote = jupiter_quote(SOL_MINT, token_mint, lamports, _slip)
     else:
         if bc_fallback:
             _vtr = bc_fallback.get("virtual_token_reserves", 0)
@@ -1845,7 +2315,8 @@ async def do_trade_flow(msg, uid: int, context, action: str,
             _sol_out = int((_vsr - int(_vtr * _vsr / (_vtr + _raw))) * 0.99) if _vtr else 0
             quote = {"outAmount": _sol_out, "priceImpactPct": "N/A"}
         else:
-            quote = jupiter_quote(token_mint, SOL_MINT, int(amount))
+            _slip = get_user_slippage(uid) if mode == "live" else 150
+            quote = jupiter_quote(token_mint, SOL_MINT, int(amount), _slip)
 
     if not quote or "error" in quote:
         await msg.edit_text(f"Quote failed: {quote}", reply_markup=back_kb())
@@ -1909,7 +2380,16 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                     parse_mode="Markdown", reply_markup=back_kb()
                 )
                 return
-            sol_received            = out_amount / 1e9
+            # Paper sell: fill at current market price (no AMM price impact), 1% simulated fee
+            _price_sol_now = float(pair.get("priceNative", 0) or 0)
+            if not _price_sol_now and bc_fallback and bc_fallback.get("virtual_token_reserves"):
+                _vtr2 = bc_fallback["virtual_token_reserves"]
+                _vsr2 = bc_fallback["virtual_sol_reserves"]
+                _price_sol_now = (_vsr2 / _vtr2 / 1e9 * 1e6) if _vtr2 else 0
+            if _price_sol_now:
+                sol_received = (_price_sol_now * int(amount) / (10 ** decimals)) * 0.99
+            else:
+                sol_received = out_amount / 1e9  # last-resort fallback
             portfolio[token_mint]   = held - int(amount)
             portfolio["SOL"]        = portfolio.get("SOL", 0) + sol_received
             if portfolio[token_mint] <= 0:
@@ -1942,6 +2422,35 @@ async def do_trade_flow(msg, uid: int, context, action: str,
             ])
         )
         return
+
+    # ── Token safety check (live buys only) ──────────────────────────────────
+    if action == "buy" and get_safety_check_enabled(uid):
+        await msg.edit_text("🔍 Running safety check...", parse_mode="Markdown")
+        safety = await check_token_safety(token_mint)
+        if not safety["safe"]:
+            warn_lines = "\n".join(f"⚠️ {w}" for w in safety["warnings"]) if safety["warnings"] else ""
+            await msg.edit_text(
+                f"🚫 *Safety Check Failed — Buy Cancelled*\n\n"
+                f"🪙 *{name}* (${symbol})\n"
+                f"❌ *{safety['block_reason']}*\n"
+                + (f"\n{warn_lines}" if warn_lines else "") +
+                f"\n\n_Disable safety check in Settings to trade anyway._",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🔍 RugCheck", url=f"https://rugcheck.xyz/tokens/{token_mint}")],
+                    [InlineKeyboardButton("⚙️ Settings", callback_data="settings:menu"),
+                     InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+                ])
+            )
+            return
+        if safety["warnings"]:
+            warn_text = "\n".join(f"⚠️ {w}" for w in safety["warnings"])
+            await msg.edit_text(
+                f"⚠️ *Safety Warnings* — proceeding to quote...\n\n{warn_text}",
+                parse_mode="Markdown"
+            )
+            import asyncio as _aio
+            await _aio.sleep(1.5)
 
     # Detect pump.fun bonding curve tokens
     dex_id    = pair.get("dexId", "")
@@ -1976,10 +2485,15 @@ async def do_trade_flow(msg, uid: int, context, action: str,
     else:
         summary = f"Sell `{int(amount):,} {symbol}` → Get ~`{out_amount/1e9:.4f} SOL`"
 
+    _in_mint  = SOL_MINT    if action == "buy" else token_mint
+    _out_mint = token_mint  if action == "buy" else SOL_MINT
+    _amt_raw  = int(amount * 1_000_000_000) if action == "buy" else int(amount)
     context.user_data[f"pending_{action}"] = {
         "via": "jupiter", "quote": quote, "symbol": symbol,
         "mint": token_mint, "price_usd": price_usd,
         "raw_out": out_amount, "decimals": decimals,
+        "in_mint": _in_mint, "out_mint": _out_mint, "amount_raw": _amt_raw,
+        "sol_amount": amount if action == "buy" else None,
     }
     await msg.edit_text(
         f"🔴 *Live {action.title()} Quote*\n{summary}\nPrice Impact: `{price_impact}%`\n\nConfirm?",
@@ -2111,6 +2625,7 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
     PAGE_SIZE  = 5
     mode = get_mode(uid)
     as_configs = load_auto_sell().get(str(uid), {})
+    sol_usd    = pf.get_sol_price() or 150.0
 
     # ── shared footer builders ────────────────────────────────────────────────
     def _nav_row(page, total_pages):
@@ -2148,6 +2663,29 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
             row.append(InlineKeyboardButton("🤖", callback_data=f"as:view:{mint}"))
         return row
 
+    def _pnl_badge(buy_price_usd: float, current_price_usd: float) -> str:
+        if not buy_price_usd or not current_price_usd:
+            return ""
+        pct = (current_price_usd - buy_price_usd) / buy_price_usd * 100
+        if pct >= 100:
+            return f" `+{pct:.0f}%` 🔥"
+        if pct > 0:
+            return f" `+{pct:.0f}%`"
+        return f" `{pct:.0f}%` 📉"
+
+    def _val_usd_str(val_sol: float) -> str:
+        usd = val_sol * sol_usd
+        if usd >= 1000:
+            return f"${usd/1000:,.2f}K"
+        return f"${usd:,.2f}"
+
+    def _mcap_str(mcap: float) -> str:
+        if not mcap:
+            return ""
+        if mcap >= 1_000_000:
+            return f" · MCap ${mcap/1_000_000:,.2f}M"
+        return f" · MCap ${mcap/1000:,.1f}K"
+
     # ── LIVE WALLET ───────────────────────────────────────────────────────────
     if mode == "live":
         pubkey = get_wallet_pubkey()
@@ -2159,52 +2697,71 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
             return
         sol_bal       = get_sol_balance(pubkey)
         accounts      = get_token_accounts(pubkey)
+
+        # Sort by raw amount descending as proxy until prices loaded
+        accounts = sorted(accounts, key=lambda a: a.get("ui_amount", 0), reverse=True)
+
         total_pages   = max(1, math.ceil(len(accounts) / PAGE_SIZE)) if accounts else 1
         page_accounts = accounts[page * PAGE_SIZE:(page + 1) * PAGE_SIZE] if accounts else []
+
+        # Fetch all page-token prices concurrently
+        price_results = await asyncio.gather(
+            *[_fetch_portfolio_token_data(acc["mint"]) for acc in page_accounts],
+            return_exceptions=True
+        )
+
         page_info     = f"  •  Page {page + 1}/{total_pages}" if total_pages > 1 else ""
-        lines         = [f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`{page_info}\n\nSOL: `{sol_bal:.4f}`\n"]
+        total_tokens  = len(accounts)
+        lines         = [
+            f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`{page_info}",
+            f"Holdings: *{total_tokens}* tokens  •  SOL: `{sol_bal:.4f}` _(${sol_bal * sol_usd:,.0f})_\n",
+        ]
         token_rows    = []
         total_sol_pos = 0.0
+        page_sol_pos  = 0.0
 
         if accounts:
             lines.append("*Positions — tap ⚡ to trade:*")
-            for acc in page_accounts:
+            for i, acc in enumerate(page_accounts):
                 try:
-                    pair      = fetch_sol_pair(acc["mint"])
-                    sym       = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else acc["mint"][:8]
+                    data      = price_results[i] if not isinstance(price_results[i], Exception) else {}
+                    pair      = data.get("pair") if data else None
+                    bc        = data.get("bc") if data else None
+                    coin      = data.get("coin") if data else None
+
+                    sym       = pair.get("baseToken", {}).get("symbol", acc["mint"][:8]) if pair else (
+                                (coin or {}).get("symbol", acc["mint"][:8]))
                     price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
-                    mcap      = float(pair.get("marketCap", 0) or 0) if pair else 0
+                    mcap      = float(pair.get("marketCap", 0) or 0) if pair else float(
+                                (coin or {}).get("usd_market_cap") or (coin or {}).get("market_cap") or 0)
                     src_tag   = ""
-                    if not price_sol:
-                        _bc = pumpfun.fetch_bonding_curve_data(acc["mint"], SOLANA_RPC)
-                        if _bc and _bc.get("virtual_token_reserves") and _bc["virtual_token_reserves"] > 0:
-                            price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
-                            src_tag   = " _(pump)_"
-                        if not pair:
-                            coin = _fetch_pumpfun_coin(acc["mint"])
-                            if coin:
-                                sym  = coin.get("symbol", acc["mint"][:8])
-                                mcap = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
-                    val_sol      = price_sol * acc["ui_amount"]
-                    total_sol_pos += val_sol
-                    as_cfg       = as_configs.get(acc["mint"], {})
-                    as_tag       = " 🤖" if as_cfg.get("enabled") else ""
-                    mcap_str     = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
-                    val_str      = f"{val_sol:.4f}◎" if val_sol else "unlisted"
-                    sol_in       = as_cfg.get("sol_amount", 0)
-                    sol_in_str   = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
+
+                    if not price_sol and bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
+                        price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9 * 1e6
+                        src_tag   = " _(pump)_"
+
+                    val_sol       = price_sol * acc["ui_amount"]
+                    page_sol_pos += val_sol
+                    as_cfg        = as_configs.get(acc["mint"], {})
+                    as_tag        = " 🤖" if as_cfg.get("enabled") else ""
+                    sol_in        = as_cfg.get("sol_amount", 0)
+                    sol_in_str    = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
+                    val_str       = f"`{val_sol:.4f}◎` _({_val_usd_str(val_sol)})_" if val_sol else "`unlisted`"
+
                     lines.append("━━━━━━━━━━━━━━━━━━")
                     lines.append(f"*{sym}*{as_tag}{src_tag}")
-                    lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
+                    lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ {val_str}{_mcap_str(mcap)}{sol_in_str}")
                     token_rows.append(_token_row(sym, acc["mint"], as_cfg.get("enabled")))
                 except Exception as e:
                     print(f"[PORTFOLIO] Error displaying token {acc.get('mint','?')}: {e}")
                     token_rows.append(_token_row(acc["mint"][:8], acc["mint"], False))
 
-            if total_sol_pos:
-                lines.append("━━━━━━━━━━━━━━━━━━")
-                page_suffix = f" _(page {page + 1}/{total_pages})_" if total_pages > 1 else ""
-                lines.append(f"*Total Positions:* `{total_sol_pos:.4f}◎`{page_suffix}")
+            lines.append("━━━━━━━━━━━━━━━━━━")
+            if total_pages > 1:
+                lines.append(f"*Page value:* `{page_sol_pos:.4f}◎` _({_val_usd_str(page_sol_pos)})_")
+                lines.append(f"_Showing page {page + 1}/{total_pages} — navigate to see all positions_")
+            else:
+                lines.append(f"*Total Positions:* `{page_sol_pos:.4f}◎` _({_val_usd_str(page_sol_pos)})_")
         else:
             lines.append("No token positions found.")
 
@@ -2213,22 +2770,89 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
         return
 
     # ── PAPER PORTFOLIO ───────────────────────────────────────────────────────
-    portfolio      = get_portfolio(uid)
-    sol_bal        = portfolio.get("SOL", 0)
-    all_positions  = [(k, v) for k, v in portfolio.items() if k != "SOL" and v > 0]
+    portfolio     = get_portfolio(uid)
+    sol_bal       = portfolio.get("SOL", 0)
+    all_positions = [(k, v) for k, v in portfolio.items() if k != "SOL" and v > 0]
+
+    # Fetch prices for ALL tokens to compute total portfolio value and sort by value
+    if all_positions:
+        all_price_data = await asyncio.gather(
+            *[_fetch_portfolio_token_data(mint) for mint, _ in all_positions],
+            return_exceptions=True
+        )
+        # Compute provisional value per position for sorting
+        def _quick_val(i: int, raw_amt: float) -> float:
+            data = all_price_data[i] if not isinstance(all_price_data[i], Exception) else {}
+            pair = (data or {}).get("pair")
+            bc   = (data or {}).get("bc")
+            price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
+            if not price_sol and bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
+                price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9 * 1e6
+            dec = int((pair or {}).get("baseToken", {}).get("decimals", 6) or 6) if pair else 6
+            ui  = raw_amt / (10 ** dec)
+            return price_sol * ui
+
+        position_values = [_quick_val(i, raw) for i, (_, raw) in enumerate(all_positions)]
+        # Sort descending by current value
+        sorted_indices  = sorted(range(len(all_positions)), key=lambda i: position_values[i], reverse=True)
+        all_positions   = [all_positions[i] for i in sorted_indices]
+        all_price_data  = [all_price_data[i] for i in sorted_indices]
+        position_values = [position_values[i] for i in sorted_indices]
+        total_portfolio_sol = sum(position_values)
+    else:
+        all_price_data      = []
+        position_values     = []
+        total_portfolio_sol = 0.0
+
+    # Compute total invested from auto-sell configs
+    total_invested_sol = sum(
+        as_configs.get(mint, {}).get("sol_amount", 0)
+        for mint, _ in all_positions
+    )
+
     total_pages    = max(1, math.ceil(len(all_positions) / PAGE_SIZE)) if all_positions else 1
-    page_positions = all_positions[page * PAGE_SIZE:(page + 1) * PAGE_SIZE]
+    page_start     = page * PAGE_SIZE
+    page_positions = all_positions[page_start:page_start + PAGE_SIZE]
+    page_data      = all_price_data[page_start:page_start + PAGE_SIZE]
     page_info      = f"  •  Page {page + 1}/{total_pages}" if total_pages > 1 else ""
-    lines          = [f"📄 *Paper Portfolio*{page_info}\n\nSOL: `{sol_bal:.4f}`\n"]
-    total_sol      = 0.0
-    token_rows     = []
+    total_tokens   = len(all_positions)
+
+    # Build header with portfolio summary
+    overall_pnl_str = ""
+    if total_invested_sol and total_portfolio_sol:
+        pnl_pct = (total_portfolio_sol - total_invested_sol) / total_invested_sol * 100
+        pnl_sol  = total_portfolio_sol - total_invested_sol
+        sign     = "+" if pnl_pct >= 0 else ""
+        emoji    = "🔥" if pnl_pct >= 100 else ("📈" if pnl_pct > 0 else "📉")
+        overall_pnl_str = (
+            f"\nP&L: `{sign}{pnl_sol:.4f}◎` `{sign}{pnl_pct:.1f}%` {emoji}"
+        )
+
+    lines = [
+        f"📄 *Paper Portfolio*{page_info}",
+        f"Holdings: *{total_tokens}* tokens  •  SOL: `{sol_bal:.4f}` _({_val_usd_str(sol_bal)})_",
+    ]
+    if total_portfolio_sol:
+        lines.append(
+            f"Portfolio: `{total_portfolio_sol:.4f}◎` _({_val_usd_str(total_portfolio_sol)})_"
+            + overall_pnl_str
+        )
+    lines.append("")
+
+    token_rows = []
+    page_sol   = 0.0
 
     if page_positions:
         lines.append("*Positions — tap ⚡ to trade:*")
-        for mint, raw_amt in page_positions:
+        for j, (mint, raw_amt) in enumerate(page_positions):
             try:
-                pair = fetch_sol_pair(mint)
-                cfg  = as_configs.get(mint)
+                data      = page_data[j] if not isinstance(page_data[j], Exception) else {}
+                pair      = (data or {}).get("pair")
+                bc        = (data or {}).get("bc")
+                coin      = (data or {}).get("coin") or {}
+                cfg       = as_configs.get(mint)
+                as_tag    = " 🤖" if cfg and cfg.get("enabled") else ""
+
                 if pair:
                     sym       = pair.get("baseToken", {}).get("symbol", mint[:8])
                     price_sol = float(pair.get("priceNative", 0) or 0)
@@ -2236,63 +2860,53 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                     mcap      = float(pair.get("marketCap", 0) or 0)
                     dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
                     ui        = raw_amt / (10 ** dec)
-                    if not price_sol:
-                        _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
-                        if _bc and _bc.get("virtual_token_reserves"):
-                            price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
+                    if not price_sol and bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
+                        price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9 * 1e6
                     val_sol    = price_sol * ui
-                    total_sol += val_sol
+                    page_sol  += val_sol
                     buy_price  = cfg.get("buy_price_usd", 0) if cfg else 0
-                    entry_pct  = ((price_usd - buy_price) / buy_price * 100) if buy_price else 0
-                    as_tag     = " 🤖" if cfg and cfg.get("enabled") else ""
-                    if buy_price and entry_pct >= 100:
-                        pnl_badge = f" `+{entry_pct:.0f}%` 🔥"
-                    elif buy_price and entry_pct > 0:
-                        pnl_badge = f" `+{entry_pct:.0f}%`"
-                    elif buy_price and entry_pct < 0:
-                        pnl_badge = f" `{entry_pct:.0f}%` 📉"
-                    else:
-                        pnl_badge = ""
-                    mcap_str   = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
-                    val_str    = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+                    badge      = _pnl_badge(buy_price, price_usd)
+                    val_str    = f"`{val_sol:.4f}◎` _({_val_usd_str(val_sol)})_" if val_sol else "`unlisted`"
                     sol_in     = cfg.get("sol_amount", 0) if cfg else 0
                     sol_in_str = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
                     lines.append("━━━━━━━━━━━━━━━━━━")
-                    lines.append(f"*{sym}*{as_tag}{pnl_badge}")
-                    lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
+                    lines.append(f"*{sym}*{as_tag}{badge}")
+                    lines.append(f"  {ui:,.4f} tokens ≈ {val_str}{_mcap_str(mcap)}{sol_in_str}")
                     if cfg and cfg.get("enabled"):
                         pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
                         if pending:
                             lines.append(f"  ↳ Next target: {pending[0]}")
                     token_rows.append(_token_row(sym, mint, cfg and cfg.get("enabled")))
                 else:
-                    bc        = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
-                    coin      = _fetch_pumpfun_coin(mint) or {}
+                    # pump.fun / unlisted path
                     sym       = coin.get("symbol", mint[:8])
                     mcap      = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
                     ui        = raw_amt / 1e6
                     price_sol = 0.0
+                    price_usd = 0.0
                     if bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
                         price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9 * 1e6
+                        price_usd = price_sol * sol_usd
                     val_sol    = price_sol * ui
-                    total_sol += val_sol
-                    val_str    = f"{val_sol:.4f}◎" if val_sol else "?"
-                    mcap_str   = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
+                    page_sol  += val_sol
                     src_tag    = " _(pump.fun)_" if price_sol else " _(unlisted)_"
-                    cfg        = as_configs.get(mint)
-                    as_tag     = " 🤖" if cfg and cfg.get("enabled") else ""
+                    buy_price  = cfg.get("buy_price_usd", 0) if cfg else 0
+                    badge      = _pnl_badge(buy_price, price_usd)
+                    val_str    = f"`{val_sol:.4f}◎` _({_val_usd_str(val_sol)})_" if val_sol else "`~`"
                     lines.append("━━━━━━━━━━━━━━━━━━")
-                    lines.append(f"*{sym}*{as_tag}{src_tag}")
-                    lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}")
+                    lines.append(f"*{sym}*{as_tag}{src_tag}{badge}")
+                    lines.append(f"  {ui:,.4f} tokens ≈ {val_str}{_mcap_str(mcap)}")
                     token_rows.append(_token_row(sym, mint, cfg and cfg.get("enabled")))
             except Exception as e:
                 print(f"[PORTFOLIO] Error displaying token {mint}: {e}")
                 token_rows.append(_token_row(mint[:8], mint, False))
 
-        if total_sol:
-            lines.append("━━━━━━━━━━━━━━━━━━")
-            page_suffix = f" _(page {page + 1}/{total_pages})_" if total_pages > 1 else ""
-            lines.append(f"*Total Positions:* `{total_sol:.4f}◎`{page_suffix}")
+        lines.append("━━━━━━━━━━━━━━━━━━")
+        if total_pages > 1:
+            lines.append(f"*Page value:* `{page_sol:.4f}◎` _({_val_usd_str(page_sol)})_")
+            lines.append(f"*Total portfolio:* `{total_portfolio_sol:.4f}◎` _({_val_usd_str(total_portfolio_sol)})_")
+        else:
+            lines.append(f"*Total Positions:* `{total_portfolio_sol:.4f}◎` _({_val_usd_str(total_portfolio_sol)})_")
     else:
         lines.append("No positions yet.")
 
@@ -2903,6 +3517,196 @@ async def cmd_trades_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
+async def cmd_watchbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Show user's wallet alert list."""
+    uid     = update.effective_user.id
+    wallets = get_user_alert_wallets(uid)
+    if not wallets:
+        text = "👁️ *Wallet Buy Alerts*\n\nYou are not tracking any wallets yet.\n\nTap ➕ to add a wallet — you'll get alerted when it buys a token."
+    else:
+        lines = ["👁️ *Wallet Buy Alerts*\n"]
+        for w in wallets:
+            addr = w["address"]
+            label = w.get("label", addr[:8])
+            tok_count = len(w.get("last_tokens", {}))
+            lines.append(f"• *{label}* — `{addr[:8]}...{addr[-4:]}` ({tok_count} tokens held)")
+        text = "\n".join(lines)
+
+    buttons = []
+    for w in wallets:
+        addr  = w["address"]
+        label = w.get("label", addr[:8])
+        buttons.append([InlineKeyboardButton(f"🗑️ Remove {label}", callback_data=f"wbalert:remove:{addr}")])
+    buttons.append([InlineKeyboardButton("➕ Add Wallet", callback_data="wbalert:add")])
+    buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
+
+    await update.message.reply_text(text, parse_mode="Markdown",
+                                    reply_markup=InlineKeyboardMarkup(buttons))
+
+
+async def wbalert_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")
+    action = parts[1] if len(parts) > 1 else ""
+    await query.answer()
+
+    if action == "add":
+        context.user_data["state"] = "wbalert_add_addr"
+        await query.edit_message_text(
+            "👁️ *Add Wallet Alert*\n\nPaste the Solana wallet address to track:\n\n"
+            "_You'll get a Telegram alert every time this wallet buys a new token._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wbalert:list")]])
+        )
+    elif action == "remove":
+        addr = parts[2] if len(parts) > 2 else ""
+        remove_user_alert_wallet(uid, addr)
+        wallets = get_user_alert_wallets(uid)
+        text    = "👁️ *Wallet Buy Alerts*\n\nWallet removed.\n"
+        buttons = []
+        for w in wallets:
+            a = w["address"]; lbl = w.get("label", a[:8])
+            buttons.append([InlineKeyboardButton(f"🗑️ Remove {lbl}", callback_data=f"wbalert:remove:{a}")])
+        buttons.append([InlineKeyboardButton("➕ Add Wallet", callback_data="wbalert:add")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+    elif action == "skip_label":
+        addr  = context.user_data.pop("wbalert_pending", "")
+        context.user_data.pop("state", None)
+        if addr:
+            add_user_alert_wallet(uid, addr, addr[:8])
+            await query.edit_message_text(
+                f"✅ Wallet `{addr[:8]}...` added to alerts.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👁️ My Alerts", callback_data="wbalert:list")]])
+            )
+    elif action == "list":
+        wallets = get_user_alert_wallets(uid)
+        text    = "👁️ *Wallet Buy Alerts*\n\n" + ("\n".join(
+            f"• *{w.get('label', w['address'][:8])}* `{w['address'][:8]}...`"
+            for w in wallets
+        ) if wallets else "No wallets tracked.")
+        buttons = []
+        for w in wallets:
+            a = w["address"]; lbl = w.get("label", a[:8])
+            buttons.append([InlineKeyboardButton(f"🗑️ Remove {lbl}", callback_data=f"wbalert:remove:{a}")])
+        buttons.append([InlineKeyboardButton("➕ Add Wallet", callback_data="wbalert:add")])
+        buttons.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=InlineKeyboardMarkup(buttons))
+
+
+def _build_history_page(uid: int, page: int) -> tuple:
+    """Build realized P&L history page. Returns (text, InlineKeyboardMarkup)."""
+    from datetime import datetime, timezone
+    all_trades = [t for t in load_trade_log() if t.get("uid") == uid]
+    all_trades.sort(key=lambda t: t.get("ts", 0))
+
+    buy_queue: dict[str, list] = {}
+    closed: list[dict] = []
+    for t in all_trades:
+        mint = t.get("mint", "")
+        if t.get("action") == "buy":
+            buy_queue.setdefault(mint, []).append(t)
+        elif t.get("action") == "sell" and buy_queue.get(mint):
+            buy_t    = buy_queue[mint].pop(0)
+            sol_in   = float(buy_t.get("sol_amount")  or 0)
+            sol_out  = float(t.get("sol_received")    or 0)
+            pnl_sol  = sol_out - sol_in
+            pnl_pct  = (pnl_sol / sol_in * 100) if sol_in > 0 else 0
+            hold_s   = t.get("ts", 0) - buy_t.get("ts", 0)
+            closed.append({
+                "symbol":   t.get("symbol", "?"),
+                "mint":     mint,
+                "sell_ts":  t.get("ts", 0),
+                "sol_in":   sol_in,
+                "sol_out":  sol_out,
+                "pnl_sol":  pnl_sol,
+                "pnl_pct":  pnl_pct,
+                "hold_s":   hold_s,
+                "mode":     t.get("mode", "?"),
+            })
+
+    closed.sort(key=lambda x: x["sell_ts"], reverse=True)
+
+    PER_PAGE    = 8
+    total_pages = max(1, (len(closed) + PER_PAGE - 1) // PER_PAGE)
+    page        = max(1, min(page, total_pages))
+    page_items  = closed[(page - 1) * PER_PAGE : page * PER_PAGE]
+
+    total_pnl = sum(c["pnl_sol"] for c in closed)
+    wins      = sum(1 for c in closed if c["pnl_sol"] > 0)
+    win_rate  = wins / len(closed) * 100 if closed else 0
+    mode_icon = lambda m: "📄" if m == "paper" else "🔴"
+
+    def _hold_str(secs):
+        if secs < 60:    return f"{int(secs)}s"
+        if secs < 3600:  return f"{int(secs/60)}m"
+        if secs < 86400: return f"{int(secs/3600)}h"
+        return f"{int(secs/86400)}d"
+
+    lines = [
+        f"📈 *Realized P&L* — Page {page}/{total_pages}",
+        f"Closed: {len(closed)} trades | Win rate: {win_rate:.0f}%",
+        f"Total P&L: `{'+'if total_pnl>=0 else ''}{total_pnl:.4f} SOL` {'📈' if total_pnl>=0 else '📉'}",
+        "",
+    ]
+    for c in page_items:
+        icon   = "✅" if c["pnl_sol"] >= 0 else "❌"
+        sign   = "+" if c["pnl_pct"] >= 0 else ""
+        hold   = _hold_str(c["hold_s"])
+        date_s = datetime.fromtimestamp(c["sell_ts"], tz=timezone.utc).strftime("%m/%d")
+        lines.append(
+            f"{icon} *${c['symbol']}* {mode_icon(c['mode'])}  `{date_s}` hold:`{hold}`\n"
+            f"   In: `{c['sol_in']:.4f}◎` → Out: `{c['sol_out']:.4f}◎`  "
+            f"`{sign}{c['pnl_pct']:.1f}%` (`{sign}{c['pnl_sol']:.4f}◎`)"
+        )
+
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("◀️", callback_data=f"history_page:{page-1}"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton("▶️", callback_data=f"history_page:{page+1}"))
+    kb = []
+    if nav:
+        kb.append(nav)
+    kb.append([InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")])
+
+    return "\n".join(lines), InlineKeyboardMarkup(kb)
+
+
+async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Realized PnL — pairs buys with sells per token, shows closed trade P&L."""
+    uid  = update.effective_user.id
+    args = context.args or []
+    page = 1
+    try:
+        page = int(args[0]) if args else 1
+    except ValueError:
+        pass
+
+    all_trades = [t for t in load_trade_log() if t.get("uid") == uid]
+    if not any(t.get("action") == "sell" for t in all_trades):
+        await update.message.reply_text(
+            "📈 *Realized P&L History*\n\nNo closed trades yet.\n\n"
+            "_Buy and sell a token to see your P&L here._",
+            parse_mode="Markdown", reply_markup=back_kb("menu:main")
+        )
+        return
+
+    text, kb = _build_history_page(uid, page)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
+async def history_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid   = query.from_user.id
+    page  = int(query.data.split(":")[1])
+    await query.answer()
+    text, kb = _build_history_page(uid, page)
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+
 async def cmd_research_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Download research log CSV file for data analysis."""
     csv_path = research_logger.export_csv_path()
@@ -3092,30 +3896,44 @@ async def cmd_stopscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_watchlist(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    wl = sc.get_watchlist()
+    uid        = update.effective_user.id
+    wl         = sc.get_watchlist()
+    u_settings = sm.get_user_settings(uid)
+    watch_thr  = u_settings.get("alert_scouted_threshold", 20)
+    alert_thr  = u_settings.get("alert_warm_threshold", 70)
     if not wl:
         await update.message.reply_text(
-            "👀 *No scouted tokens yet.*\n\nTokens scoring 50–69 appear here automatically as the scanner runs.",
+            f"👀 *No scouted tokens yet.*\n\n"
+            f"Tokens scoring ≥ `{watch_thr}` appear here as the scanner runs.\n"
+            f"Full alerts fire at ≥ `{alert_thr}`.",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
-                InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
-            ]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
+                 InlineKeyboardButton("⚙️ Settings",   callback_data="scanner:set_threshold")],
+                [InlineKeyboardButton("⬅️ Menu",        callback_data="menu:main")],
+            ])
         )
         return
-    items = sorted(wl.values(), key=lambda x: -x.get("ts", 0))[:20]
-    lines = ["*👀 Scouted* — tokens scoring 50–69\n"]
+    items = [t for t in wl.values() if t.get("score", 0) >= watch_thr]
+    items = sorted(items, key=lambda x: -x.get("score", 0))[:25]
+    lines = [f"*👀 Watchlist* — score ≥ {watch_thr} | alert ≥ {alert_thr}\n"]
     for t in items:
+        score  = t.get("score", 0)
+        flag   = "🔥" if score >= alert_thr else ("🟡" if score >= (watch_thr + alert_thr) // 2 else "⚪")
+        mcap   = t.get("mcap", 0) or 0
+        mcap_s = (f"${mcap/1_000_000:.2f}M" if mcap >= 1_000_000
+                  else f"${mcap/1_000:.0f}K" if mcap >= 1_000 else f"${mcap:.0f}")
         lines.append(
-            f"⚪ *{t['name']}* (${t['symbol']}) — {t['score']}/100\n"
-            f"   MCap: ${t.get('mcap', 0):,.0f}"
+            f"{flag} *{t['name']}* (${t['symbol']}) — `{score}/100`\n"
+            f"   MCap: {mcap_s}"
         )
     await update.message.reply_text(
         "\n".join(lines), parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
-            InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
-        ]])
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
+             InlineKeyboardButton("⚙️ Settings",   callback_data="scanner:set_threshold")],
+            [InlineKeyboardButton("⬅️ Menu",        callback_data="menu:main")],
+        ])
     )
 
 
@@ -5013,28 +5831,35 @@ async def pf_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=pf.notification_kb(mint),
             )
             return
-        # Estimate tokens: convert SOL spend to USD first, then divide by token USD price
-        sol_price_usd = pf.get_sol_price() or 150.0
-        tok_est = int((sol * sol_price_usd / price) * (10 ** decimals)) if price > 0 else 0
-        if tok_est <= 0:
+        # Use Jupiter quote for accurate token amount — same as do_trade_flow and execute_auto_buy
+        lamports = int(sol * 1_000_000_000)
+        quote    = await loop.run_in_executor(None, jupiter_quote, SOL_MINT, mint, lamports)
+        if not quote or "error" in quote or not quote.get("outAmount"):
             await query.edit_message_text(
-                "⚠️ Could not estimate token amount — price unavailable. Try again later.",
+                "⚠️ Could not get quote — token may not be listed yet. Try again in a moment.",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")]])
             )
             return
+        tok_est = int(quote["outAmount"])
+        # Derive buy price from quote if DexScreener price unavailable (newly graduated)
+        buy_price = price
+        if not buy_price and tok_est > 0:
+            sol_price_usd = pf.get_sol_price() or 150.0
+            ui_tokens = tok_est / (10 ** decimals)
+            buy_price = (sol * sol_price_usd) / ui_tokens if ui_tokens > 0 else 0
         portfolio["SOL"]  = portfolio.get("SOL", 0) - sol
         portfolio[mint]   = portfolio.get(mint, 0) + tok_est
         update_portfolio(uid, portfolio)
         log_trade(uid, "paper", "buy", mint, sym, sol_amount=sol,
-                  token_amount=tok_est, price_usd=price, mcap=mcap)
-        if price > 0:
-            setup_auto_sell(uid, mint, sym, price, tok_est, decimals, sol_amount=sol)
+                  token_amount=tok_est, price_usd=buy_price, mcap=mcap)
+        if buy_price > 0:
+            setup_auto_sell(uid, mint, sym, buy_price, tok_est, decimals, sol_amount=sol)
         await query.edit_message_text(
             f"📄 *Paper Buy — ${sym}*\n"
             f"Spent: `{sol} SOL`\n"
             f"Got: `{tok_est/(10**decimals):,.4f}` tokens\n"
-            + (f"Price: `${price:.8f}`\n" if price else "⚠️ Not yet listed on DexScreener\n")
+            + (f"Price: `${buy_price:.8f}`\n" if buy_price else "⚠️ Not yet listed on DexScreener\n")
             + f"SOL left: `{portfolio['SOL']:.4f}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
@@ -5102,12 +5927,12 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             s["scan_targets"] = targets
             sc.save_state(s)
             user_settings = sm.get_user_settings(uid)
-            warm_threshold = user_settings.get("alert_warm_threshold", 70)
-            hot_threshold = user_settings.get("alert_hot_threshold", 80)
+            watch_thr = user_settings.get("alert_scouted_threshold", 20)
+            alert_thr = user_settings.get("alert_warm_threshold", 70)
             await query.edit_message_text(
                 f"🟢 *Scout is live!*\n\n"
                 f"Scanning every 15 seconds.\n"
-                f"Alerts: WARM ≥ {warm_threshold} · HOT ≥ {hot_threshold}",
+                f"📡 Watch ping ≥ {watch_thr} · 🔔 Full alert ≥ {alert_thr}",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
@@ -5117,30 +5942,43 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
 
     elif action == "watchlist":
-        wl = sc.get_watchlist()
+        wl         = sc.get_watchlist()
+        u_settings = sm.get_user_settings(uid)
+        watch_thr  = u_settings.get("alert_scouted_threshold", 20)
+        alert_thr  = u_settings.get("alert_warm_threshold", 70)
         if not wl:
             await query.edit_message_text(
-                "👀 *No scouted tokens yet.*\n\nTokens scoring 50–69 appear here automatically.",
+                f"👀 *No scouted tokens yet.*\n\n"
+                f"Tokens scoring ≥ `{watch_thr}` appear here as the scanner runs.\n"
+                f"Full alerts fire at ≥ `{alert_thr}`.",
                 parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
-                    InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
-                ]])
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
+                     InlineKeyboardButton("⚙️ Settings",   callback_data="scanner:set_threshold")],
+                    [InlineKeyboardButton("⬅️ Menu",        callback_data="menu:main")],
+                ])
             )
             return
-        items = sorted(wl.values(), key=lambda x: -x.get("ts", 0))[:20]
-        lines = ["*👀 Scouted* — tokens scoring 50–69\n"]
+        items = [t for t in wl.values() if t.get("score", 0) >= watch_thr]
+        items = sorted(items, key=lambda x: -x.get("score", 0))[:25]
+        lines = [f"*👀 Watchlist* — score ≥ {watch_thr} | alert ≥ {alert_thr}\n"]
         for t in items:
+            score = t.get("score", 0)
+            flag  = "🔥" if score >= alert_thr else ("🟡" if score >= (watch_thr + alert_thr) // 2 else "⚪")
+            mcap  = t.get("mcap", 0) or 0
+            mcap_s = (f"${mcap/1_000_000:.2f}M" if mcap >= 1_000_000
+                      else f"${mcap/1_000:.0f}K" if mcap >= 1_000 else f"${mcap:.0f}")
             lines.append(
-                f"⚪ *{t['name']}* (${t['symbol']}) — {t['score']}/100\n"
-                f"   MCap: ${t.get('mcap', 0):,.0f}"
+                f"{flag} *{t['name']}* (${t['symbol']}) — `{score}/100`\n"
+                f"   MCap: {mcap_s}"
             )
         await query.edit_message_text(
             "\n".join(lines), parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
-                InlineKeyboardButton("⬅️ Menu",       callback_data="menu:main"),
-            ]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🏆 Top Scouts", callback_data="scanner:topalerts"),
+                 InlineKeyboardButton("⚙️ Settings",   callback_data="scanner:set_threshold")],
+                [InlineKeyboardButton("⬅️ Menu",        callback_data="menu:main")],
+            ])
         )
 
     elif action == "topalerts":
@@ -5170,62 +6008,181 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif action == "set_threshold":
         user_settings = sm.get_user_settings(uid)
-        warm = user_settings.get("alert_warm_threshold", 70)
-        hot = user_settings.get("alert_hot_threshold", 80)
-        ultra = user_settings.get("alert_ultra_hot_threshold", 90)
+        watch      = user_settings.get("alert_scouted_threshold", 20)
+        alert      = user_settings.get("alert_warm_threshold", 70)
+        mcap_min   = user_settings.get("scanner_mcap_min", 5_000)
+        mcap_max   = user_settings.get("scanner_mcap_max", 10_000_000)
+        def _fmt_mcap(v):
+            if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
+            if v >= 1_000:     return f"${v/1_000:.0f}K"
+            return f"${v}"
         await query.edit_message_text(
-            f"*🌡️ Alert Thresholds*\n\n"
-            f"🟡 WARM (70-79): `{warm}/100`\n"
-            f"🟠 HOT (80-89): `{hot}/100`\n"
-            f"🔴 ULTRA HOT (90-100): `{ultra}/100`\n\n"
-            f"Lower thresholds = more alerts · Higher = fewer but hotter signals.\n\n"
-            f"Edit individual thresholds:",
+            f"*🌡️ Scanner Settings*\n\n"
+            f"📡 *Watch Score* — `{watch}/100`\n"
+            f"_Compact watchlist ping at or above this score._\n\n"
+            f"🔔 *Alert Score* — `{alert}/100`\n"
+            f"_Full DM alert at or above this score._\n\n"
+            f"💰 *MCap Range* — `{_fmt_mcap(mcap_min)}` – `{_fmt_mcap(mcap_max)}`\n"
+            f"_Only tokens within this market cap range will alert you._\n\n"
+            f"Tap to edit:",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ WARM", callback_data="scanner:edit_warm"),
-                 InlineKeyboardButton("✏️ HOT", callback_data="scanner:edit_hot"),
-                 InlineKeyboardButton("✏️ ULTRA", callback_data="scanner:edit_ultra")],
+                [InlineKeyboardButton("✏️ Watch Score", callback_data="scanner:edit_watch"),
+                 InlineKeyboardButton("✏️ Alert Score", callback_data="scanner:edit_alert")],
+                [InlineKeyboardButton("✏️ MCap Min",   callback_data="scanner:edit_mcap_min"),
+                 InlineKeyboardButton("✏️ MCap Max",   callback_data="scanner:edit_mcap_max")],
                 [InlineKeyboardButton("📋 Presets", callback_data="heatscore:presets")],
                 [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
             ])
         )
 
-    elif action == "edit_warm":
-        set_state(uid, waiting_for="scanner_warm_threshold")
+    elif action == "edit_watch":
+        user_settings = sm.get_user_settings(uid)
+        cur = user_settings.get("alert_scouted_threshold", 20)
+        set_state(uid, waiting_for="scanner_watch_threshold")
+        await query.edit_message_text(
+            f"*📡 Watch Score*\n\n"
+            f"Current: `{cur}/100`\n\n"
+            f"Tokens scoring at or above this appear in your Watchlist with a compact ping.\n"
+            f"_Tap a preset or type a custom value:_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("20", callback_data="scanner:wset:20"),
+                 InlineKeyboardButton("30", callback_data="scanner:wset:30"),
+                 InlineKeyboardButton("40", callback_data="scanner:wset:40"),
+                 InlineKeyboardButton("50", callback_data="scanner:wset:50")],
+                [InlineKeyboardButton("60", callback_data="scanner:wset:60"),
+                 InlineKeyboardButton("70", callback_data="scanner:wset:70"),
+                 InlineKeyboardButton("80", callback_data="scanner:wset:80"),
+                 InlineKeyboardButton("90", callback_data="scanner:wset:90")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold")],
+            ])
+        )
+
+    elif action.startswith("wset:"):
+        val = int(action.split(":")[1])
+        user_settings = sm.get_user_settings(uid)
+        alert_score   = user_settings.get("alert_warm_threshold", 70)
+        if val > alert_score:
+            user_settings["alert_warm_threshold"] = val
+        user_settings["alert_scouted_threshold"] = val
+        sm.save_user_settings(uid, user_settings)
+        clear_state(uid)
+        await query.answer(f"✅ Watch score → {val}", show_alert=False)
+        # Re-render threshold settings
+        watch    = user_settings.get("alert_scouted_threshold", 20)
+        alert    = user_settings.get("alert_warm_threshold", 70)
+        mcap_min = user_settings.get("scanner_mcap_min", 5_000)
+        mcap_max = user_settings.get("scanner_mcap_max", 10_000_000)
+        def _fmt_m(v):
+            if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
+            if v >= 1_000:     return f"${v/1_000:.0f}K"
+            return f"${v}"
+        await query.edit_message_text(
+            f"*🌡️ Scanner Settings*\n\n"
+            f"📡 *Watch Score* — `{watch}/100`\n"
+            f"_Compact watchlist ping at or above this score._\n\n"
+            f"🔔 *Alert Score* — `{alert}/100`\n"
+            f"_Full DM alert at or above this score._\n\n"
+            f"💰 *MCap Range* — `{_fmt_m(mcap_min)}` – `{_fmt_m(mcap_max)}`\n"
+            f"_Only tokens within this range will alert you._\n\n"
+            f"Tap to edit:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Watch Score", callback_data="scanner:edit_watch"),
+                 InlineKeyboardButton("✏️ Alert Score", callback_data="scanner:edit_alert")],
+                [InlineKeyboardButton("✏️ MCap Min",   callback_data="scanner:edit_mcap_min"),
+                 InlineKeyboardButton("✏️ MCap Max",   callback_data="scanner:edit_mcap_max")],
+                [InlineKeyboardButton("📋 Presets", callback_data="heatscore:presets")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+            ])
+        )
+
+    elif action == "edit_alert":
         user_settings = sm.get_user_settings(uid)
         cur = user_settings.get("alert_warm_threshold", 70)
+        set_state(uid, waiting_for="scanner_alert_threshold")
         await query.edit_message_text(
-            f"*✏️ WARM Threshold*\n\n"
+            f"*🔔 Alert Score*\n\n"
             f"Current: `{cur}/100`\n\n"
-            f"Type a number between 5 and 100.",
+            f"Tokens scoring at or above this trigger a full DM alert.\n"
+            f"_Tap a preset or type a custom value:_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("30", callback_data="scanner:aset:30"),
+                 InlineKeyboardButton("40", callback_data="scanner:aset:40"),
+                 InlineKeyboardButton("50", callback_data="scanner:aset:50"),
+                 InlineKeyboardButton("60", callback_data="scanner:aset:60")],
+                [InlineKeyboardButton("70 ★", callback_data="scanner:aset:70"),
+                 InlineKeyboardButton("75", callback_data="scanner:aset:75"),
+                 InlineKeyboardButton("80", callback_data="scanner:aset:80"),
+                 InlineKeyboardButton("90", callback_data="scanner:aset:90")],
+                [InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold")],
+            ])
+        )
+
+    elif action.startswith("aset:"):
+        val = int(action.split(":")[1])
+        user_settings = sm.get_user_settings(uid)
+        watch_score   = user_settings.get("alert_scouted_threshold", 20)
+        if val < watch_score:
+            user_settings["alert_scouted_threshold"] = val
+        user_settings["alert_warm_threshold"]      = val
+        user_settings["alert_hot_threshold"]       = val
+        user_settings["alert_ultra_hot_threshold"] = val
+        sm.save_user_settings(uid, user_settings)
+        clear_state(uid)
+        await query.answer(f"✅ Alert score → {val}", show_alert=False)
+        watch    = user_settings.get("alert_scouted_threshold", 20)
+        alert    = user_settings.get("alert_warm_threshold", 70)
+        mcap_min = user_settings.get("scanner_mcap_min", 5_000)
+        mcap_max = user_settings.get("scanner_mcap_max", 10_000_000)
+        def _fmt_m2(v):
+            if v >= 1_000_000: return f"${v/1_000_000:.1f}M"
+            if v >= 1_000:     return f"${v/1_000:.0f}K"
+            return f"${v}"
+        await query.edit_message_text(
+            f"*🌡️ Scanner Settings*\n\n"
+            f"📡 *Watch Score* — `{watch}/100`\n"
+            f"_Compact watchlist ping at or above this score._\n\n"
+            f"🔔 *Alert Score* — `{alert}/100`\n"
+            f"_Full DM alert at or above this score._\n\n"
+            f"💰 *MCap Range* — `{_fmt_m2(mcap_min)}` – `{_fmt_m2(mcap_max)}`\n"
+            f"_Only tokens within this range will alert you._\n\n"
+            f"Tap to edit:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✏️ Watch Score", callback_data="scanner:edit_watch"),
+                 InlineKeyboardButton("✏️ Alert Score", callback_data="scanner:edit_alert")],
+                [InlineKeyboardButton("✏️ MCap Min",   callback_data="scanner:edit_mcap_min"),
+                 InlineKeyboardButton("✏️ MCap Max",   callback_data="scanner:edit_mcap_max")],
+                [InlineKeyboardButton("📋 Presets", callback_data="heatscore:presets")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="menu:main")],
+            ])
+        )
+
+    elif action == "edit_mcap_min":
+        set_state(uid, waiting_for="scanner_mcap_min")
+        cur = sm.get_user_settings(uid).get("scanner_mcap_min", 5_000)
+        await query.edit_message_text(
+            f"*💰 MCap Minimum*\n\n"
+            f"Current: `${cur:,}`\n\n"
+            f"Tokens with market cap below this are ignored.\n"
+            f"Enter a value in USD (e.g. `5000`, `10000`, `50000`):",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
             ]])
         )
-    
-    elif action == "edit_hot":
-        set_state(uid, waiting_for="scanner_hot_threshold")
-        user_settings = sm.get_user_settings(uid)
-        cur = user_settings.get("alert_hot_threshold", 80)
+
+    elif action == "edit_mcap_max":
+        set_state(uid, waiting_for="scanner_mcap_max")
+        cur = sm.get_user_settings(uid).get("scanner_mcap_max", 10_000_000)
         await query.edit_message_text(
-            f"*✏️ HOT Threshold*\n\n"
-            f"Current: `{cur}/100`\n\n"
-            f"Type a number between 5 and 100.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
-            ]])
-        )
-    
-    elif action == "edit_ultra":
-        set_state(uid, waiting_for="scanner_ultra_hot_threshold")
-        user_settings = sm.get_user_settings(uid)
-        cur = user_settings.get("alert_ultra_hot_threshold", 90)
-        await query.edit_message_text(
-            f"*✏️ ULTRA HOT Threshold*\n\n"
-            f"Current: `{cur}/100`\n\n"
-            f"Type a number between 5 and 100.",
+            f"*💰 MCap Maximum*\n\n"
+            f"Current: `${cur:,}`\n\n"
+            f"Tokens with market cap above this are ignored.\n"
+            f"Enter a value in USD (e.g. `1000000`, `5000000`, `10000000`):",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
@@ -5395,12 +6352,301 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+def _slippage_kb(uid: int) -> InlineKeyboardMarkup:
+    cur = get_user_slippage(uid)
+    def _btn(label, bps):
+        tick = "✅ " if cur == bps else ""
+        return InlineKeyboardButton(f"{tick}{label}", callback_data=f"settings:slip_set:{bps}")
+    return InlineKeyboardMarkup([
+        [_btn("0.5%", 50),  _btn("1%", 100),  _btn("1.5%", 150)],
+        [_btn("2%",  200),  _btn("3%", 300),  _btn("5%",   500)],
+        [_btn("10%", 1000), _btn("20%", 2000), _btn("30%", 3000)],
+        [InlineKeyboardButton("✏️ Custom bps", callback_data="settings:slip_custom")],
+        [InlineKeyboardButton("⬅️ Back", callback_data="settings:menu")],
+    ])
+
+
 async def settings_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     uid    = query.from_user.id
-    action = query.data.split(":")[1]
+    parts  = query.data.split(":")
+    action = parts[1]
     await query.answer()
-    if action == "reset_paper":
+
+    if action == "menu":
+        await query.edit_message_text("⚙️ *Settings*", parse_mode="Markdown",
+                                      reply_markup=settings_kb(uid))
+
+    elif action == "slippage":
+        cur = get_user_slippage(uid)
+        slip_pct = cur / 100
+        await query.edit_message_text(
+            f"⚡ *Slippage Settings*\n\n"
+            f"Current: `{slip_pct:.1f}%` ({cur} bps)\n\n"
+            f"Slippage is the maximum price difference you accept between the quoted and executed price.\n"
+            f"• *Low (0.5–1%)* — best for stable, liquid tokens\n"
+            f"• *Medium (2–5%)* — good for most meme coins\n"
+            f"• *High (10–30%)* — needed for new/thin tokens, pump.fun graduates\n\n"
+            f"_Applied to all live trades. Paper trades are unaffected._",
+            parse_mode="Markdown",
+            reply_markup=_slippage_kb(uid)
+        )
+
+    elif action == "slip_set" and len(parts) > 2:
+        bps = int(parts[2])
+        set_user_slippage(uid, bps)
+        slip_pct = bps / 100
+        await query.edit_message_text(
+            f"✅ Slippage set to `{slip_pct:.1f}%` ({bps} bps)",
+            parse_mode="Markdown",
+            reply_markup=_slippage_kb(uid)
+        )
+
+    elif action == "slip_custom":
+        context.user_data["state"] = "slippage_custom"
+        await query.edit_message_text(
+            "✏️ *Custom Slippage*\n\n"
+            "Enter slippage in basis points (bps).\n"
+            "_1 bps = 0.01% — e.g. type `250` for 2.5%_\n\n"
+            "Range: `10`–`5000`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="settings:slippage")
+            ]])
+        )
+
+    elif action == "jito":
+        jito_on  = get_user_jito(uid)
+        tip      = get_user_jito_tip(uid)
+        tip_sol  = tip / 1_000_000_000
+        status   = "✅ Enabled" if jito_on else "❌ Disabled"
+        text = (
+            f"🛡️ *Jito MEV Protection*\n\n"
+            f"Routes trades through Jito block engine to prevent sandwich attacks.\n\n"
+            f"Status: *{status}*\n"
+            f"Tip: *{tip:,} lamports* ({tip_sol:.6f} SOL)\n\n"
+            f"_Higher tip = faster inclusion in Jito blocks._"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✅ Turn Off" if jito_on else "❌ Turn On",
+                callback_data="settings:jito_toggle"
+            )],
+            [InlineKeyboardButton("💰 50k lamports (0.00005 SOL)",  callback_data="settings:jito_tip:50000"),
+             InlineKeyboardButton("💰 100k (0.0001 SOL)",           callback_data="settings:jito_tip:100000")],
+            [InlineKeyboardButton("💰 250k (0.00025 SOL)",          callback_data="settings:jito_tip:250000"),
+             InlineKeyboardButton("💰 500k (0.0005 SOL)",           callback_data="settings:jito_tip:500000")],
+            [InlineKeyboardButton("✏️ Custom tip",                   callback_data="settings:jito_tip_custom")],
+            [InlineKeyboardButton("◀️ Back", callback_data="settings:back")],
+        ])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    elif action == "jito_toggle":
+        new_val = not get_user_jito(uid)
+        set_user_jito(uid, new_val)
+        # re-render jito menu
+        tip     = get_user_jito_tip(uid)
+        tip_sol = tip / 1_000_000_000
+        status  = "✅ Enabled" if new_val else "❌ Disabled"
+        text = (
+            f"🛡️ *Jito MEV Protection*\n\n"
+            f"Routes trades through Jito block engine to prevent sandwich attacks.\n\n"
+            f"Status: *{status}*\n"
+            f"Tip: *{tip:,} lamports* ({tip_sol:.6f} SOL)\n\n"
+            f"_Higher tip = faster inclusion in Jito blocks._"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✅ Turn Off" if new_val else "❌ Turn On",
+                callback_data="settings:jito_toggle"
+            )],
+            [InlineKeyboardButton("💰 50k lamports (0.00005 SOL)",  callback_data="settings:jito_tip:50000"),
+             InlineKeyboardButton("💰 100k (0.0001 SOL)",           callback_data="settings:jito_tip:100000")],
+            [InlineKeyboardButton("💰 250k (0.00025 SOL)",          callback_data="settings:jito_tip:250000"),
+             InlineKeyboardButton("💰 500k (0.0005 SOL)",           callback_data="settings:jito_tip:500000")],
+            [InlineKeyboardButton("✏️ Custom tip",                   callback_data="settings:jito_tip_custom")],
+            [InlineKeyboardButton("◀️ Back", callback_data="settings:back")],
+        ])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    elif action.startswith("jito_tip:") and not action.startswith("jito_tip_custom"):
+        lamports = int(action.split(":")[1])
+        set_user_jito_tip(uid, lamports)
+        tip_sol = lamports / 1_000_000_000
+        await query.answer(f"✅ Jito tip set to {lamports:,} lamports ({tip_sol:.6f} SOL)", show_alert=False)
+        # re-render jito menu
+        jito_on = get_user_jito(uid)
+        status  = "✅ Enabled" if jito_on else "❌ Disabled"
+        text = (
+            f"🛡️ *Jito MEV Protection*\n\n"
+            f"Routes trades through Jito block engine to prevent sandwich attacks.\n\n"
+            f"Status: *{status}*\n"
+            f"Tip: *{lamports:,} lamports* ({tip_sol:.6f} SOL)\n\n"
+            f"_Higher tip = faster inclusion in Jito blocks._"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton(
+                "✅ Turn Off" if jito_on else "❌ Turn On",
+                callback_data="settings:jito_toggle"
+            )],
+            [InlineKeyboardButton("💰 50k lamports (0.00005 SOL)",  callback_data="settings:jito_tip:50000"),
+             InlineKeyboardButton("💰 100k (0.0001 SOL)",           callback_data="settings:jito_tip:100000")],
+            [InlineKeyboardButton("💰 250k (0.00025 SOL)",          callback_data="settings:jito_tip:250000"),
+             InlineKeyboardButton("💰 500k (0.0005 SOL)",           callback_data="settings:jito_tip:500000")],
+            [InlineKeyboardButton("✏️ Custom tip",                   callback_data="settings:jito_tip_custom")],
+            [InlineKeyboardButton("◀️ Back", callback_data="settings:back")],
+        ])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    elif action == "jito_tip_custom":
+        context.user_data["state"] = "jito_tip_custom"
+        await query.edit_message_text(
+            "✏️ *Custom Jito Tip*\n\n"
+            "Enter tip amount in *lamports*.\n"
+            "_1 SOL = 1,000,000,000 lamports_\n\n"
+            "Common values:\n"
+            "• `50000` → 0.00005 SOL (minimal)\n"
+            "• `100000` → 0.0001 SOL (default)\n"
+            "• `500000` → 0.0005 SOL (aggressive)",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="settings:jito")
+            ]])
+        )
+
+    elif action == "priority":
+        cur_fee   = get_user_priority_fee(uid)
+        fee_label = _fee_label(cur_fee)
+        text = (
+            f"🚀 *Priority Fee*\n\n"
+            f"Extra fee paid to validators for faster transaction inclusion.\n\n"
+            f"Current: *{fee_label}* ({cur_fee:,} µlamports/CU)\n\n"
+            f"_Higher fee = better chance of landing in congested blocks._"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐢 Low (100k µL/CU)",    callback_data="settings:prio_set:Low"),
+             InlineKeyboardButton("⚡ Medium (500k µL/CU)", callback_data="settings:prio_set:Medium")],
+            [InlineKeyboardButton("🔥 High (1M µL/CU)",    callback_data="settings:prio_set:High"),
+             InlineKeyboardButton("🚀 Turbo (3M µL/CU)",   callback_data="settings:prio_set:Turbo")],
+            [InlineKeyboardButton("✏️ Custom",               callback_data="settings:prio_custom")],
+            [InlineKeyboardButton("◀️ Back", callback_data="settings:back")],
+        ])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    elif action.startswith("prio_set:"):
+        preset_name = action.split(":")[1]
+        new_fee = PRIORITY_FEE_PRESETS.get(preset_name)
+        if new_fee is not None:
+            set_user_priority_fee(uid, new_fee)
+            await query.answer(f"✅ Priority fee set to {preset_name}", show_alert=False)
+        cur_fee   = get_user_priority_fee(uid)
+        fee_label = _fee_label(cur_fee)
+        text = (
+            f"🚀 *Priority Fee*\n\n"
+            f"Extra fee paid to validators for faster transaction inclusion.\n\n"
+            f"Current: *{fee_label}* ({cur_fee:,} µlamports/CU)\n\n"
+            f"_Higher fee = better chance of landing in congested blocks._"
+        )
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🐢 Low (100k µL/CU)",    callback_data="settings:prio_set:Low"),
+             InlineKeyboardButton("⚡ Medium (500k µL/CU)", callback_data="settings:prio_set:Medium")],
+            [InlineKeyboardButton("🔥 High (1M µL/CU)",    callback_data="settings:prio_set:High"),
+             InlineKeyboardButton("🚀 Turbo (3M µL/CU)",   callback_data="settings:prio_set:Turbo")],
+            [InlineKeyboardButton("✏️ Custom",               callback_data="settings:prio_custom")],
+            [InlineKeyboardButton("◀️ Back", callback_data="settings:back")],
+        ])
+        await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+
+    elif action == "prio_custom":
+        context.user_data["state"] = "priority_custom"
+        await query.edit_message_text(
+            "✏️ *Custom Priority Fee*\n\n"
+            "Enter fee in *micro-lamports per Compute Unit* (µlamports/CU).\n\n"
+            "Reference:\n"
+            "• `100000` → Low\n"
+            "• `500000` → Medium (default)\n"
+            "• `1000000` → High\n"
+            "• `3000000` → Turbo\n\n"
+            "_Raise to 2,000,000+ for ultra-aggressive sniping._",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="settings:priority")
+            ]])
+        )
+
+    elif action == "safety_toggle":
+        new_val = not get_safety_check_enabled(uid)
+        set_safety_check_enabled(uid, new_val)
+        status = "🟢 ON" if new_val else "🔴 OFF"
+        await query.answer(f"Safety check {status}", show_alert=False)
+        await query.edit_message_text(
+            "⚙️ *Settings*",
+            parse_mode="Markdown",
+            reply_markup=settings_kb(uid)
+        )
+
+    elif action == "quick_amounts":
+        amounts = get_user_quick_buy_amounts(uid)
+        amt_str = " / ".join(f"{a} SOL" for a in amounts)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("0.05", callback_data="settings:qamt_add:0.05"),
+             InlineKeyboardButton("0.1",  callback_data="settings:qamt_add:0.1"),
+             InlineKeyboardButton("0.25", callback_data="settings:qamt_add:0.25"),
+             InlineKeyboardButton("0.5",  callback_data="settings:qamt_add:0.5")],
+            [InlineKeyboardButton("1.0",  callback_data="settings:qamt_add:1.0"),
+             InlineKeyboardButton("2.0",  callback_data="settings:qamt_add:2.0"),
+             InlineKeyboardButton("5.0",  callback_data="settings:qamt_add:5.0"),
+             InlineKeyboardButton("10.0", callback_data="settings:qamt_add:10.0")],
+            [InlineKeyboardButton("🔄 Reset to default", callback_data="settings:qamt_reset")],
+            [InlineKeyboardButton("◀️ Back", callback_data="settings:back")],
+        ])
+        await query.edit_message_text(
+            f"💰 *Quick Buy Amounts*\n\n"
+            f"Current presets: `{amt_str}`\n\n"
+            f"Tap to toggle a value on/off:\n"
+            f"_(max 4 presets shown as buttons)_",
+            parse_mode="Markdown",
+            reply_markup=kb
+        )
+
+    elif action.startswith("qamt_add:"):
+        val = float(action.split(":")[1])
+        amounts = get_user_quick_buy_amounts(uid)
+        if val in amounts:
+            amounts = [a for a in amounts if a != val]
+        else:
+            amounts = sorted(set(amounts + [val]))[:6]
+        if not amounts:
+            amounts = [0.1]
+        set_user_quick_buy_amounts(uid, amounts)
+        amt_str = " / ".join(f"{a} SOL" for a in amounts)
+        await query.answer(f"Presets: {amt_str}", show_alert=False)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("0.05", callback_data="settings:qamt_add:0.05"),
+             InlineKeyboardButton("0.1",  callback_data="settings:qamt_add:0.1"),
+             InlineKeyboardButton("0.25", callback_data="settings:qamt_add:0.25"),
+             InlineKeyboardButton("0.5",  callback_data="settings:qamt_add:0.5")],
+            [InlineKeyboardButton("1.0",  callback_data="settings:qamt_add:1.0"),
+             InlineKeyboardButton("2.0",  callback_data="settings:qamt_add:2.0"),
+             InlineKeyboardButton("5.0",  callback_data="settings:qamt_add:5.0"),
+             InlineKeyboardButton("10.0", callback_data="settings:qamt_add:10.0")],
+            [InlineKeyboardButton("🔄 Reset to default", callback_data="settings:qamt_reset")],
+            [InlineKeyboardButton("◀️ Back", callback_data="settings:back")],
+        ])
+        await query.edit_message_text(
+            f"💰 *Quick Buy Amounts*\n\n"
+            f"Current presets: `{amt_str}`\n\n"
+            f"Tap to toggle a value on/off:\n"
+            f"_(max 4 presets shown as buttons)_",
+            parse_mode="Markdown", reply_markup=kb
+        )
+
+    elif action == "qamt_reset":
+        set_user_quick_buy_amounts(uid, [0.1, 0.25, 0.5, 1.0])
+        await query.answer("Reset to defaults", show_alert=False)
+        await query.edit_message_text("⚙️ *Settings*", parse_mode="Markdown", reply_markup=settings_kb(uid))
+
+    elif action == "reset_paper":
         reset_portfolio(uid)
         await query.edit_message_text("🗑️ Paper portfolio reset to `10 SOL`.",
                                        parse_mode="Markdown", reply_markup=back_kb())
@@ -6912,18 +8158,25 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
             positions = {k: v for k, v in list(portfolio.items()) if k != "SOL" and v > 0}
             total_sol = 0.0
             for mint, raw_held in positions.items():
-                pair  = fetch_sol_pair(mint)
-                sym   = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
-                quote = jupiter_quote(mint, SOL_MINT, raw_held)
-                if quote and "outAmount" in quote:
-                    sol_recv = int(quote["outAmount"]) / 1e9
+                pair      = fetch_sol_pair(mint)
+                sym       = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
+                # Paper sell: fill at market price (no price impact), 1% simulated fee
+                price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
+                dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6) if pair else 6
+                if not price_sol:
+                    _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+                    if _bc and _bc.get("virtual_token_reserves") and _bc["virtual_token_reserves"] > 0:
+                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
+                        dec = 6
+                if price_sol:
+                    sol_recv = (price_sol * raw_held / (10 ** dec)) * 0.99
                     portfolio.pop(mint, None)
                     portfolio["SOL"] = portfolio.get("SOL", 0) + sol_recv
                     total_sol += sol_recv
                     remove_auto_sell(uid, mint)
                     results.append(f"✅ `${sym}` → `{sol_recv:.4f} SOL`")
                 else:
-                    results.append(f"❌ `${sym}` — quote failed")
+                    results.append(f"❌ `${sym}` — no price data")
             update_portfolio(uid, portfolio)
             summary = "\n".join(results) or "Nothing sold."
             await query.edit_message_text(
@@ -6952,9 +8205,9 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 raw_held = acc["amount"]
                 pair     = fetch_sol_pair(mint)
                 sym      = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
-                quote    = jupiter_quote(mint, SOL_MINT, raw_held)
+                quote    = jupiter_quote(mint, SOL_MINT, raw_held, get_user_slippage(uid))
                 if quote and "outAmount" in quote:
-                    sig      = execute_swap_live(quote)
+                    sig      = execute_swap_live(quote, uid)
                     sol_recv = int(quote.get("outAmount", 0)) / 1e9
                     if "ERROR" in sig or "error" in sig.lower():
                         results.append(f"❌ `${sym}` — swap failed: `{sig[:40]}`")
@@ -7046,12 +8299,18 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if raw_held <= 0:
                 await query.edit_message_text(f"No `${sym}` position to sell.", reply_markup=_pct_kb(mint))
                 return
-            sell_raw = max(1, int(raw_held * pct / 100))
-            quote    = jupiter_quote(mint, SOL_MINT, sell_raw)
-            if not quote or "outAmount" not in quote:
-                await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
+            sell_raw  = max(1, int(raw_held * pct / 100))
+            # Paper mode: fill at market price (no price impact), 1% simulated fee
+            price_sol = float(pair.get("priceNative", 0) or 0)
+            if not price_sol:
+                _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+                if _bc and _bc.get("virtual_token_reserves") and _bc["virtual_token_reserves"] > 0:
+                    price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
+            if not price_sol:
+                await query.edit_message_text("Could not fetch current price. Try again.", reply_markup=_pct_kb(mint))
                 return
-            sol_recv          = int(quote["outAmount"]) / 1e9
+            ui       = sell_raw / (10 ** dec)
+            sol_recv = price_sol * ui * 0.99  # 1% simulated fee
             portfolio[mint]   = raw_held - sell_raw
             portfolio["SOL"]  = portfolio.get("SOL", 0) + sol_recv
             if portfolio[mint] <= 0:
@@ -7076,11 +8335,11 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             raw_held = held["amount"]
             sell_raw = max(1, int(raw_held * pct / 100))
-            quote    = jupiter_quote(mint, SOL_MINT, sell_raw)
+            quote    = jupiter_quote(mint, SOL_MINT, sell_raw, get_user_slippage(uid))
             if not quote or "outAmount" not in quote:
                 await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
                 return
-            sig = execute_swap_live(quote)
+            sig = execute_swap_live(quote, uid)
             sol_recv = int(quote.get("outAmount", 0)) / 1e9
             await query.edit_message_text(
                 f"🔴 *Live Sell — {pct}%*\n\n"
@@ -7127,12 +8386,35 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if sol_spend < 0.001:
                 await query.edit_message_text(f"Insufficient SOL (`{sol_bal:.4f}`).", reply_markup=_pct_kb(mint))
                 return
+            # Safety check before live buy
+            if get_safety_check_enabled(uid):
+                await query.edit_message_text("🔍 Running safety check...", parse_mode="Markdown")
+                safety = await check_token_safety(mint)
+                if not safety["safe"]:
+                    await query.edit_message_text(
+                        f"🚫 *Safety Check Failed — Buy Cancelled*\n\n"
+                        f"❌ *{safety['block_reason']}*\n\n"
+                        f"_Disable safety check in Settings to override._",
+                        parse_mode="Markdown",
+                        reply_markup=InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔍 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+                            [InlineKeyboardButton("⚙️ Settings", callback_data="settings:menu")],
+                        ])
+                    )
+                    return
+                if safety["warnings"]:
+                    warn_text = "\n".join(f"⚠️ {w}" for w in safety["warnings"])
+                    await query.edit_message_text(
+                        f"⚠️ *Safety Warnings* — proceeding...\n\n{warn_text}",
+                        parse_mode="Markdown"
+                    )
+                    import asyncio as _aio2; await _aio2.sleep(1.5)
             lamports = int(sol_spend * 1_000_000_000)
-            quote    = jupiter_quote(SOL_MINT, mint, lamports)
+            quote    = jupiter_quote(SOL_MINT, mint, lamports, get_user_slippage(uid))
             if not quote or "outAmount" not in quote:
                 await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
                 return
-            sig     = execute_swap_live(quote)
+            sig     = execute_swap_live(quote, uid)
             out_raw = int(quote.get("outAmount", 0))
             await query.edit_message_text(
                 f"🔴 *Live Buy — {pct}% of SOL*\n\n"
@@ -7157,6 +8439,7 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("No pending trade.", reply_markup=back_kb())
         return
 
+    extra_note = ""
     await query.edit_message_text(f"Executing {action}...")
     loop  = asyncio.get_event_loop()
     via   = pending.get("via", "jupiter")
@@ -7172,14 +8455,35 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             # Re-route through Jupiter
             await query.edit_message_text("Token graduated — re-routing via Jupiter...")
             lamports = int(pending["sol_amount"] * 1e9)
-            quote    = jupiter_quote(SOL_MINT, pending["mint"], lamports)
+            quote    = jupiter_quote(SOL_MINT, pending["mint"], lamports, get_user_slippage(uid))
             if not quote:
                 await query.edit_message_text("Jupiter quote failed.", reply_markup=back_kb())
                 return
-            sig = await loop.run_in_executor(None, execute_swap_live, quote)
+            sig = await loop.run_in_executor(None, lambda: execute_swap_live(quote, uid))
             pending["raw_out"] = int(quote.get("outAmount", pending.get("tok_est", 0)))
     else:
-        sig = await loop.run_in_executor(None, execute_swap_live, pending["quote"])
+        in_mint    = pending.get("in_mint")
+        out_mint_r = pending.get("out_mint")
+        amt_raw    = pending.get("amount_raw")
+        if in_mint and out_mint_r and amt_raw:
+            async def _status(msg):
+                try:
+                    await query.edit_message_text(msg, parse_mode="Markdown")
+                except Exception:
+                    pass
+            sig, new_quote, attempts, final_slip = await _swap_with_retry(
+                in_mint, out_mint_r, amt_raw, uid, loop, status_fn=_status
+            )
+            if new_quote:
+                pending["quote"]   = new_quote
+                pending["raw_out"] = int(new_quote.get("outAmount", pending.get("raw_out", 0)))
+            if attempts > 1:
+                extra_note = f"\n_Slippage auto-bumped to {final_slip / 100:.1f}% after {attempts - 1} retries_"
+            else:
+                extra_note = ""
+        else:
+            sig        = await loop.run_in_executor(None, lambda: execute_swap_live(pending["quote"], uid))
+            extra_note = ""
 
     context.user_data.pop(f"pending_{action}", None)
 
@@ -7209,6 +8513,17 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       buy_price_usd=pending.get("buy_price_usd"),
                       mcap=pending.get("mcap", 0),
                       tx_sig=sig)
+        _pnl_card = ""
+        if action == "sell":
+            as_entry = load_auto_sell().get(str(uid), {}).get(mint, {})
+            _sol_in  = float(as_entry.get("sol_amount", 0) or 0)
+            _sol_out = float(pending.get("raw_out", 0)) / 1e9
+            if _sol_in > 0 and _sol_out > 0:
+                import time as _t_now
+                _pnl_card = "\n\n" + _format_pnl_card(
+                    pending["symbol"], mint, _sol_in, _sol_out,
+                    float(as_entry.get("created_at", 0) or 0), _t_now.time(), get_mode(uid)
+                )
         await query.edit_message_text(
             f"✅ *{action.title()} Submitted*\n"
             f"Token: `{pending['symbol']}`\n"
@@ -7216,7 +8531,9 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"[Solscan](https://solscan.io/tx/{sig})  "
             f"[DexScreener](https://dexscreener.com/solana/{mint})  "
             f"[Pump](https://pump.fun/{mint})"
-            + ("\n\n🤖 Auto-sell configured: 2x→50%, 4x→50%" if action == "buy" else ""),
+            + ("\n\n🤖 Auto-sell configured: 2x→50%, 4x→50%" if action == "buy" else "")
+            + _pnl_card
+            + extra_note,
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
                 [InlineKeyboardButton("⚙️ Auto-Sell", callback_data=f"as:view:{mint}")],
@@ -7235,10 +8552,23 @@ async def quick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if action == "buy":
         set_state(uid, waiting_for="trade_buy_amount", trade_action="buy", trade_token=mint)
+        amounts = get_user_quick_buy_amounts(uid)
+        preset_rows = []
+        row = []
+        for amt in amounts:
+            label = f"{amt} SOL" if amt < 1 else f"{int(amt) if amt == int(amt) else amt} SOL"
+            row.append(InlineKeyboardButton(label, callback_data=f"qb_preset:{mint}:{amt}"))
+            if len(row) == 2:
+                preset_rows.append(row)
+                row = []
+        if row:
+            preset_rows.append(row)
+        preset_rows.append([InlineKeyboardButton("✏️ Custom amount", callback_data=f"qb_preset:{mint}:custom"),
+                            InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
         await query.edit_message_text(
             "🟢 *Buy*\n\nHow much SOL to spend?",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
+            reply_markup=InlineKeyboardMarkup(preset_rows)
         )
     elif action == "alert":
         set_state(uid, waiting_for="alert_direction", alert_token=mint)
@@ -7264,6 +8594,35 @@ async def cancel_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     clear_state(uid)
     await query.answer("Cancelled")
     await show_main_menu(query, uid, edit=True)
+
+
+async def qb_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Handle quick-buy SOL amount preset buttons."""
+    query  = update.callback_query
+    uid    = query.from_user.id
+    parts  = query.data.split(":")  # qb_preset : mint : amount
+    mint   = parts[1]
+    amount = parts[2] if len(parts) > 2 else "custom"
+    await query.answer()
+
+    if amount == "custom":
+        set_state(uid, waiting_for="trade_buy_amount", trade_action="buy", trade_token=mint)
+        await query.edit_message_text(
+            "✏️ *Custom Buy Amount*\n\nEnter SOL amount to spend:",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
+        )
+        return
+
+    try:
+        sol_amount = float(amount)
+    except ValueError:
+        await query.answer("Invalid amount", show_alert=True)
+        return
+
+    mode = get_mode(uid)
+    msg  = await query.edit_message_text("Getting quote...")
+    await do_trade_flow(msg, uid, context, "buy", mint, str(sol_amount))
 
 
 # ─── Text input state machine ─────────────────────────────────────────────────
@@ -8404,6 +9763,75 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")]])
         )
 
+    elif state == "slippage_custom":
+        try:
+            bps = int(float(text.strip().replace("%", "")))
+            if not (10 <= bps <= 5000):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Enter a number between `10` and `5000` bps (e.g. `250` = 2.5%).",
+                parse_mode="Markdown"
+            )
+            return
+        clear_state(uid)
+        set_user_slippage(uid, bps)
+        slip_pct = bps / 100
+        await update.message.reply_text(
+            f"✅ Slippage set to `{slip_pct:.1f}%` ({bps} bps)",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Slippage Settings", callback_data="settings:slippage"),
+                InlineKeyboardButton("⬅️ Settings", callback_data="settings:menu"),
+            ]])
+        )
+
+    elif state == "priority_custom":
+        try:
+            val = int(float(text.strip().replace(",", "")))
+            if val < 1_000:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Enter a number ≥ `1000` µlamports/CU (e.g. `500000` for Medium).",
+                parse_mode="Markdown"
+            )
+            return
+        clear_state(uid)
+        set_user_priority_fee(uid, val)
+        fee_label = _fee_label(val)
+        await update.message.reply_text(
+            f"✅ Priority fee set to `{val:,}` µlamports/CU (*{fee_label}*)",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Priority Settings", callback_data="settings:priority"),
+                InlineKeyboardButton("⬅️ Settings", callback_data="settings:menu"),
+            ]])
+        )
+
+    elif state == "jito_tip_custom":
+        try:
+            val = int(float(text.strip().replace(",", "")))
+            if val < 1_000:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Enter a number ≥ `1000` lamports (e.g. `100000` = 0.0001 SOL).",
+                parse_mode="Markdown"
+            )
+            return
+        clear_state(uid)
+        set_user_jito_tip(uid, val)
+        tip_sol = val / 1_000_000_000
+        await update.message.reply_text(
+            f"✅ Jito tip set to `{val:,}` lamports ({tip_sol:.6f} SOL)",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Jito Settings", callback_data="settings:jito"),
+                InlineKeyboardButton("⬅️ Settings", callback_data="settings:menu"),
+            ]])
+        )
+
     elif state == "gsl_pct":
         try:
             val = int(float(text))
@@ -8624,11 +10052,11 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
-    elif state == "scanner_warm_threshold":
+    elif state == "scanner_watch_threshold":
         raw = text.strip()
-        if not raw.isdigit() or not (5 <= int(raw) <= 100):
+        if not raw.isdigit() or not (1 <= int(raw) <= 100):
             await update.message.reply_text(
-                "Please send a number between 5 and 100.",
+                "Please send a number between 1 and 100.",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
                 ]])
@@ -8636,60 +10064,116 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
         val = int(raw)
         user_settings = sm.get_user_settings(uid)
+        # Keep alert_score >= watch_score
+        alert_score = user_settings.get("alert_warm_threshold", 70)
+        if val > alert_score:
+            user_settings["alert_warm_threshold"] = val  # raise alert to match
+        user_settings["alert_scouted_threshold"] = val
+        sm.save_user_settings(uid, user_settings)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Watch Score set to `{val}/100`\n\nTokens scoring ≥ {val} will send a compact watchlist ping.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
+            ]])
+        )
+
+    elif state == "scanner_alert_threshold":
+        raw = text.strip()
+        if not raw.isdigit() or not (1 <= int(raw) <= 100):
+            await update.message.reply_text(
+                "Please send a number between 1 and 100.",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+                ]])
+            )
+            return
+        val = int(raw)
+        user_settings = sm.get_user_settings(uid)
+        watch_score = user_settings.get("alert_scouted_threshold", 20)
+        if val < watch_score:
+            # Lower watch to match — alert score is always the floor
+            user_settings["alert_scouted_threshold"] = val
         user_settings["alert_warm_threshold"] = val
-        sm.save_user_settings(uid, user_settings)
-        clear_state(uid)
-        await update.message.reply_text(
-            f"✅ WARM threshold set to `{val}/100`\n\nYou'll receive WARM alerts for tokens scoring ≥ {val}.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
-            ]])
-        )
-
-    elif state == "scanner_hot_threshold":
-        raw = text.strip()
-        if not raw.isdigit() or not (5 <= int(raw) <= 100):
-            await update.message.reply_text(
-                "Please send a number between 5 and 100.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
-                ]])
-            )
-            return
-        val = int(raw)
-        user_settings = sm.get_user_settings(uid)
-        user_settings["alert_hot_threshold"] = val
-        sm.save_user_settings(uid, user_settings)
-        clear_state(uid)
-        await update.message.reply_text(
-            f"✅ HOT threshold set to `{val}/100`\n\nYou'll receive HOT alerts for tokens scoring ≥ {val}.",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
-            ]])
-        )
-
-    elif state == "scanner_ultra_hot_threshold":
-        raw = text.strip()
-        if not raw.isdigit() or not (5 <= int(raw) <= 100):
-            await update.message.reply_text(
-                "Please send a number between 5 and 100.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
-                ]])
-            )
-            return
-        val = int(raw)
-        user_settings = sm.get_user_settings(uid)
+        # Retire hot/ultra — they're now just labels, not separate thresholds
+        user_settings["alert_hot_threshold"]       = val
         user_settings["alert_ultra_hot_threshold"] = val
         sm.save_user_settings(uid, user_settings)
         clear_state(uid)
         await update.message.reply_text(
-            f"✅ ULTRA HOT threshold set to `{val}/100`\n\nYou'll receive ULTRA HOT alerts for tokens scoring ≥ {val}.",
+            f"✅ Alert Score set to `{val}/100`\n\nTokens scoring ≥ {val} will send a full DM alert.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
+            ]])
+        )
+
+    elif state == "scanner_mcap_min":
+        raw = text.strip().replace(",", "").replace("$", "")
+        try:
+            val = int(float(raw))
+            if val < 0: raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Please send a valid number (e.g. `5000` or `10000`).",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+                ]])
+            )
+            return
+        user_settings = sm.get_user_settings(uid)
+        mcap_max = user_settings.get("scanner_mcap_max", 10_000_000)
+        if val > mcap_max:
+            user_settings["scanner_mcap_max"] = val * 10
+        user_settings["scanner_mcap_min"] = val
+        sm.save_user_settings(uid, user_settings)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ MCap minimum set to `${val:,}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
+            ]])
+        )
+
+    elif state == "scanner_mcap_max":
+        raw = text.strip().replace(",", "").replace("$", "")
+        try:
+            val = int(float(raw))
+            if val < 0: raise ValueError
+        except ValueError:
+            await update.message.reply_text(
+                "Please send a valid number (e.g. `1000000`).",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("❌ Cancel", callback_data="scanner:set_threshold"),
+                ]])
+            )
+            return
+        user_settings = sm.get_user_settings(uid)
+        mcap_min = user_settings.get("scanner_mcap_min", 5_000)
+        if val < mcap_min:
+            user_settings["scanner_mcap_min"] = max(0, val // 10)
+        user_settings["scanner_mcap_max"] = val
+        sm.save_user_settings(uid, user_settings)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ MCap maximum set to `${val:,}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="scanner:set_threshold"),
+            ]])
+        )
+
+    # Legacy handlers kept for any in-flight state (users mid-conversation during restart)
+    elif state in ("scanner_warm_threshold", "scanner_hot_threshold", "scanner_ultra_hot_threshold"):
+        clear_state(uid)
+        await update.message.reply_text(
+            "Threshold config has been simplified. Use the buttons below to set your scores.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Thresholds", callback_data="scanner:set_threshold"),
             ]])
         )
 
@@ -8826,6 +10310,39 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("📣 Channel Settings", callback_data="pumpgrad:channel_menu"),
             ]])
         )
+
+    elif state == "wbalert_add_addr":
+        addr = text.strip()
+        if len(addr) < 32 or len(addr) > 44:
+            await update.message.reply_text(
+                "❌ Invalid address. Paste a valid Solana wallet address (32–44 chars).",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wbalert:list")]])
+            )
+            return
+        context.user_data["state"]           = "wbalert_add_label"
+        context.user_data["wbalert_pending"] = addr
+        await update.message.reply_text(
+            f"✅ Address: `{addr}`\n\nGive this wallet a label (e.g. *Whale 1*, *Dev*):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Skip (use address)", callback_data="wbalert:skip_label")]])
+        )
+
+    elif state == "wbalert_add_label":
+        addr  = context.user_data.pop("wbalert_pending", "")
+        label = text.strip() or addr[:8]
+        context.user_data.pop("state", None)
+        if addr:
+            added = add_user_alert_wallet(uid, addr, label)
+            if added:
+                await update.message.reply_text(
+                    f"✅ *Wallet alert added!*\n\n*{label}*\n`{addr}`\n\n"
+                    f"_You'll be notified when this wallet buys a new token._",
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👁️ My Alerts", callback_data="wbalert:list")]])
+                )
+            else:
+                await update.message.reply_text("⚠️ Wallet already tracked.",
+                    reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👁️ My Alerts", callback_data="wbalert:list")]]))
 
     else:
         # Natural language scanner triggers
@@ -10099,6 +11616,65 @@ async def gte_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
 
+async def user_wallet_alert_loop(app):
+    """Poll user-tracked wallets for new token purchases and send Telegram alerts."""
+    print("[WALLET_ALERT] loop started", flush=True)
+    while True:
+        try:
+            d    = load_user_wallet_alerts()
+            loop = asyncio.get_event_loop()
+
+            # Build address → [uid_str] index so each wallet is fetched once
+            wallet_users: dict[str, list] = {}
+            for uid_str, wallets in d.items():
+                for w in wallets:
+                    wallet_users.setdefault(w["address"], []).append(uid_str)
+
+            for addr, uid_strs in wallet_users.items():
+                try:
+                    current_toks = await loop.run_in_executor(None, get_token_accounts, addr)
+                    current_map  = {t["mint"]: t["amount"] for t in current_toks}
+                except Exception as e:
+                    print(f"[WALLET_ALERT] fetch error {addr[:8]}: {e}", flush=True)
+                    continue
+
+                for uid_str in uid_strs:
+                    for w in d.get(uid_str, []):
+                        if w["address"] != addr:
+                            continue
+                        prev = w.get("last_tokens", {})
+                        new_buys = [
+                            mint for mint, amt in current_map.items()
+                            if mint not in prev or amt > prev.get(mint, 0) * 1.05
+                        ]
+                        for mint in new_buys[:3]:
+                            try:
+                                pair = await loop.run_in_executor(None, fetch_sol_pair, mint)
+                                sym  = pair["baseToken"]["symbol"] if pair else mint[:8]
+                                mcap = float(pair.get("marketCap", 0) or 0) if pair else 0
+                                mcap_str = f"${mcap / 1_000_000:.2f}M" if mcap >= 1_000_000 else (f"${mcap / 1_000:.0f}K" if mcap >= 1_000 else "—")
+                                await app.bot.send_message(
+                                    int(uid_str),
+                                    f"👁️ *Wallet Alert — {w.get('label', addr[:8])}*\n\n"
+                                    f"Bought: *${sym}*\n"
+                                    f"MCap: `{mcap_str}`\n"
+                                    f"Wallet: `{addr[:8]}...{addr[-4:]}`",
+                                    parse_mode="Markdown",
+                                    reply_markup=InlineKeyboardMarkup([[
+                                        InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
+                                        InlineKeyboardButton("🟢 Buy",   callback_data=f"quick:buy:{mint}"),
+                                    ]])
+                                )
+                            except Exception as e:
+                                print(f"[WALLET_ALERT] alert send error: {e}", flush=True)
+                        w["last_tokens"] = current_map
+
+            save_user_wallet_alerts(d)
+        except Exception as e:
+            print(f"[WALLET_ALERT] loop error: {e}", flush=True)
+        await asyncio.sleep(30)
+
+
 # ─── Bot command list ─────────────────────────────────────────────────────────
 
 
@@ -10124,6 +11700,29 @@ async def _supervised_task(name: str, coro_fn, *args):
             delay = min(delay * 2, 120)
 
 
+async def _start_api_server(app):
+    """Launch the AI Control API server alongside the bot."""
+    try:
+        import uvicorn
+        import api_server as _api
+        _api.set_bot_app(app)             # hand the live bot handle to the API
+        port = getattr(__import__("config"), "API_PORT", 8080)
+        cfg  = uvicorn.Config(
+            _api.app,
+            host="0.0.0.0",
+            port=port,
+            log_level="warning",
+            loop="none",                  # reuse the existing asyncio loop
+        )
+        server = uvicorn.Server(cfg)
+        print(f"[API] AI Control API starting on port {port}", flush=True)
+        await server.serve()
+    except SystemExit:
+        print("[API] Server failed to start (port in use?). Bot continues without API.", flush=True)
+    except Exception as e:
+        print(f"[API] Server error: {e}", flush=True)
+
+
 async def post_init(app):
     # Inject auto-buy callback into pumpfeed (avoids circular import)
     pf.set_grad_autobuy_fn(execute_auto_buy)
@@ -10135,6 +11734,10 @@ async def post_init(app):
     asyncio.create_task(_supervised_task("PORTFOLIO_WATCH", pf.run_portfolio_watch, app.bot))
     # Monitor blockchain for brand new token launches (early hunter)
     asyncio.create_task(_supervised_task("LAUNCH_HUNTER", pf.run_launch_hunter, app.bot))
+    # Poll user-tracked wallets for new buy alerts
+    asyncio.create_task(user_wallet_alert_loop(app))
+    # Start AI Control API server
+    asyncio.create_task(_start_api_server(app))
 
     await app.bot.set_my_commands([
         BotCommand("start",      "Launch the bot"),
@@ -10224,6 +11827,8 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("stoploss",   cmd_stoploss))
     app.add_handler(CommandHandler("wallets",    cmd_wallets_intel))
     app.add_handler(CommandHandler("narratives", cmd_narratives_intel))
+    app.add_handler(CommandHandler("watchbuy",   cmd_watchbuy))
+    app.add_handler(CommandHandler("history",    cmd_history))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
@@ -10259,6 +11864,9 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(gbe_callback,                 pattern=r"^gbe:"))
     app.add_handler(CallbackQueryHandler(gte_callback,                 pattern=r"^gte:"))
     app.add_handler(CallbackQueryHandler(intel_callback,               pattern=r"^intel:"))
+    app.add_handler(CallbackQueryHandler(wbalert_callback,             pattern=r"^wbalert:"))
+    app.add_handler(CallbackQueryHandler(history_page_callback,        pattern=r"^history_page:"))
+    app.add_handler(CallbackQueryHandler(qb_preset_callback,           pattern=r"^qb_preset:"))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
