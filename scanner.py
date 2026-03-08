@@ -479,6 +479,51 @@ def score_liquidity_strength(token: dict, rc: dict) -> tuple[int, str]:
     return 0, f"Very weak liquidity ({total_liquidity:.2f}◎)"
 
 
+def score_price_trajectory(token: dict) -> tuple[int, str, bool]:
+    """
+    Detects pump-and-dump / dying tokens using price change data.
+    Returns (pts, reason, disqualify).
+
+    DQ conditions (hard skip — already dumped):
+      - h1 price change <= -60%  → clearly post-pump death spiral
+      - h24 >= +300% AND h1 <= -40% → pumped yesterday, cratering now
+
+    Penalty points (deducted from base score):
+      - h1 change -30% to -60%  → heavy sell pressure, -10pts
+      - h1 change -15% to -30%  → declining momentum, -5pts
+
+    Bonus points (still rising):
+      - h1 change > +20% and h24 < +500%  → actively pumping, +5pts
+      - h1 change > +5%                   → healthy uptrend, +2pts
+    """
+    h1  = float(token.get("price_h1",  0) or 0)
+    h24 = float(token.get("price_h24", 0) or 0)
+
+    # Hard disqualification: token has already peaked and is dumping
+    if h1 <= -60:
+        return 0, f"Post-pump dump: price -{ abs(h1):.0f}% in 1h — SKIP", True
+    if h24 >= 300 and h1 <= -40:
+        return 0, f"Pump-and-dump: +{h24:.0f}% h24 / {h1:.0f}% h1 — SKIP", True
+
+    # Penalty: declining price momentum
+    if h1 <= -30:
+        return -10, f"Heavy sell pressure: {h1:.0f}% in 1h", False
+    if h1 <= -15:
+        return -5, f"Declining: {h1:.0f}% in 1h", False
+
+    # Neutral – slight decay but not disqualifying
+    if h1 < -5:
+        return 0, f"Slight decline: {h1:.0f}% in 1h", False
+
+    # Bonus: actively moving up
+    if h1 > 20 and h24 < 500:
+        return 5, f"Pumping now: +{h1:.0f}% in 1h", False
+    if h1 > 5:
+        return 2, f"Uptrend: +{h1:.0f}% in 1h", False
+
+    return 0, f"Flat price: {h1:+.0f}% h1 / {h24:+.0f}% h24", False
+
+
 def score_volume_momentum(token: dict) -> tuple[int, str]:
     """20 pts — volume momentum acceleration (m1 → m5 → h1 progression)."""
     m1 = float(token.get("volume_m1", 0) or 0)
@@ -665,8 +710,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     mid_mint = token.get("mint", "")
     wal_pts,  wal_reason  = score_watched_wallet_entry(mid_mint)
     clus_pts, clus_reason = score_cluster_boost(mid_mint)
-    pres_pts, pres_reason = score_buy_sell_pressure(mid_mint)  # ← NEW: Birdeye pressure
-    trend_pts, trend_reason = score_volume_trend(mid_mint)  # ← NEW: GeckoTerminal trend
+    pres_pts, pres_reason = score_buy_sell_pressure(mid_mint)  # ← Birdeye pressure
+    trend_pts, trend_reason = score_volume_trend(mid_mint)  # ← GeckoTerminal trend
+    traj_pts, traj_reason, traj_dq = score_price_trajectory(token)  # ← pump-dump guard
 
     wall_pts, wall_reason = score_wallets(rc)
     twit_pts, twit_reason = score_twitter(token)
@@ -703,7 +749,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
     except Exception:
         pred_pts, pred_reason, pred_arch, pred_conf = 0, "Prediction unavailable", "NONE", 0
     disqualified = None
-    if dev_dq:
+    if traj_dq:
+        disqualified = traj_reason
+    elif dev_dq:
         disqualified = dev_reason
     elif hold_dq:
         disqualified = hold_reason
@@ -728,7 +776,8 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
         intel_narrative_boost = 0.0
 
     # Convert the richer internal score into the documented 0-100 scale.
-    base_total = mom_pts + liq_pts + pres_pts + trend_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts
+    # traj_pts can be negative (penalty) or positive (bonus) — applied directly
+    base_total = mom_pts + liq_pts + pres_pts + trend_pts + wal_pts + wall_pts + twit_pts + narr_pts + migr_pts + dev_pts + hold_pts + age_pts + traj_pts
     raw_total = max(0.0, float(base_total + clus_pts + bund_pts + pred_pts + intel_wallet_boost + intel_narrative_boost))
     total = max(0, min(100, int(round((raw_total / 125.0) * 100))))
 
@@ -766,8 +815,9 @@ def calculate_heat_score(token: dict, rc: dict) -> dict:
             "liquidity":  (liq_pts,  liq_reason),
             "wallet_rep": (wal_pts,  wal_reason),
             "cluster":    (clus_pts, clus_reason),
-            "pressure":   (pres_pts, pres_reason),  # ← NEW: Birdeye
-            "trend":      (trend_pts, trend_reason),  # ← NEW: GeckoTerminal
+            "pressure":   (pres_pts, pres_reason),
+            "trend":      (trend_pts, trend_reason),
+            "trajectory": (traj_pts, traj_reason),
             "wallets":    (wall_pts, wall_reason),
             "twitter":    (twit_pts, twit_reason),
             "narrative":  (narr_pts, narr_reason),
