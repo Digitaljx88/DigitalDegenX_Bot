@@ -284,7 +284,8 @@ STRATEGIES = {
 
 
 def setup_auto_sell(uid: int, mint: str, symbol: str,
-                    buy_price_usd: float, raw_amount: int, decimals: int):
+                    buy_price_usd: float, raw_amount: int, decimals: int,
+                    sol_amount: float = 0.0):
     """Called after every buy to create default auto-sell config using user presets."""
     existing = get_auto_sell(uid, mint)
     # Get user's preset multipliers (defaults to 2x→50%, 4x→50%)
@@ -302,7 +303,8 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
     config = {
         "symbol":             symbol,
         "buy_price_usd":      buy_price_usd,
-        "purchase_timestamp": time.time(),  # Track when token was purchased (for dual % tracking)
+        "sol_amount":         sol_amount,        # SOL spent on this buy
+        "purchase_timestamp": time.time(),
         "initial_raw":        raw_amount,
         "decimals":           decimals,
         "enabled":            True,
@@ -884,6 +886,14 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                 parse_mode="Markdown",
             )
         else:
+            # Update portfolio JSON so SOL balance and token balance stay accurate
+            _pf = get_portfolio(uid)
+            _pf["SOL"] = _pf.get("SOL", 0) + sol_received
+            if sell_amount >= raw_held:
+                _pf.pop(mint, None)
+            else:
+                _pf[mint] = raw_held - sell_amount
+            update_portfolio(uid, _pf)
             log_trade(uid, mode, "sell", mint, symbol,
                       sol_received=sol_received, token_amount=sell_amount,
                       price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
@@ -914,6 +924,16 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
         uid  = int(uid_str)
         mode = get_mode(uid)
 
+        # For live mode, fetch wallet holdings once per user per cycle
+        _live_held_mints: set | None = None
+        if mode == "live":
+            _pubkey = get_wallet_pubkey()
+            if _pubkey:
+                try:
+                    _live_held_mints = {a["mint"] for a in (get_token_accounts(_pubkey) or [])}
+                except Exception:
+                    _live_held_mints = None  # skip stale check this cycle if RPC fails
+
         for mint, cfg in list(tokens.items()):
             if not cfg.get("enabled", True):
                 continue
@@ -923,13 +943,17 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                 continue
 
             # Safeguard: Check if user still holds this token (prevent stale auto-sell entries)
-            portfolio = get_portfolio(uid)
-            if mint not in portfolio or portfolio[mint] <= 0:
-                # Token sold or removed from portfolio — clean up auto-sell config
-                remove_auto_sell(uid, mint)
-                # Log for debugging
-                print(f"[AUTO-SELL] Cleaned up stale entry: uid={uid}, mint={mint[:8]}")
-                continue
+            if mode == "live":
+                if _live_held_mints is not None and mint not in _live_held_mints:
+                    remove_auto_sell(uid, mint)
+                    print(f"[AUTO-SELL] Cleaned up stale live entry: uid={uid}, mint={mint[:8]}", flush=True)
+                    continue
+            else:
+                portfolio = get_portfolio(uid)
+                if mint not in portfolio or portfolio[mint] <= 0:
+                    remove_auto_sell(uid, mint)
+                    print(f"[AUTO-SELL] Cleaned up stale paper entry: uid={uid}, mint={mint[:8]}", flush=True)
+                    continue
 
             price, mcap = fetch_token_price(mint)
             if price is None:
@@ -1143,9 +1167,10 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                     # Move per-position stop-loss to breakeven (0% drop = entry price)
                     if "stop_loss" not in cfg:
                         cfg["stop_loss"] = {}
-                    cfg["stop_loss"]["pct"]       = 0
-                    cfg["stop_loss"]["enabled"]   = True
-                    cfg["stop_loss"]["triggered"] = False
+                    cfg["stop_loss"]["pct"]     = 0
+                    cfg["stop_loss"]["enabled"] = True
+                    # Do NOT reset triggered — if SL already fired, don't re-arm it
+                    # (matches local breakeven_stop behaviour at line ~1031)
                     changed = True
                     try:
                         await context.bot.send_message(
@@ -1385,7 +1410,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         portfolio["SOL"]  = sol_bal - sol_amount
         portfolio[mint]   = portfolio.get(mint, 0) + out_amount
         update_portfolio(uid, portfolio)
-        setup_auto_sell(uid, mint, symbol, price_usd, out_amount, decimals)
+        setup_auto_sell(uid, mint, symbol, price_usd, out_amount, decimals, sol_amount=sol_amount)
         log_trade(uid, "paper", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_amount,
                   price_usd=price_usd, mcap=mcap, heat_score=score)
@@ -1455,7 +1480,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
         portfolio[mint] = portfolio.get(mint, 0) + out_raw
         update_portfolio(uid, portfolio)
-        setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals)
+        setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals, sol_amount=sol_amount)
         log_trade(uid, "live", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_raw,
                   price_usd=price_usd, mcap=mcap, heat_score=score, tx_sig=tx_sig)
@@ -1879,9 +1904,11 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                 as_tag    = " 🤖" if as_cfg.get("enabled") else ""
                 mcap_str  = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
                 val_str   = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+                sol_in    = as_cfg.get("sol_amount", 0)
+                sol_in_str = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
                 lines.append("━━━━━━━━━━━━━━━━━━")
                 lines.append(f"*{sym}*{as_tag}{src_tag}")
-                lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ `{val_str}`{mcap_str}")
+                lines.append(f"  {acc['ui_amount']:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
                 token_rows.append([
                     InlineKeyboardButton(f"⚡ {sym}",  callback_data=f"qt:{acc['mint']}"),
                     InlineKeyboardButton("📊", url=f"https://dexscreener.com/solana/{acc['mint']}"),
@@ -1912,6 +1939,8 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
              InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
             [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
              InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
+            [InlineKeyboardButton("💰 Sell Profit", callback_data="portfolio:sell_profit_confirm"),
+             InlineKeyboardButton("🔻 Sell Below%", callback_data="portfolio:sell_below_prompt")],
             [InlineKeyboardButton("💣 Sell All",  callback_data="portfolio:sell_all_confirm")],
             [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
         ]
@@ -1961,12 +1990,14 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                 else:
                     pnl_badge = ""
 
-                mcap_str = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
-                val_str  = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+                mcap_str    = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
+                val_str     = f"{val_sol:.4f}◎" if val_sol else "unlisted"
+                sol_in      = cfg.get("sol_amount", 0) if cfg else 0
+                sol_in_str  = f" · 💰 `{sol_in:.3f}◎ in`" if sol_in else ""
 
                 lines.append("━━━━━━━━━━━━━━━━━━")
                 lines.append(f"*{sym}*{as_tag}{pnl_badge}")
-                lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}")
+                lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}{sol_in_str}")
                 if cfg and cfg.get("enabled"):
                     pending = [t["label"] for t in cfg.get("mult_targets", []) if not t["triggered"]]
                     if pending:
@@ -2020,6 +2051,8 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
          InlineKeyboardButton("🔴 Sell",      callback_data="trade:sell")],
         [InlineKeyboardButton("🔄 Refresh",   callback_data="portfolio:refresh"),
          InlineKeyboardButton("🤖 Auto-Sell", callback_data="menu:autosell")],
+        [InlineKeyboardButton("💰 Sell Profit", callback_data="portfolio:sell_profit_confirm"),
+         InlineKeyboardButton("🔻 Sell Below%", callback_data="portfolio:sell_below_prompt")],
         [InlineKeyboardButton("💣 Sell All",  callback_data="portfolio:sell_all_confirm")],
         [InlineKeyboardButton("🗑️ Reset",     callback_data="settings:reset_paper"),
          InlineKeyboardButton("⬅️ Menu",      callback_data="menu:main")],
@@ -4573,7 +4606,7 @@ async def pf_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         log_trade(uid, "paper", "buy", mint, sym, sol_amount=sol,
                   token_amount=tok_est, price_usd=price, mcap=mcap)
         if price > 0:
-            setup_auto_sell(uid, mint, sym, price, tok_est, decimals)
+            setup_auto_sell(uid, mint, sym, price, tok_est, decimals, sol_amount=sol)
         await query.edit_message_text(
             f"📄 *Paper Buy — ${sym}*\n"
             f"Spent: `{sol} SOL`\n"
@@ -6308,6 +6341,81 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await query.edit_message_text("Loading...")
         await _show_portfolio(query.edit_message_text, uid, page=target_page)
 
+    elif action == "sell_profit_confirm":
+        # Confirm screen: sell all positions currently in profit
+        await query.answer()
+        mode = get_mode(uid)
+        as_configs = load_auto_sell().get(str(uid), {})
+        profitable = []
+        for mint, cfg in as_configs.items():
+            buy_price = cfg.get("buy_price_usd", 0)
+            if not buy_price:
+                continue
+            price, _ = fetch_token_price(mint)
+            if price and price > buy_price:
+                pct = (price - buy_price) / buy_price * 100
+                profitable.append((mint, cfg.get("symbol", mint[:6]), pct))
+        if not profitable:
+            await query.answer("No positions currently in profit.", show_alert=True)
+            return
+        lines = [f"💰 *Sell All Profitable — Confirm*\n\n"]
+        for _, sym, pct in profitable:
+            lines.append(f"  • `${sym}` +{pct:.0f}%")
+        lines.append(f"\n{len(profitable)} position(s) will be sold at 100%.\nProceed?")
+        await query.edit_message_text(
+            "\n".join(lines), parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("✅ Yes, Sell Profit", callback_data="portfolio:sell_profit_exec"),
+                 InlineKeyboardButton("❌ Cancel",           callback_data="portfolio:refresh")],
+            ])
+        )
+
+    elif action == "sell_profit_exec":
+        await query.answer("Selling profitable positions...")
+        mode = get_mode(uid)
+        as_configs = load_auto_sell().get(str(uid), {})
+        results = []
+        total_sol = 0.0
+        for mint, cfg in list(as_configs.items()):
+            buy_price = cfg.get("buy_price_usd", 0)
+            if not buy_price:
+                continue
+            price, mcap = fetch_token_price(mint)
+            if not price or price <= buy_price:
+                continue
+            sym = cfg.get("symbol", mint[:6])
+            await execute_auto_sell(
+                query.message.bot, uid, mint, sym, 100,
+                "Sell All Profitable", mode,
+                price_usd=price, mcap=mcap or 0
+            )
+            remove_auto_sell(uid, mint)
+            results.append(f"✅ `${sym}` +{((price-buy_price)/buy_price*100):.0f}%")
+        if not results:
+            await query.edit_message_text(
+                "No profitable positions found at time of execution.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")]])
+            )
+            return
+        await query.edit_message_text(
+            f"💰 *Sell Profit Complete*\n\n" + "\n".join(results),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")]])
+        )
+
+    elif action == "sell_below_prompt":
+        # Prompt user to enter the loss threshold %
+        await query.answer()
+        context.user_data["state"] = "sell_below_pct"
+        await query.edit_message_text(
+            "🔻 *Sell Below X%*\n\n"
+            "Enter the loss threshold percentage.\n"
+            "Example: `30` will sell all positions down *30% or more* from your buy price.\n\n"
+            "Type a number (1–99):",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="portfolio:refresh")]])
+        )
+
     elif action == "sell_all_confirm":
         await query.answer()
         mode = get_mode(uid)
@@ -6542,7 +6650,7 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             portfolio["SOL"]   = sol_bal - sol_spend
             portfolio[mint]    = portfolio.get(mint, 0) + out_raw
             update_portfolio(uid, portfolio)
-            setup_auto_sell(uid, mint, sym, price, out_raw, dec)
+            setup_auto_sell(uid, mint, sym, price, out_raw, dec, sol_amount=sol_spend)
             await query.edit_message_text(
                 f"📄 *Paper Buy — {pct}% of SOL*\n\n"
                 f"Token: `${sym}`\n"
@@ -6624,7 +6732,8 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if action == "buy":
             setup_auto_sell(
                 uid, mint, pending["symbol"],
-                pending["price_usd"], raw_out, pending["decimals"]
+                pending["price_usd"], raw_out, pending["decimals"],
+                sol_amount=pending.get("sol_amount") or pending.get("amount") or 0.0,
             )
             log_trade(uid, "live", "buy", mint, pending["symbol"],
                       sol_amount=pending.get("sol_amount") or pending.get("amount"),
@@ -7653,6 +7762,47 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
             ]])
+        )
+
+    elif state == "sell_below_pct":
+        try:
+            val = int(float(text.strip().replace("%", "")))
+            if not (1 <= val <= 99):
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number between 1 and 99 (e.g. `30` for -30%).", parse_mode="Markdown")
+            return
+        clear_state(uid)
+        mode = get_mode(uid)
+        as_configs = load_auto_sell().get(str(uid), {})
+        results = []
+        for mint, cfg in list(as_configs.items()):
+            buy_price = cfg.get("buy_price_usd", 0)
+            if not buy_price:
+                continue
+            price, mcap = fetch_token_price(mint)
+            if price is None:
+                continue
+            drop_pct = ((buy_price - price) / buy_price) * 100
+            if drop_pct >= val:
+                sym = cfg.get("symbol", mint[:6])
+                await execute_auto_sell(
+                    update.message.bot, uid, mint, sym, 100,
+                    f"Sell Below -{val}%", mode,
+                    price_usd=price, mcap=mcap or 0
+                )
+                remove_auto_sell(uid, mint)
+                results.append(f"✅ `${sym}` {-drop_pct:.0f}%")
+        if not results:
+            await update.message.reply_text(
+                f"No positions are down {val}% or more.",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")]])
+            )
+            return
+        await update.message.reply_text(
+            f"🔻 *Sell Below -{val}% Complete*\n\n" + "\n".join(results),
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("👜 Portfolio", callback_data="portfolio:refresh")]])
         )
 
     elif state == "gsl_pct":

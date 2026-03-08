@@ -49,14 +49,14 @@ HEAT_SCORE_V2_DEFAULTS = {
     "trend_explosive_threshold": 5,
     "trend_strong_threshold": 3,
     # ─── Scout Tier Thresholds
-    "scout_tier_brewing_threshold": 50,
-    "scout_tier_warm_threshold": 60,
-    "scout_tier_hot_threshold": 80,
+    "scout_tier_brewing_threshold": 35,
+    "scout_tier_warm_threshold": 50,
+    "scout_tier_hot_threshold": 70,
     # ─── Alert Notification Thresholds
-    "alert_ultra_hot_threshold": 90,
-    "alert_hot_threshold": 80,
-    "alert_warm_threshold": 70,
-    "alert_scouted_threshold": 50,
+    "alert_ultra_hot_threshold": 85,
+    "alert_hot_threshold": 70,
+    "alert_warm_threshold": 55,
+    "alert_scouted_threshold": 35,
 }
 
 SCOUT_PRESETS = {
@@ -77,10 +77,10 @@ SCOUT_PRESETS = {
         "name": "⚖️ Balanced",
         "description": "Standard thresholds, good balance of signals and accuracy",
         "overrides": {
-            "alert_ultra_hot_threshold": 90,
-            "alert_hot_threshold": 80,
-            "alert_warm_threshold": 70,
-            "alert_scouted_threshold": 50,
+            "alert_ultra_hot_threshold": 85,
+            "alert_hot_threshold": 70,
+            "alert_warm_threshold": 55,
+            "alert_scouted_threshold": 35,
             "risk_dev_sell_threshold_pct": 50,
             "risk_top_holder_threshold_pct": 20,
             "liquidity_min_usd": 50000.0,
