@@ -4614,12 +4614,22 @@ async def pumplive_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Pause your DMs to use channel-only mode.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ Set Channel",      callback_data="pumplive:set_channel")],
-                *([ [InlineKeyboardButton("🗑️ Remove Channel", callback_data="pumplive:clear_channel")] ] if ch else []),
-                [InlineKeyboardButton(dm_lbl,                callback_data="pumplive:toggle")],
-                [InlineKeyboardButton("⬅️ Back",             callback_data="pumplive:menu")],
+                [InlineKeyboardButton("✏️ Set Channel",            callback_data="pumplive:set_channel")],
+                *([ [InlineKeyboardButton("🗑️ Remove Channel",       callback_data="pumplive:clear_channel")] ] if ch else []),
+                [InlineKeyboardButton("📋 Sync My DM Filters→Ch",   callback_data="pumplive:sync_ch_filters"),
+                 InlineKeyboardButton("🔄 Clear Ch Filters",        callback_data="pumplive:clear_ch_filters")],
+                [InlineKeyboardButton(dm_lbl,                       callback_data="pumplive:toggle")],
+                [InlineKeyboardButton("⬅️ Back",                      callback_data="pumplive:menu")],
             ])
         )
+
+    elif action == "sync_ch_filters":
+        pf.set_channel_filters(pf.get_filters(uid))
+        await query.answer("✅ Pump Live channel now uses your DM filters.", show_alert=True)
+
+    elif action == "clear_ch_filters":
+        pf.set_channel_filters(None)
+        await query.answer("🔄 Channel filters cleared — channel is now unfiltered.", show_alert=True)
 
     elif action == "set_channel":
         set_state(uid, waiting_for="pumplive_channel")
@@ -4797,12 +4807,36 @@ async def pumpgrad_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "Pause your DMs to use channel-only mode.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("✏️ Set Channel",      callback_data="pumpgrad:set_channel")],
-                *([ [InlineKeyboardButton("🗑️ Remove Channel", callback_data="pumpgrad:clear_channel")] ] if ch else []),
-                [InlineKeyboardButton(dm_lbl,                callback_data="pumpgrad:toggle")],
-                [InlineKeyboardButton("⬅️ Back",             callback_data="pumpgrad:menu")],
+                [InlineKeyboardButton("✏️ Set Channel",            callback_data="pumpgrad:set_channel")],
+                *([ [InlineKeyboardButton("🗑️ Remove Channel",       callback_data="pumpgrad:clear_channel")] ] if ch else []),
+                [InlineKeyboardButton("📋 Sync My DM Filters→Ch",   callback_data="pumpgrad:sync_ch_filters"),
+                 InlineKeyboardButton("🔄 Clear Ch Filters",        callback_data="pumpgrad:clear_ch_filters")],
+                [InlineKeyboardButton(dm_lbl,                       callback_data="pumpgrad:toggle")],
+                [InlineKeyboardButton("⬅️ Back",                      callback_data="pumpgrad:menu")],
             ])
         )
+
+    elif action == "set_heat":
+        current = pf.get_grad_filters(uid).get("min_heat_score") or 0
+        set_state(uid, waiting_for="pg_heat")
+        await query.edit_message_text(
+            f"🌡️ *Min Heat Score Filter (Grad)*\n\n"
+            f"Only receive grad alerts for tokens scoring at or above this threshold.\n\n"
+            f"Enter a number `0`\u2013`100`. Send `0` to disable.\n\n"
+            f"_Current: {current}_",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("❌ Cancel", callback_data="pumpgrad:menu")
+            ]]),
+        )
+
+    elif action == "sync_ch_filters":
+        pf.set_grad_channel_filters(pf.get_grad_filters(uid))
+        await query.answer("✅ Pump Grad channel now uses your DM filters.", show_alert=True)
+
+    elif action == "clear_ch_filters":
+        pf.set_grad_channel_filters(None)
+        await query.answer("🔄 Grad channel filters cleared — channel is now unfiltered.", show_alert=True)
 
     elif action == "set_channel":
         set_state(uid, waiting_for="pumpgrad_channel")
@@ -7706,6 +7740,23 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 InlineKeyboardButton("📡 Pump Live Settings", callback_data="pumplive:menu")
             ]])
         )
+
+    elif state == "pg_heat":
+        clear_state(uid)
+        try:
+            v = max(0, min(100, int(float(text.strip()))))
+            f = pf.get_grad_filters(uid)
+            f["min_heat_score"] = v
+            pf.set_grad_filters(uid, f)
+            msg = f"✅ Grad min heat score set to `{v}/100`." if v > 0 else "✅ Heat score filter disabled."
+            await update.message.reply_text(
+                msg, parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("🎓 Pump Grad Settings", callback_data="pumpgrad:menu")
+                ]])
+            )
+        except Exception:
+            await update.message.reply_text("Enter a number 0–100, e.g. `40`.")
 
     elif state == "pg_mcap":
         clear_state(uid)

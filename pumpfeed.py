@@ -247,6 +247,33 @@ def reset_filters(uid: int):
     set_filters(uid, dict(DEFAULT_FILTERS))
 
 
+# ─── Per-channel filter overrides ────────────────────────────────────────────
+
+def get_channel_filters() -> dict | None:
+    """Return pump live channel-specific filter dict, or None (unfiltered)."""
+    return load_state().get("pumplive_channel_filters")
+
+def set_channel_filters(filters: dict | None):
+    s = load_state()
+    if filters is None:
+        s.pop("pumplive_channel_filters", None)
+    else:
+        s["pumplive_channel_filters"] = filters
+    save_state(s)
+
+def get_grad_channel_filters() -> dict | None:
+    """Return pump grad channel-specific filter dict, or None (unfiltered)."""
+    return load_state().get("pumpgrad_channel_filters")
+
+def set_grad_channel_filters(filters: dict | None):
+    s = load_state()
+    if filters is None:
+        s.pop("pumpgrad_channel_filters", None)
+    else:
+        s["pumpgrad_channel_filters"] = filters
+    save_state(s)
+
+
 # ─── SOL price ────────────────────────────────────────────────────────────────
 
 _sol_price_cache: dict = {"price": 0.0, "ts": 0.0}
@@ -659,25 +686,34 @@ async def _handle_token_inner(bot: Bot, token: dict, mint: str):
 
     # Post to pump live alert channel (URL-only keyboard — callbacks don't work in channels)
     if channel:
-        channel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
-             InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
-             InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
-        ])
-        try:
-            await bot.send_message(
-                chat_id=channel, text=text,
-                parse_mode="Markdown", reply_markup=channel_kb,
-                disable_web_page_preview=True,
-            )
-        except Exception:
+        _ch_send = True
+        _ch_f    = get_channel_filters()
+        if _ch_f is not None:
+            _ch_hs = _ch_f.get("min_heat_score") or 0
+            if _ch_hs > 0 and (not heat or heat.get("total", 0) < _ch_hs):
+                _ch_send = False
+            elif not passes_filter(token, meta, _ch_f):
+                _ch_send = False
+        if _ch_send:
+            channel_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+                 InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
+                 InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+            ])
             try:
                 await bot.send_message(
                     chat_id=channel, text=text,
-                    reply_markup=channel_kb, disable_web_page_preview=True,
+                    parse_mode="Markdown", reply_markup=channel_kb,
+                    disable_web_page_preview=True,
                 )
-            except Exception as e:
-                print(f"[PUMPLIVE] channel send error ch={channel}: {e}", flush=True)
+            except Exception:
+                try:
+                    await bot.send_message(
+                        chat_id=channel, text=text,
+                        reply_markup=channel_kb, disable_web_page_preview=True,
+                    )
+                except Exception as e:
+                    print(f"[PUMPLIVE] channel send error ch={channel}: {e}", flush=True)
 
 
 # ─── Graduation (100% bonding curve) subscriber state ─────────────────────────
@@ -687,6 +723,7 @@ DEFAULT_GRAD_FILTERS = {
     "max_mcap_sol":        0.0,
     "min_dev_sol":         0.0,
     "max_dev_sol":         0.0,
+    "min_heat_score":      0,
     "require_social":      False,
     "require_description": False,
     "keywords":            [],
@@ -843,12 +880,15 @@ def grad_filter_status_text(uid: int) -> str:
     grad_channel = get_pumpgrad_channel()
     ch_str       = f"`{grad_channel}`" if grad_channel else "not set"
 
+    heat_str = f"≥{filters.get('min_heat_score', 0)}" if filters.get("min_heat_score") else "any"
+
     lines = [
         "🎓 *PUMP GRAD — FILTER SETTINGS*",
         "",
         f"Status: {status}  ·  Auto-Buy: {ab_status}",
         f"📣 Channel: {ch_str}",
         "━━━━━━━━━━━━━━━━━━━",
+        f"🌡️ Min Heat Score: `{heat_str}`",
         f"💰 MCap at grad: `{mcap_str}`",
         f"🛒 Dev Buy: `{dev_str}`",
         f"🔗 Socials: {soc_str}",
@@ -889,6 +929,10 @@ def grad_filter_kb(uid: int) -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(ab_lbl,           callback_data="pumpgrad:toggle_grad_autobuy"),
+        ],
+        [
+            InlineKeyboardButton(f"🌡️ Heat: ≥{filters['min_heat_score']}" if filters.get("min_heat_score") else "🌡️ Heat: ANY",
+                                 callback_data="pumpgrad:set_heat"),
         ],
         [
             InlineKeyboardButton("💰 MCap",         callback_data="pumpgrad:set_mcap"),
@@ -1100,6 +1144,9 @@ async def _handle_grad_token_inner(bot: Bot, token: dict, mint: str):
 
     for uid in active_subs:
         filters = {**DEFAULT_GRAD_FILTERS, **grad_subs[str(uid)].get("filters", {})}
+        min_hs  = filters.get("min_heat_score") or 0
+        if min_hs > 0 and (not heat or heat.get("total", 0) < min_hs):
+            continue
         if not passes_grad_filter(token, meta, filters):
             continue
         try:
@@ -1131,25 +1178,34 @@ async def _handle_grad_token_inner(bot: Bot, token: dict, mint: str):
 
     # Post to pump grad alert channel (URL-only keyboard — callbacks don't work in channels)
     if grad_channel:
-        channel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
-             InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
-             InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
-        ])
-        try:
-            await bot.send_message(
-                chat_id=grad_channel, text=text,
-                parse_mode="Markdown", reply_markup=channel_kb,
-                disable_web_page_preview=True,
-            )
-        except Exception:
+        _gch_send = True
+        _gch_f    = get_grad_channel_filters()
+        if _gch_f is not None:
+            _gch_hs = _gch_f.get("min_heat_score") or 0
+            if _gch_hs > 0 and (not heat or heat.get("total", 0) < _gch_hs):
+                _gch_send = False
+            elif not passes_grad_filter(token, meta, _gch_f):
+                _gch_send = False
+        if _gch_send:
+            channel_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+                 InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
+                 InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+            ])
             try:
                 await bot.send_message(
                     chat_id=grad_channel, text=text,
-                    reply_markup=channel_kb, disable_web_page_preview=True,
+                    parse_mode="Markdown", reply_markup=channel_kb,
+                    disable_web_page_preview=True,
                 )
-            except Exception as e:
-                print(f"[PUMPGRAD WS] channel send error ch={grad_channel}: {e}", flush=True)
+            except Exception:
+                try:
+                    await bot.send_message(
+                        chat_id=grad_channel, text=text,
+                        reply_markup=channel_kb, disable_web_page_preview=True,
+                    )
+                except Exception as e:
+                    print(f"[PUMPGRAD WS] channel send error ch={grad_channel}: {e}", flush=True)
 
 
 # ─── Graduation polling (pump.fun API) ────────────────────────────────────────
@@ -1234,7 +1290,7 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
         "symbol":          coin.get("symbol")      or "???",
         "marketCapSol":    mcap_sol,
         # v3 API doesn't have sol_amount / initial_buy for completed tokens
-        "solAmount":       float(coin.get("sol_amount") or coin.get("real_sol_reserves") or 0),
+        "solAmount":       float(coin.get("sol_amount") or 0),
         "initialBuy":      float(coin.get("initial_buy") or 0),
         "traderPublicKey": coin.get("creator")     or "",
         "uri":             coin.get("metadata_uri") or "",
@@ -1266,6 +1322,9 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
 
     for uid in active_subs:
         filters = {**DEFAULT_GRAD_FILTERS, **grad_subs[str(uid)].get("filters", {})}
+        min_hs  = filters.get("min_heat_score") or 0
+        if min_hs > 0 and (not heat or heat.get("total", 0) < min_hs):
+            continue
         if not passes_grad_filter(token, meta, filters):
             continue
         try:
@@ -1297,19 +1356,28 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
 
     # Post to pump grad alert channel (URL-only keyboard — callbacks don't work in channels)
     if grad_channel:
-        channel_kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
-             InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
-             InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
-        ])
-        try:
-            await bot.send_message(
-                chat_id=grad_channel, text=text,
-                parse_mode="Markdown", reply_markup=channel_kb,
-                disable_web_page_preview=True,
-            )
-        except Exception as e:
-            print(f"[PUMPGRAD REST] channel send error ch={grad_channel}: {e}", flush=True)
+        _gch_send = True
+        _gch_f    = get_grad_channel_filters()
+        if _gch_f is not None:
+            _gch_hs = _gch_f.get("min_heat_score") or 0
+            if _gch_hs > 0 and (not heat or heat.get("total", 0) < _gch_hs):
+                _gch_send = False
+            elif not passes_grad_filter(token, meta, _gch_f):
+                _gch_send = False
+        if _gch_send:
+            channel_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+                 InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}"),
+                 InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}")],
+            ])
+            try:
+                await bot.send_message(
+                    chat_id=grad_channel, text=text,
+                    parse_mode="Markdown", reply_markup=channel_kb,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                print(f"[PUMPGRAD REST] channel send error ch={grad_channel}: {e}", flush=True)
 
 
 async def run_gradwatch(bot: Bot):
