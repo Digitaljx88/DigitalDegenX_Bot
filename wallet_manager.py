@@ -75,7 +75,7 @@ def mnemonic_to_keypair(mnemonic: str) -> dict:
     derivation_path = "m/44'/501'/0'/0'"
     
     try:
-        kp = Keypair.from_seed_and_derivation_path(seed[:32], derivation_path)
+        kp = Keypair.from_seed_and_derivation_path(seed, derivation_path)
         pubkey_str = str(kp.pubkey())
         privkey_b58 = base58.b58encode(bytes(kp)).decode()
         
