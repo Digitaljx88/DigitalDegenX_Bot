@@ -551,7 +551,7 @@ def fetch_token_price(mint: str) -> tuple[float | None, float | None]:
     try:
         _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
         if _bc and _bc.get("virtual_token_reserves"):
-            price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9
+            price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
             sol_usd   = pf.get_sol_price() or 150.0
             price_usd = price_sol * sol_usd
             coin      = _fetch_pumpfun_coin(mint)
@@ -1889,8 +1889,9 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                 src_tag   = ""
                 if not price_sol:
                     _bc = pumpfun.fetch_bonding_curve_data(acc["mint"], SOLANA_RPC)
-                    if _bc and _bc.get("virtual_token_reserves"):
-                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9
+                    if _bc and _bc.get("virtual_token_reserves") and _bc["virtual_token_reserves"] > 0:
+                        # acc["ui_amount"] is already divided by decimals, so price must be SOL per UI token
+                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
                         src_tag = " _(pump)_"
                     if not pair:
                         coin = _fetch_pumpfun_coin(acc["mint"])
@@ -1974,7 +1975,7 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                 if not price_sol:
                     _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
                     if _bc and _bc.get("virtual_token_reserves"):
-                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9
+                        price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
                 val_sol   = price_sol * ui
                 total_sol += val_sol
                 buy_price = cfg.get("buy_price_usd", 0) if cfg else 0
@@ -2016,8 +2017,9 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                 bc        = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
                 ui        = raw_amt / 1e6   # pump.fun tokens are always 6 decimals
                 price_sol = 0.0
-                if bc and bc.get("virtual_token_reserves"):
-                    price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9
+                if bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
+                    # price per UI token (not per raw unit): vsr/vtr gives SOL/raw, ×1e6 → SOL/UI-token
+                    price_sol = bc["virtual_sol_reserves"] / bc["virtual_token_reserves"] / 1e9 * 1e6
                 val_sol   = price_sol * ui
                 total_sol += val_sol
                 val_str   = f"{val_sol:.4f}◎" if val_sol else "?"
