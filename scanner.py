@@ -137,19 +137,24 @@ def set_user_min_score(uid: int, score: int):
 
 def get_alert_channel() -> str | None:
     """Return the alert channel ID/username, or None if not set.
-    Falls back to launch channel from global settings if no dedicated scanner channel."""
+    Priority: scanner_state alert_channel → main_alert_channel_id → launch_alert_channel_id."""
     ch = load_state().get("alert_channel")
     if ch:
         return ch
-    # Fallback: use launch channel from global_settings.json
     try:
         gs_path = os.path.join(DATA_DIR, "global_settings.json")
         with open(gs_path) as f:
             gs = json.load(f)
+        # Prefer the main alert channel set via channel settings
+        main_ch = gs.get("main_alert_channel_id")
+        if main_ch:
+            print(f"[SCANNER] Using main alert channel: {main_ch}", flush=True)
+            return main_ch
+        # Last resort: launch channel
         launch_ch = gs.get("launch_alert_channel_id")
         if launch_ch:
             print(f"[SCANNER] Using launch channel as scout fallback: {launch_ch}", flush=True)
-            return launch_ch  # keep original type (int or str)
+            return launch_ch
     except (FileNotFoundError, json.JSONDecodeError) as e:
         print(f"[SCANNER] get_alert_channel fallback failed: {e}", flush=True)
     return None
@@ -1010,6 +1015,14 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
     if not chat_ids and not alert_channel:
         return
 
+    # Global default thresholds used for channel alerts (no per-user settings for channels)
+    try:
+        _ch_cfg = settings_manager.get_user_settings(0)  # uid=0 gives pure defaults
+    except Exception:
+        _ch_cfg = {}
+    CH_SCOUTED_THR = _ch_cfg.get("alert_scouted_threshold", 35)
+    CH_HOT_THR     = _ch_cfg.get("alert_hot_threshold", 70)
+
     tokens = fetch_new_tokens()
     print(f"[SCANNER] Fetched {len(tokens)} tokens after filters", flush=True)
     if not tokens:
@@ -1099,7 +1112,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 user_tiers[uid] = None  # Below user's threshold
 
         # Only mark as seen if at least one user qualifies or score is high enough
-        if any_user_qualifies or (alert_channel and score >= 50):
+        if any_user_qualifies or (alert_channel and score >= CH_SCOUTED_THR):
             mark_seen_token(mint)
 
         # Separate scouted from hot alerts
@@ -1107,7 +1120,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         hot_uids = [uid for uid, tier in user_tiers.items() if tier in ("HOT", "WARM", "ULTRA_HOT")]
 
         # ─── Send SCOUTED alerts ───────────────────────────────────────────
-        if scouted_uids or (alert_channel and (score >= 50)):
+        if scouted_uids or (alert_channel and score >= CH_SCOUTED_THR):
             add_to_watchlist(mint, {
                 "name": result["name"], "symbol": result["symbol"],
                 "score": score, "mcap": mcap, "mint": mint,
@@ -1149,7 +1162,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                             )
                         except Exception as e:
                             print(f"[SCANNER] scouted DM error uid={uid}: {e}", flush=True)
-                if alert_channel and score >= 50:
+                if alert_channel and score >= CH_SCOUTED_THR:
                     channel_scout_kb = InlineKeyboardMarkup([
                         [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
                          InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
@@ -1211,7 +1224,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                         print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
 
             # Post to alert channel (URL buttons only — callback buttons don't work in channels)
-            if alert_channel and score >= 70:  # Channel uses default 70 threshold
+            if alert_channel and score >= CH_HOT_THR:
                 channel_kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
                      InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
