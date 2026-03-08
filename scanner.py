@@ -4,6 +4,8 @@ Scores fresh Solana tokens on a normalized 0-100 scale and alerts at 70+.
 """
 from __future__ import annotations
 
+import asyncio
+import concurrent.futures
 import json
 import os
 import time
@@ -19,6 +21,9 @@ import geckoterminal
 import heat_score_v2
 import settings_manager
 import config as _cfg
+import heat_momentum
+
+_rugcheck_executor = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="rugcheck")
 
 def _esc(s: str) -> str:
     """Escape Telegram Markdown v1 special chars in user-supplied strings."""
@@ -921,9 +926,12 @@ def format_alert(r: dict) -> str:
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"🪙 *{name_e}* (${symbol_e})\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
-        f"🌡️ Heat Score: *{r['total']}/100*\n"
-        f"{arch_line}"
-        f"💵 Price: `{price_str}`\n"
+        f"🌡️ Heat Score: *{r['total']}/100*"
+        + (f"  eff *{r['effective_score']}*" if r.get('effective_score', r['total']) != r['total'] else "")
+        + "\n"
+        + (f"📈 Momentum: *{r['velocity_label']}*\n" if r.get('velocity_label') else "")
+        + f"{arch_line}"
+        + f"💵 Price: `{price_str}`\n"
         f"🏦 MCap: `${r['mcap']:,.0f}`\n"
         f"📊 Vol (1h): `${r['volume_h1']:,.0f}`\n"
         f"👛 Holders: `{r['total_holders']}`\n"
@@ -1023,32 +1031,66 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
     CH_SCOUTED_THR = _ch_cfg.get("alert_scouted_threshold", 35)
     CH_HOT_THR     = _ch_cfg.get("alert_hot_threshold", 70)
 
+    t_fetch_start = time.time()
     tokens = fetch_new_tokens()
     print(f"[SCANNER] Fetched {len(tokens)} tokens after filters", flush=True)
     if not tokens:
         print(f"[SCANNER] No tokens passed fetch filters (mcap {MCAP_MIN}-{MCAP_MAX}, age <{MAX_TOKEN_AGE_HOURS}h)", flush=True)
 
+    # ── Pre-filter before expensive IO ───────────────────────────────────────
+    to_process = []
     for token in tokens:
         mint = token.get("mint", "")
-        if not mint:
+        if not mint or has_seen_token(mint):
             continue
-        if has_seen_token(mint):
-            continue
-
-        # Quick pre-filter: skip if mcap out of range
         mcap = token.get("mcap", 0)
         if not (MCAP_MIN <= mcap <= MCAP_MAX):
             continue
+        to_process.append(token)
 
-        # Fetch RugCheck and score using v2 engine
-        rc     = fetch_rugcheck(mint)
+    # ── Parallel RugCheck fetch (all tokens simultaneously) ───────────────────
+    t_rugcheck_start = time.time()
+    loop = asyncio.get_event_loop()
+    rugcheck_futures = [
+        loop.run_in_executor(_rugcheck_executor, fetch_rugcheck, t["mint"])
+        for t in to_process
+    ]
+    rugcheck_results = await asyncio.gather(*rugcheck_futures, return_exceptions=True)
+    t_rugcheck_end = time.time()
+    if to_process:
+        print(
+            f"[SCANNER] RugCheck x{len(to_process)} parallel: {t_rugcheck_end - t_rugcheck_start:.2f}s "
+            f"(was ~{len(to_process) * 10:.0f}s sequential)",
+            flush=True,
+        )
+
+    for token, rc_raw in zip(to_process, rugcheck_results):
+        mint = token["mint"]
+        rc   = rc_raw if isinstance(rc_raw, dict) else {}
+
+        # Score using v2 engine
         result = calculate_heat_score_with_settings(token, rc)
+        score  = result["total"]
+        sym    = result.get("symbol", mint[:8])
+        dq     = result.get("disqualified")
 
-        # Intelligence tracking: update narrative stats + auto-track wallets
-        score = result["total"]
-        sym   = result.get("symbol", mint[:8])
-        dq    = result.get("disqualified")
-        print(f"[SCANNER] {sym} ({mint[:8]}) → score={score} dq={dq}", flush=True)
+        # ── Heat velocity tracking ────────────────────────────────────────────
+        heat_momentum.record(mint, score)
+        velocity, velocity_label = heat_momentum.get_velocity(mint)
+        velocity_boost = heat_momentum.velocity_score_boost(mint)
+        effective_score = min(100, score + velocity_boost)
+
+        # Attach velocity info to result for alert formatting
+        result["velocity"]       = velocity
+        result["velocity_label"] = velocity_label
+        result["effective_score"] = effective_score
+
+        print(
+            f"[SCANNER] {sym} ({mint[:8]}) → score={score} "
+            f"eff={effective_score} vel={velocity:+.1f}pt/min dq={dq}",
+            flush=True,
+        )
+
         try:
             intelligence_tracker.process_scored_token(token, rc, score)
         except Exception:
@@ -1095,24 +1137,26 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             
             user_scores[uid] = (scouted_threshold, warm_threshold, hot_threshold, ultra_hot_threshold)
             
-            # Classify into tier
-            if score >= ultra_hot_threshold:
+            # Classify into tier — use effective_score (includes velocity boost)
+            eff = result.get("effective_score", score)
+            if eff >= ultra_hot_threshold:
                 user_tiers[uid] = "ULTRA_HOT"
                 any_user_qualifies = True
-            elif score >= hot_threshold:
+            elif eff >= hot_threshold:
                 user_tiers[uid] = "HOT"
                 any_user_qualifies = True
-            elif score >= warm_threshold:
+            elif eff >= warm_threshold:
                 user_tiers[uid] = "WARM"
                 any_user_qualifies = True
-            elif score >= scouted_threshold:
+            elif eff >= scouted_threshold:
                 user_tiers[uid] = "SCOUTED"
                 any_user_qualifies = True
             else:
                 user_tiers[uid] = None  # Below user's threshold
 
+        eff = result.get("effective_score", score)
         # Only mark as seen if at least one user qualifies or score is high enough
-        if any_user_qualifies or (alert_channel and score >= CH_SCOUTED_THR):
+        if any_user_qualifies or (alert_channel and eff >= CH_SCOUTED_THR):
             mark_seen_token(mint)
 
         # Separate scouted from hot alerts

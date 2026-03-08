@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import struct
 import base64
+import time
 import requests
 
 from solders.keypair import Keypair
@@ -16,6 +17,57 @@ from solders.instruction import Instruction, AccountMeta
 from solders.hash import Hash
 from solders.message import MessageV0
 from solders.transaction import VersionedTransaction
+
+import config as _cfg
+
+# ── ComputeBudget program (priority fees) ─────────────────────────────────────
+
+COMPUTE_BUDGET_PROGRAM = Pubkey.from_string("ComputeBudget111111111111111111111111111111")
+
+
+def _make_set_compute_unit_limit(units: int) -> Instruction:
+    """ComputeBudgetInstruction::SetComputeUnitLimit(units: u32)."""
+    return Instruction(
+        program_id=COMPUTE_BUDGET_PROGRAM,
+        accounts=[],
+        data=bytes([2]) + struct.pack("<I", units),
+    )
+
+
+def _make_set_compute_unit_price(micro_lamports: int) -> Instruction:
+    """ComputeBudgetInstruction::SetComputeUnitPrice(microLamports: u64)."""
+    return Instruction(
+        program_id=COMPUTE_BUDGET_PROGRAM,
+        accounts=[],
+        data=bytes([3]) + struct.pack("<Q", micro_lamports),
+    )
+
+
+def _priority_fee_instructions() -> list[Instruction]:
+    units  = getattr(_cfg, "PRIORITY_FEE_COMPUTE_UNITS",  200_000)
+    price  = getattr(_cfg, "PRIORITY_FEE_MICRO_LAMPORTS", 500_000)
+    return [
+        _make_set_compute_unit_limit(units),
+        _make_set_compute_unit_price(price),
+    ]
+
+
+# ── Blockhash cache ───────────────────────────────────────────────────────────
+
+_bh_cache: dict = {"hash": None, "ts": 0.0}
+
+
+def _get_cached_blockhash(rpc_url: str) -> Hash | None:
+    ttl = getattr(_cfg, "BLOCKHASH_CACHE_TTL_SECS", 20)
+    now = time.time()
+    if _bh_cache["hash"] and (now - _bh_cache["ts"]) < ttl:
+        return _bh_cache["hash"]
+    fresh = get_recent_blockhash(rpc_url)
+    if fresh:
+        _bh_cache["hash"] = fresh
+        _bh_cache["ts"]   = now
+    return fresh
+
 
 # ── pump.fun program constants ────────────────────────────────────────────────
 
@@ -220,13 +272,13 @@ def buy_pumpfun(mint: str, sol_amount: float, keypair: Keypair,
         assoc_bc_pk  = Pubkey.from_string(assoc_bc)
         assoc_user_pk = Pubkey.from_string(assoc_user)
 
-        # 4. Blockhash
-        recent_bh = get_recent_blockhash(rpc_url)
+        # 4. Blockhash (cached — avoids a round-trip on every buy)
+        recent_bh = _get_cached_blockhash(rpc_url)
         if recent_bh is None:
             return "ERROR: Could not fetch blockhash"
 
-        # 5. Build instructions
-        instructions = []
+        # 5. Build instructions — priority fees first, then ATA, then buy
+        instructions = _priority_fee_instructions()
 
         # Create user ATA if it doesn't exist
         if not account_exists(assoc_user, rpc_url):
@@ -264,13 +316,18 @@ def buy_pumpfun(mint: str, sol_amount: float, keypair: Keypair,
         )
         tx = VersionedTransaction(msg, [keypair])
 
-        # 7. Send
+        # 7. Send — skip preflight to save ~100–200ms; priority fee handles slot competition
         tx_b64 = base64.b64encode(bytes(tx)).decode()
         send_resp = requests.post(rpc_url, json={
             "jsonrpc": "2.0", "id": 1,
             "method":  "sendTransaction",
-            "params":  [tx_b64, {"encoding": "base64", "preflightCommitment": "confirmed"}],
-        }, timeout=30).json()
+            "params":  [tx_b64, {
+                "encoding":             "base64",
+                "skipPreflight":        True,
+                "preflightCommitment":  "processed",
+                "maxRetries":           3,
+            }],
+        }, timeout=15).json()
 
         if "result" in send_resp:
             return send_resp["result"]   # tx signature
@@ -312,12 +369,12 @@ def sell_pumpfun(mint: str, token_amount: int, keypair: Keypair,
         assoc_bc_pk   = Pubkey.from_string(assoc_bc)
         assoc_user_pk = Pubkey.from_string(assoc_user)
 
-        recent_bh = get_recent_blockhash(rpc_url)
+        recent_bh = _get_cached_blockhash(rpc_url)
         if recent_bh is None:
             return "ERROR: Could not fetch blockhash"
 
         sell_data = SELL_DISCRIMINATOR + struct.pack("<QQ", token_amount, min_sol_out)
-        instruction = Instruction(
+        sell_ix = Instruction(
             program_id=PUMP_PROGRAM_ID,
             accounts=[
                 AccountMeta(_PUMP_GLOBAL,     False, False),
@@ -335,10 +392,11 @@ def sell_pumpfun(mint: str, token_amount: int, keypair: Keypair,
             ],
             data=sell_data,
         )
+        instructions = _priority_fee_instructions() + [sell_ix]
 
         msg = MessageV0.try_compile(
             payer=keypair.pubkey(),
-            instructions=[instruction],
+            instructions=instructions,
             address_lookup_table_accounts=[],
             recent_blockhash=recent_bh,
         )
@@ -348,8 +406,13 @@ def sell_pumpfun(mint: str, token_amount: int, keypair: Keypair,
         send_resp = requests.post(rpc_url, json={
             "jsonrpc": "2.0", "id": 1,
             "method":  "sendTransaction",
-            "params":  [tx_b64, {"encoding": "base64", "preflightCommitment": "confirmed"}],
-        }, timeout=30).json()
+            "params":  [tx_b64, {
+                "encoding":            "base64",
+                "skipPreflight":       True,
+                "preflightCommitment": "processed",
+                "maxRetries":          3,
+            }],
+        }, timeout=15).json()
 
         if "result" in send_resp:
             return send_resp["result"]
