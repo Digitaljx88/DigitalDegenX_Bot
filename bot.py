@@ -88,8 +88,10 @@ def get_portfolio(uid: int) -> dict:
     return p[key]
 
 def update_portfolio(uid: int, portfolio: dict):
+    # Strip zero-balance token entries before saving to keep portfolio clean
+    cleaned = {k: v for k, v in portfolio.items() if k == "SOL" or v > 0}
     p = load_portfolios()
-    p[str(uid)] = portfolio
+    p[str(uid)] = cleaned
     save_portfolios(p)
 
 def reset_portfolio(uid: int):
@@ -1559,7 +1561,7 @@ async def do_trade_flow(msg, uid: int, context, action: str,
             coin  = _fetch_pumpfun_coin(token_query) or {}
             _vtr  = _bc.get("virtual_token_reserves", 0)
             _vsr  = _bc.get("virtual_sol_reserves", 0)
-            _psol = (_vsr / _vtr / 1e9) if _vtr else 0
+            _psol = (_vsr / _vtr / 1e9 * 1e6) if _vtr else 0  # SOL per UI token
             pair  = {
                 "dexId": "pumpfun",
                 "baseToken": {
@@ -1608,6 +1610,14 @@ async def do_trade_flow(msg, uid: int, context, action: str,
     out_amount   = int(quote.get("outAmount", 0))
     price_impact = quote.get("priceImpactPct", "N/A")
 
+    # Reject zero-token quotes — prevents SOL loss with no tokens received
+    if action == "buy" and out_amount <= 0:
+        await msg.edit_text(
+            "⚠️ Quote returned 0 tokens — no liquidity or route found. Trade cancelled.",
+            reply_markup=back_kb()
+        )
+        return
+
     # ── Paper ─────────────────────────────────────────────────────────────────
     if mode == "paper":
         portfolio = get_portfolio(uid)
@@ -1625,7 +1635,7 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                       sol_amount=amount, token_amount=out_amount,
                       price_usd=price_usd, mcap=mcap)
             # Set up auto-sell monitoring
-            setup_auto_sell(uid, token_mint, symbol, price_usd, out_amount, decimals)
+            setup_auto_sell(uid, token_mint, symbol, price_usd, out_amount, decimals, sol_amount=amount)
             # Get user's preset targets for display
             user_presets = get_user_as_presets(uid)
             presets_str = format_as_presets(user_presets)
@@ -2013,6 +2023,9 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                     token_rows.append(_token_row(sym, mint, cfg and cfg.get("enabled")))
                 else:
                     bc        = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
+                    coin      = _fetch_pumpfun_coin(mint) or {}
+                    sym       = coin.get("symbol", mint[:8])
+                    mcap      = float(coin.get("usd_market_cap") or coin.get("market_cap") or 0)
                     ui        = raw_amt / 1e6
                     price_sol = 0.0
                     if bc and bc.get("virtual_token_reserves") and bc["virtual_token_reserves"] > 0:
@@ -2020,12 +2033,14 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
                     val_sol    = price_sol * ui
                     total_sol += val_sol
                     val_str    = f"{val_sol:.4f}◎" if val_sol else "?"
+                    mcap_str   = f" · MCap ${mcap/1000:,.1f}K" if mcap else ""
                     src_tag    = " _(pump.fun)_" if price_sol else " _(unlisted)_"
+                    cfg        = as_configs.get(mint)
+                    as_tag     = " 🤖" if cfg and cfg.get("enabled") else ""
                     lines.append("━━━━━━━━━━━━━━━━━━")
-                    lines.append(f"*{mint[:8]}...*{src_tag}")
-                    lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`")
-                    cfg = as_configs.get(mint)
-                    token_rows.append(_token_row(mint[:6], mint, cfg and cfg.get("enabled")))
+                    lines.append(f"*{sym}*{as_tag}{src_tag}")
+                    lines.append(f"  {ui:,.4f} tokens ≈ `{val_str}`{mcap_str}")
+                    token_rows.append(_token_row(sym, mint, cfg and cfg.get("enabled")))
             except Exception as e:
                 print(f"[PORTFOLIO] Error displaying token {mint}: {e}")
                 token_rows.append(_token_row(mint[:8], mint, False))
@@ -4579,8 +4594,16 @@ async def pf_buy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 reply_markup=pf.notification_kb(mint),
             )
             return
-        # Estimate tokens from price (may be 0 if not listed yet)
-        tok_est = int((sol / price) * (10 ** decimals)) if price > 0 else 0
+        # Estimate tokens: convert SOL spend to USD first, then divide by token USD price
+        sol_price_usd = pf.get_sol_price() or 150.0
+        tok_est = int((sol * sol_price_usd / price) * (10 ** decimals)) if price > 0 else 0
+        if tok_est <= 0:
+            await query.edit_message_text(
+                "⚠️ Could not estimate token amount — price unavailable. Try again later.",
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Menu", callback_data="menu:main")]])
+            )
+            return
         portfolio["SOL"]  = portfolio.get("SOL", 0) - sol
         portfolio[mint]   = portfolio.get(mint, 0) + tok_est
         update_portfolio(uid, portfolio)

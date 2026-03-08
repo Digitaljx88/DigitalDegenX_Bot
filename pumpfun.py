@@ -111,13 +111,17 @@ def calculate_buy_tokens(sol_lamports: int, bc: dict) -> int:
     """
     Constant product: how many tokens received for sol_lamports input.
     pump.fun takes 1% fee from SOL before applying the curve.
+    Uses integer arithmetic throughout to avoid float precision loss on large reserves.
     """
-    vtr = bc["virtual_token_reserves"]
-    vsr = bc["virtual_sol_reserves"]
-    sol_net = int(sol_lamports * 0.99)           # 1% fee
-    if vsr + sol_net == 0:
+    vtr = bc.get("virtual_token_reserves", 0)
+    vsr = bc.get("virtual_sol_reserves", 0)
+    if not vtr or not vsr:
         return 0
-    tokens = vtr - int(vtr * vsr / (vsr + sol_net))
+    sol_net = int(sol_lamports * 0.99)           # 1% fee
+    if sol_net <= 0:
+        return 0
+    # Integer division preserves full precision for large reserve values
+    tokens = vtr - (vtr * vsr) // (vsr + sol_net)
     return max(0, tokens)
 
 
