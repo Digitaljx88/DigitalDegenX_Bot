@@ -54,6 +54,7 @@ AUTO_SELL_FILE     = os.path.join(DATA_DIR, "auto_sell.json")
 AUTO_BUY_FILE      = os.path.join(DATA_DIR, "auto_buy.json")
 TRADE_LOG_FILE     = os.path.join(DATA_DIR, "trade_log.json")
 GLOBAL_SETTINGS_FILE = os.path.join(DATA_DIR, "global_settings.json")
+MODES_FILE           = os.path.join(DATA_DIR, "user_modes.json")
 
 os.makedirs(DATA_DIR, exist_ok=True)
 
@@ -493,7 +494,18 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
 
 # ─── In-memory state ──────────────────────────────────────────────────────────
 
-user_modes: dict[int, str]  = {}
+def _load_user_modes() -> dict:
+    try:
+        with open(MODES_FILE) as f:
+            return {int(k): v for k, v in json.load(f).items()}
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {}
+
+def _save_user_modes():
+    with open(MODES_FILE, "w") as f:
+        json.dump({str(k): v for k, v in user_modes.items()}, f)
+
+user_modes: dict[int, str]  = _load_user_modes()
 user_state: dict[int, dict] = {}
 
 
@@ -519,6 +531,13 @@ def fetch_sol_pair(query: str) -> dict | None:
         sol   = [p for p in pairs if p.get("chainId") == "solana"]
         if not sol:
             return None
+        # When querying by full contract address, ensure the token is the base
+        # (not the quote). DexScreener /tokens/ returns pairs where the mint
+        # appears on either side; using a quote-side pair gives inverted prices.
+        is_ca = len(query) > 30
+        if is_ca:
+            base_first = [p for p in sol if p.get("baseToken", {}).get("address", "").lower() == query.lower()]
+            sol = base_first if base_first else sol
         return sorted(sol, key=lambda p: float(p.get("liquidity", {}).get("usd", 0) or 0), reverse=True)[0]
     except Exception:
         return None
@@ -1444,6 +1463,24 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     # ── Live auto-buy ──────────────────────────────────────────────────────────
     if not WALLET_PRIVATE_KEY:
         return
+
+    # Check live wallet balance before attempting the swap
+    pubkey = get_wallet_pubkey()
+    if pubkey:
+        live_sol = get_sol_balance(pubkey)
+        if live_sol < sol_amount:
+            try:
+                await bot.send_message(
+                    uid,
+                    f"⚠️ *Auto-Buy Skipped* — insufficient wallet SOL\n\n"
+                    f"Need: `{sol_amount} SOL` | Wallet: `{live_sol:.4f} SOL`\n"
+                    f"Token: *{name}* (${symbol}) — score `{score}/100`\n\n"
+                    f"_Top up your wallet or reduce SOL amount per trade._",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
+            return
 
     lamports = int(sol_amount * 1_000_000_000)
 
@@ -4961,6 +4998,7 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     prev = user_modes.get(uid, "paper")
     user_modes[uid] = chosen
+    _save_user_modes()
     if chosen == "paper" and prev != "paper":
         reset_portfolio(uid)
     label = "📄 Paper" if chosen == "paper" else "🔴 Live"
