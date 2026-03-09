@@ -594,8 +594,13 @@ def calculate_heat_score_v2(token: dict, rc: dict = None, cfg: dict = None) -> d
         # Calculate raw score (sum of all factors)
         raw_score = mom_pts + liq_pts + risk_pts + social_pts + wallet_pts + migr_pts + bias_pts + trend_pts
     
-    # Normalize to 0-100
-    score = int((raw_score / 125) * 100)
+    # Normalize to 0-100.
+    # Effective max without optional APIs (Birdeye/GeckoTerminal/Wallet bootstrap) is 90 pts:
+    # momentum(20) + liquidity(20) + risk_safety(25) + social(15) + migration(10) = 90.
+    # Wallets(15), directional_bias(10), volume_trend(5) contribute 0 when unconfigured.
+    # Using 90 spreads scores into a meaningful range instead of compressing everything to 20-48.
+    _SCORE_DENOMINATOR = 90 + wallet_pts + bias_pts + trend_pts  # expands when APIs are live
+    score = int((raw_score / _SCORE_DENOMINATOR) * 100)
     score = min(100, max(0, score))
     
     # Build factors dict and top 3

@@ -1245,7 +1245,9 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         # Log every scored token
         narr_breakdown = result["breakdown"].get("social_narrative") or result["breakdown"].get("narrative") or ("", "")
         narr_reason = narr_breakdown[1] if isinstance(narr_breakdown, (list, tuple)) else narr_breakdown.get("reason", "")
-        matched_narrative = next((n for n in NARRATIVES if n in narr_reason), "Other")
+        _narr_lower = narr_reason.lower()
+        matched_narrative = next((n for n in NARRATIVES if n.lower() in _narr_lower
+                                  or any(k in _narr_lower for k in NARRATIVES[n])), "Other")
         append_log({
             "date":      datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "timestamp": time.time(),
