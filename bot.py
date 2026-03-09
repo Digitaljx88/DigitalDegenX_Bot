@@ -103,6 +103,15 @@ def _save(path: str, data: dict):
 def load_portfolios() -> dict:  return _load(PORTFOLIO_FILE)
 def save_portfolios(d: dict):   _save(PORTFOLIO_FILE, d)
 
+# Per-user asyncio lock — serialises all portfolio reads+writes for a given user
+_portfolio_locks: dict[str, asyncio.Lock] = {}
+
+def _portfolio_lock(uid: int) -> asyncio.Lock:
+    key = str(uid)
+    if key not in _portfolio_locks:
+        _portfolio_locks[key] = asyncio.Lock()
+    return _portfolio_locks[key]
+
 def get_portfolio(uid: int) -> dict:
     p = load_portfolios()
     key = str(uid)
@@ -535,6 +544,11 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
               pnl_pct: float = None, tx_sig: str = None):
     if narrative is None:
         narrative = _detect_narrative(name, symbol)
+    # Drop ghost trades: buys with no tokens received, sells with no SOL received
+    if action == "buy" and (not token_amount or token_amount <= 0):
+        return
+    if action == "sell" and (not sol_received or sol_received <= 0):
+        return
     if action == "sell" and buy_price_usd and price_usd and pnl_pct is None:
         pnl_pct = (price_usd - buy_price_usd) / buy_price_usd * 100
     record = {
@@ -1416,38 +1430,45 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                              sell_pct: int, reason: str, mode: str,
                              price_usd: float = 0.0, mcap: float = 0.0):
     """Sell `sell_pct`% of the current position for this user/token."""
-    portfolio = get_portfolio(uid)
-    raw_held  = portfolio.get(mint, 0)
+    # Quick pre-check outside lock
+    raw_held = get_portfolio(uid).get(mint, 0)
     if raw_held <= 0:
         return
 
-    sell_amount = max(1, int(raw_held * sell_pct / 100))
-
     if mode == "paper":
-        # Paper mode: execute at current market price (no Jupiter price impact)
-        # This is standard paper-trading behaviour — simulates ideal fill at market
+        # Compute price outside the lock (sync HTTP call)
         as_cfg    = load_auto_sell().get(str(uid), {}).get(mint, {})
         dec       = as_cfg.get("decimals", 6)
         sol_received = 0.0
         if price_usd:
             sol_usd_rate  = pf.get_sol_price() or 150.0
             price_sol_now = price_usd / sol_usd_rate if sol_usd_rate else 0.0
-            ui            = sell_amount / (10 ** dec)
+            sell_amount_est = max(1, int(raw_held * sell_pct / 100))
+            ui            = sell_amount_est / (10 ** dec)
             sol_received  = price_sol_now * ui * 0.99  # 1 % simulated fee
         if not sol_received:
-            # Fallback: fetch live price directly
             _p = fetch_sol_pair(mint)
             if _p:
                 _psol = float(_p.get("priceNative", 0) or 0)
                 _dec  = int(_p.get("baseToken", {}).get("decimals", dec) or dec)
-                sol_received = (_psol * sell_amount / (10 ** _dec)) * 0.99
+                sell_amount_est = max(1, int(raw_held * sell_pct / 100))
+                sol_received = (_psol * sell_amount_est / (10 ** _dec)) * 0.99
         if not sol_received:
             return
-        portfolio[mint] = raw_held - sell_amount
-        portfolio["SOL"] = portfolio.get("SOL", 0) + sol_received
-        if portfolio[mint] <= 0:
-            portfolio.pop(mint, None)
-        update_portfolio(uid, portfolio)
+
+        # Atomic portfolio update under lock
+        async with _portfolio_lock(uid):
+            portfolio = get_portfolio(uid)
+            raw_held  = portfolio.get(mint, 0)
+            if raw_held <= 0:
+                return
+            sell_amount = max(1, int(raw_held * sell_pct / 100))
+            portfolio[mint] = raw_held - sell_amount
+            portfolio["SOL"] = portfolio.get("SOL", 0) + sol_received
+            if portfolio[mint] <= 0:
+                portfolio.pop(mint, None)
+            update_portfolio(uid, portfolio)
+
         log_trade(uid, mode, "sell", mint, symbol,
                   sol_received=sol_received, token_amount=sell_amount,
                   price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
@@ -1467,7 +1488,8 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
             ]])
         )
     else:
-        # Live mode
+        # Live mode — quote and swap outside the lock (slow network calls)
+        sell_amount = max(1, int(raw_held * sell_pct / 100))
         quote = jupiter_quote(mint, SOL_MINT, sell_amount, get_user_slippage(uid))
         if not quote or "outAmount" not in quote:
             return
@@ -1480,17 +1502,20 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                 parse_mode="Markdown",
             )
         else:
-            # Update portfolio JSON so SOL balance and token balance stay accurate
-            _pf = get_portfolio(uid)
-            _pf["SOL"] = _pf.get("SOL", 0) + sol_received
-            if sell_amount >= raw_held:
-                _pf.pop(mint, None)
-            else:
-                _pf[mint] = raw_held - sell_amount
-            update_portfolio(uid, _pf)
+            buy_price = _get_buy_price(uid, mint)
+            # Atomic portfolio update under lock — re-read fresh state
+            async with _portfolio_lock(uid):
+                _pf = get_portfolio(uid)
+                current_held = _pf.get(mint, 0)
+                _pf["SOL"] = _pf.get("SOL", 0) + sol_received
+                if sell_amount >= current_held:
+                    _pf.pop(mint, None)
+                else:
+                    _pf[mint] = current_held - sell_amount
+                update_portfolio(uid, _pf)
             log_trade(uid, mode, "sell", mint, symbol,
                       sol_received=sol_received, token_amount=sell_amount,
-                      price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
+                      price_usd=price_usd, buy_price_usd=buy_price,
                       mcap=mcap, tx_sig=sig)
             await bot.send_message(
                 chat_id=uid,
@@ -1573,6 +1598,27 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
 
             symbol  = cfg.get("symbol", mint[:6])
             changed = False
+
+            # ── Dead-token exit (MCap < $5K for > 5 min) ─────────────────────
+            _DEAD_MCAP  = 5_000   # USD
+            _DEAD_SECS  = 300     # 5 minutes
+            if mcap is not None:
+                if mcap < _DEAD_MCAP:
+                    if not cfg.get("dead_below_since"):
+                        cfg["dead_below_since"] = time.time()
+                        changed = True
+                    elif (time.time() - cfg["dead_below_since"]) >= _DEAD_SECS:
+                        cfg.pop("dead_below_since", None)
+                        changed = True
+                        await execute_auto_sell(
+                            context.bot, uid, mint, symbol, 100,
+                            f"Dead Token — MCap <$5K for >5min", mode,
+                            price_usd=price, mcap=mcap
+                        )
+                        continue  # position closed, skip remaining checks
+                else:
+                    if cfg.pop("dead_below_since", None):
+                        changed = True  # mcap recovered — clear the timer
 
             # ── Hard stop-loss ────────────────────────────────────────────────
             sl = cfg.get("stop_loss", {})
@@ -1995,8 +2041,8 @@ async def execute_auto_buy(bot, uid: int, result: dict):
 
     # ── Paper auto-buy ─────────────────────────────────────────────────────────
     if mode == "paper":
-        portfolio = get_portfolio(uid)
-        sol_bal   = portfolio.get("SOL", 0)
+        # Quick pre-check outside lock
+        sol_bal = get_portfolio(uid).get("SOL", 0)
         if sol_bal < sol_amount:
             try:
                 await bot.send_message(
@@ -2010,12 +2056,16 @@ async def execute_auto_buy(bot, uid: int, result: dict):
                 pass
             return
 
+        # Get quote outside lock (slow network call)
         lamports = int(sol_amount * 1_000_000_000)
         quote    = jupiter_quote(SOL_MINT, mint, lamports)
         if not quote or "error" in quote:
             return
 
         out_amount = int(quote.get("outAmount", 0))
+        if out_amount <= 0:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — quote returned 0 tokens", flush=True)
+            return
         price_usd  = result.get("price_usd", 0)
         decimals   = 6  # default; DexScreener not re-fetched here
 
@@ -2027,9 +2077,14 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             if ui_tokens > 0:
                 price_usd = (sol_amount * _sol_usd) / ui_tokens
 
-        portfolio["SOL"]  = sol_bal - sol_amount
-        portfolio[mint]   = portfolio.get(mint, 0) + out_amount
-        update_portfolio(uid, portfolio)
+        # Atomic portfolio update under lock — re-read fresh state
+        async with _portfolio_lock(uid):
+            portfolio = get_portfolio(uid)
+            if portfolio.get("SOL", 0) < sol_amount:
+                return  # SOL was spent by a concurrent buy between pre-check and lock
+            portfolio["SOL"]  = portfolio.get("SOL", 0) - sol_amount
+            portfolio[mint]   = portfolio.get(mint, 0) + out_amount
+            update_portfolio(uid, portfolio)
         setup_auto_sell(uid, mint, symbol, price_usd, out_amount, decimals, sol_amount=sol_amount)
         log_trade(uid, "paper", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_amount,
@@ -2191,10 +2246,11 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             ui_tokens = out_raw / (10 ** decimals)
             if ui_tokens > 0:
                 price_usd = (sol_amount * _sol_usd) / ui_tokens
-        portfolio = get_portfolio(uid)
-        portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
-        portfolio[mint] = portfolio.get(mint, 0) + out_raw
-        update_portfolio(uid, portfolio)
+        async with _portfolio_lock(uid):
+            portfolio = get_portfolio(uid)
+            portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
+            portfolio[mint] = portfolio.get(mint, 0) + out_raw
+            update_portfolio(uid, portfolio)
         setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals, sol_amount=sol_amount)
         log_trade(uid, "live", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_raw,
@@ -2335,17 +2391,18 @@ async def do_trade_flow(msg, uid: int, context, action: str,
 
     # ── Paper ─────────────────────────────────────────────────────────────────
     if mode == "paper":
-        portfolio = get_portfolio(uid)
         if action == "buy":
-            if portfolio.get("SOL", 0) < amount:
-                await msg.edit_text(
-                    f"Insufficient paper SOL. Balance: `{portfolio.get('SOL',0):.4f}`",
-                    parse_mode="Markdown", reply_markup=back_kb()
-                )
-                return
-            portfolio["SOL"]     = portfolio.get("SOL", 0) - amount
-            portfolio[token_mint] = portfolio.get(token_mint, 0) + out_amount
-            update_portfolio(uid, portfolio)
+            async with _portfolio_lock(uid):
+                portfolio = get_portfolio(uid)
+                if portfolio.get("SOL", 0) < amount:
+                    await msg.edit_text(
+                        f"Insufficient paper SOL. Balance: `{portfolio.get('SOL',0):.4f}`",
+                        parse_mode="Markdown", reply_markup=back_kb()
+                    )
+                    return
+                portfolio["SOL"]      = portfolio.get("SOL", 0) - amount
+                portfolio[token_mint] = portfolio.get(token_mint, 0) + out_amount
+                update_portfolio(uid, portfolio)
             log_trade(uid, "paper", "buy", token_mint, symbol, name=name,
                       sol_amount=amount, token_amount=out_amount,
                       price_usd=price_usd, mcap=mcap)
@@ -2373,29 +2430,32 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                 ])
             )
         else:
-            held = portfolio.get(token_mint, 0)
-            if held < int(amount):
-                await msg.edit_text(
-                    f"Insufficient balance. Hold: `{held:,}` raw",
-                    parse_mode="Markdown", reply_markup=back_kb()
-                )
-                return
-            # Paper sell: fill at current market price (no AMM price impact), 1% simulated fee
+            # Compute price outside lock
             _price_sol_now = float(pair.get("priceNative", 0) or 0)
             if not _price_sol_now and bc_fallback and bc_fallback.get("virtual_token_reserves"):
                 _vtr2 = bc_fallback["virtual_token_reserves"]
                 _vsr2 = bc_fallback["virtual_sol_reserves"]
                 _price_sol_now = (_vsr2 / _vtr2 / 1e9 * 1e6) if _vtr2 else 0
-            if _price_sol_now:
-                sol_received = (_price_sol_now * int(amount) / (10 ** decimals)) * 0.99
-            else:
-                sol_received = out_amount / 1e9  # last-resort fallback
-            portfolio[token_mint]   = held - int(amount)
-            portfolio["SOL"]        = portfolio.get("SOL", 0) + sol_received
-            if portfolio[token_mint] <= 0:
-                portfolio.pop(token_mint, None)
-                remove_auto_sell(uid, token_mint)
-            update_portfolio(uid, portfolio)
+            async with _portfolio_lock(uid):
+                portfolio = get_portfolio(uid)
+                held = portfolio.get(token_mint, 0)
+                if held < int(amount):
+                    await msg.edit_text(
+                        f"Insufficient balance. Hold: `{held:,}` raw",
+                        parse_mode="Markdown", reply_markup=back_kb()
+                    )
+                    return
+                # Paper sell: fill at current market price, 1% simulated fee
+                if _price_sol_now:
+                    sol_received = (_price_sol_now * int(amount) / (10 ** decimals)) * 0.99
+                else:
+                    sol_received = out_amount / 1e9  # last-resort fallback
+                portfolio[token_mint]   = held - int(amount)
+                portfolio["SOL"]        = portfolio.get("SOL", 0) + sol_received
+                if portfolio[token_mint] <= 0:
+                    portfolio.pop(token_mint, None)
+                    remove_auto_sell(uid, token_mint)
+                update_portfolio(uid, portfolio)
             log_trade(uid, "paper", "sell", token_mint, symbol, name=name,
                       sol_received=sol_received, token_amount=int(amount),
                       price_usd=price_usd, buy_price_usd=_get_buy_price(uid, token_mint),
@@ -3458,10 +3518,10 @@ async def cmd_trades_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
             f"Total: {len(filtered_trades)} trades",
             "",
             "```",
-            "Date       Symbol  Buy Price   Status     PnL",
-            "─────────────────────────────────────────────",
+            "Date       Sym    Action  Price        SOL",
+            "──────────────────────────────────────────",
         ]
-        
+
         for trade in page_trades:
             try:
                 date_str = str(trade.get("date", "????-??-??"))[:10]
@@ -3469,26 +3529,29 @@ async def cmd_trades_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
                 sym = trade.get("symbol", mint[:6] if mint else "???")
                 symbol = str(sym)[:6].ljust(6)
                 action = str(trade.get("action", "?")).upper()
-                buy_price = float(trade.get("buy_price_usd") or 0)
-                price_str = f"${buy_price:.8g}".ljust(10)
-                
+
                 if action == "BUY":
-                    status_str = "🟢 BUY ".ljust(7)
+                    price = float(trade.get("price_usd") or 0)
+                    price_str = (f"${price:.6g}" if price else "-").ljust(12)
+                    sol = float(trade.get("sol_amount") or 0)
+                    sol_str = f"-{sol:.3f}◎"
+                    status_str = "🟢 BUY  "
                 else:
                     pnl_pct = float(trade.get("pnl_pct") or 0)
+                    price = float(trade.get("buy_price_usd") or trade.get("price_usd") or 0)
+                    price_str = (f"${price:.6g}" if price else "-").ljust(12)
+                    sol = float(trade.get("sol_received") or 0)
+                    sol_str = f"+{sol:.3f}◎"
                     if pnl_pct > 0:
-                        status_str = f"✅ +{pnl_pct:.1f}%".ljust(7)
+                        status_str = f"✅+{pnl_pct:.1f}%"
                     else:
-                        status_str = f"❌ {pnl_pct:.1f}%".ljust(7)
-                
-                pnl_usd = float(trade.get("pnl_usd") or 0)
-                pnl_str = f"${pnl_usd:+.2f}".ljust(10) if abs(pnl_usd) > 0.01 else "-".ljust(10)
-                
-                lines.append(f"{date_str}  {symbol} {price_str} {status_str} {pnl_str}")
+                        status_str = f"❌{pnl_pct:.1f}%"
+
+                lines.append(f"{date_str}  {symbol} {status_str}  {price_str} {sol_str}")
             except Exception as e:
                 print(f"[TRADES] Error formatting trade: {e}")
                 continue
-        
+
         lines.append("```")
         
         # Navigation
@@ -8154,13 +8217,13 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
         results = []
 
         if mode == "paper":
-            portfolio = get_portfolio(uid)
-            positions = {k: v for k, v in list(portfolio.items()) if k != "SOL" and v > 0}
+            # Fetch prices outside lock (slow network calls)
+            snapshot  = {k: v for k, v in get_portfolio(uid).items() if k != "SOL" and v > 0}
             total_sol = 0.0
-            for mint, raw_held in positions.items():
+            price_map: dict[str, tuple] = {}  # mint -> (price_sol, dec, sym)
+            for mint, raw_held in snapshot.items():
                 pair      = fetch_sol_pair(mint)
                 sym       = pair.get("baseToken", {}).get("symbol", mint[:8]) if pair else mint[:8]
-                # Paper sell: fill at market price (no price impact), 1% simulated fee
                 price_sol = float(pair.get("priceNative", 0) or 0) if pair else 0
                 dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6) if pair else 6
                 if not price_sol:
@@ -8168,16 +8231,24 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
                     if _bc and _bc.get("virtual_token_reserves") and _bc["virtual_token_reserves"] > 0:
                         price_sol = _bc["virtual_sol_reserves"] / _bc["virtual_token_reserves"] / 1e9 * 1e6
                         dec = 6
-                if price_sol:
-                    sol_recv = (price_sol * raw_held / (10 ** dec)) * 0.99
-                    portfolio.pop(mint, None)
-                    portfolio["SOL"] = portfolio.get("SOL", 0) + sol_recv
-                    total_sol += sol_recv
-                    remove_auto_sell(uid, mint)
-                    results.append(f"✅ `${sym}` → `{sol_recv:.4f} SOL`")
-                else:
-                    results.append(f"❌ `${sym}` — no price data")
-            update_portfolio(uid, portfolio)
+                price_map[mint] = (price_sol, dec, sym)
+
+            async with _portfolio_lock(uid):
+                portfolio = get_portfolio(uid)
+                for mint, (price_sol, dec, sym) in price_map.items():
+                    raw_held = portfolio.get(mint, 0)
+                    if not raw_held:
+                        continue
+                    if price_sol:
+                        sol_recv = (price_sol * raw_held / (10 ** dec)) * 0.99
+                        portfolio.pop(mint, None)
+                        portfolio["SOL"] = portfolio.get("SOL", 0) + sol_recv
+                        total_sol += sol_recv
+                        remove_auto_sell(uid, mint)
+                        results.append(f"✅ `${sym}` → `{sol_recv:.4f} SOL`")
+                    else:
+                        results.append(f"❌ `${sym}` — no price data")
+                update_portfolio(uid, portfolio)
             summary = "\n".join(results) or "Nothing sold."
             await query.edit_message_text(
                 f"📄 *Sell All Complete*\n\n{summary}\n\n"
@@ -8294,13 +8365,7 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── SELL ──────────────────────────────────────────────────────────────────
     if action == "sell":
         if mode == "paper":
-            portfolio = get_portfolio(uid)
-            raw_held  = portfolio.get(mint, 0)
-            if raw_held <= 0:
-                await query.edit_message_text(f"No `${sym}` position to sell.", reply_markup=_pct_kb(mint))
-                return
-            sell_raw  = max(1, int(raw_held * pct / 100))
-            # Paper mode: fill at market price (no price impact), 1% simulated fee
+            # Fetch price outside lock
             price_sol = float(pair.get("priceNative", 0) or 0)
             if not price_sol:
                 _bc = pumpfun.fetch_bonding_curve_data(mint, SOLANA_RPC)
@@ -8309,14 +8374,21 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not price_sol:
                 await query.edit_message_text("Could not fetch current price. Try again.", reply_markup=_pct_kb(mint))
                 return
-            ui       = sell_raw / (10 ** dec)
-            sol_recv = price_sol * ui * 0.99  # 1% simulated fee
-            portfolio[mint]   = raw_held - sell_raw
-            portfolio["SOL"]  = portfolio.get("SOL", 0) + sol_recv
-            if portfolio[mint] <= 0:
-                portfolio.pop(mint, None)
-                remove_auto_sell(uid, mint)
-            update_portfolio(uid, portfolio)
+            async with _portfolio_lock(uid):
+                portfolio = get_portfolio(uid)
+                raw_held  = portfolio.get(mint, 0)
+                if raw_held <= 0:
+                    await query.edit_message_text(f"No `${sym}` position to sell.", reply_markup=_pct_kb(mint))
+                    return
+                sell_raw = max(1, int(raw_held * pct / 100))
+                ui       = sell_raw / (10 ** dec)
+                sol_recv = price_sol * ui * 0.99  # 1% simulated fee
+                portfolio[mint]   = raw_held - sell_raw
+                portfolio["SOL"]  = portfolio.get("SOL", 0) + sol_recv
+                if portfolio[mint] <= 0:
+                    portfolio.pop(mint, None)
+                    remove_auto_sell(uid, mint)
+                update_portfolio(uid, portfolio)
             await query.edit_message_text(
                 f"📄 *Paper Sell — {pct}%*\n\n"
                 f"Token: `${sym}`\n"
@@ -8354,21 +8426,28 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # ── BUY ───────────────────────────────────────────────────────────────────
     else:
         if mode == "paper":
-            portfolio = get_portfolio(uid)
-            sol_bal   = portfolio.get("SOL", 0)
+            sol_bal   = get_portfolio(uid).get("SOL", 0)
             sol_spend = sol_bal * pct / 100
             if sol_spend < 0.001:
                 await query.edit_message_text(f"Insufficient SOL balance (`{sol_bal:.4f}`).", reply_markup=_pct_kb(mint))
                 return
+            # Quote outside lock
             lamports = int(sol_spend * 1_000_000_000)
             quote    = jupiter_quote(SOL_MINT, mint, lamports)
             if not quote or "outAmount" not in quote:
                 await query.edit_message_text("Quote failed. Try again.", reply_markup=_pct_kb(mint))
                 return
-            out_raw            = int(quote["outAmount"])
-            portfolio["SOL"]   = sol_bal - sol_spend
-            portfolio[mint]    = portfolio.get(mint, 0) + out_raw
-            update_portfolio(uid, portfolio)
+            out_raw = int(quote["outAmount"])
+            async with _portfolio_lock(uid):
+                portfolio = get_portfolio(uid)
+                sol_bal   = portfolio.get("SOL", 0)
+                sol_spend = sol_bal * pct / 100  # recalc under lock with fresh balance
+                if sol_spend < 0.001:
+                    await query.edit_message_text(f"Insufficient SOL balance (`{sol_bal:.4f}`).", reply_markup=_pct_kb(mint))
+                    return
+                portfolio["SOL"]   = portfolio.get("SOL", 0) - sol_spend
+                portfolio[mint]    = portfolio.get(mint, 0) + out_raw
+                update_portfolio(uid, portfolio)
             setup_auto_sell(uid, mint, sym, price, out_raw, dec, sol_amount=sol_spend)
             await query.edit_message_text(
                 f"📄 *Paper Buy — {pct}% of SOL*\n\n"
