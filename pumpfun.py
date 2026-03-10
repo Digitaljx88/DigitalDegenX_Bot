@@ -236,7 +236,7 @@ def get_recent_blockhash(rpc_url: str) -> Hash | None:
 # ── Buy ───────────────────────────────────────────────────────────────────────
 
 def buy_pumpfun(mint: str, sol_amount: float, keypair: Keypair,
-                rpc_url: str, slippage: float = 0.15) -> str:
+                rpc_url: str, slippage: float = None) -> str:
     """
     Buy a pump.fun bonding curve token directly.
 
@@ -245,6 +245,9 @@ def buy_pumpfun(mint: str, sol_amount: float, keypair: Keypair,
         "GRADUATED"         — token already on Raydium, use Jupiter instead
         "ERROR: <msg>"      — on failure
     """
+    if slippage is None:
+        slippage = getattr(_cfg, "PUMPFUN_SLIPPAGE_DEFAULT", 0.05)
+
     try:
         sol_lamports = int(sol_amount * 1_000_000_000)
 
@@ -261,7 +264,23 @@ def buy_pumpfun(mint: str, sol_amount: float, keypair: Keypair,
             return "ERROR: Token amount calculation failed"
         max_sol_cost = int(sol_lamports * (1 + slippage))
 
-        # 3. Derive addresses
+        # 3. Anti-sandwich: re-fetch bonding curve immediately before building tx.
+        # If a sandwich bot bought in between, reserves will have shifted and the
+        # price will have moved. Abort if drift exceeds our threshold.
+        bc_fresh = fetch_bonding_curve_data(mint, rpc_url)
+        if bc_fresh and not bc_fresh.get("complete"):
+            tokens_fresh = calculate_buy_tokens(sol_lamports, bc_fresh)
+            if token_amount > 0 and tokens_fresh > 0:
+                drift = (token_amount - tokens_fresh) / token_amount  # positive = price went up
+                max_drift = getattr(_cfg, "ANTI_SANDWICH_PUMPFUN_MAX_DRIFT_PCT", 3.0) / 100
+                if drift > max_drift:
+                    return (f"ERROR: Price moved {drift * 100:.1f}% since quote "
+                            f"(possible front-run) — aborting to protect against sandwich")
+            bc = bc_fresh
+            token_amount = calculate_buy_tokens(sol_lamports, bc)
+            max_sol_cost = int(sol_lamports * (1 + slippage))
+
+        # 4. Derive addresses
         bc_pda      = bc["bonding_curve"]
         assoc_bc    = get_associated_token_address(bc_pda, mint)
         user_str    = str(keypair.pubkey())
@@ -340,12 +359,14 @@ def buy_pumpfun(mint: str, sol_amount: float, keypair: Keypair,
 # ── Sell ──────────────────────────────────────────────────────────────────────
 
 def sell_pumpfun(mint: str, token_amount: int, keypair: Keypair,
-                 rpc_url: str, slippage: float = 0.15) -> str:
+                 rpc_url: str, slippage: float = None) -> str:
     """
     Sell pump.fun bonding curve tokens back to SOL.
     token_amount is raw (integer, not UI).
     Returns tx signature or "ERROR: ..."
     """
+    if slippage is None:
+        slippage = getattr(_cfg, "PUMPFUN_SLIPPAGE_DEFAULT", 0.05)
     try:
         bc = fetch_bonding_curve_data(mint, rpc_url)
         if bc is None:

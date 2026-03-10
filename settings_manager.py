@@ -322,6 +322,9 @@ def validate_setting(setting_key: str, value: Any) -> bool:
         "alert_scouted_threshold": (0, 100),
         "speed_factor": (0, 100),
         "filter_sensitivity": (0, 100),
+        # Scanner MCap range (USD) — per-user filters applied on top of global MCAP_MIN/MAX
+        "scanner_mcap_min": (0, 999_999_999),
+        "scanner_mcap_max": (0, 999_999_999),
     }
     
     if setting_key not in int_range_settings:
