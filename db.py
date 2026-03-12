@@ -108,16 +108,22 @@ def init():
 
             -- Auto-buy config per user
             CREATE TABLE IF NOT EXISTS auto_buy_config (
-                uid             INTEGER PRIMARY KEY,
-                enabled         INTEGER NOT NULL DEFAULT 0,
-                sol_amount      REAL    NOT NULL DEFAULT 0.03,
-                min_score       INTEGER NOT NULL DEFAULT 55,
-                max_mcap        REAL    NOT NULL DEFAULT 500000,
-                daily_limit_sol REAL    NOT NULL DEFAULT 1.0,
-                spent_today     REAL    NOT NULL DEFAULT 0.0,
-                spent_date      TEXT,
-                max_positions   INTEGER NOT NULL DEFAULT 5,
-                buy_tier        TEXT    NOT NULL DEFAULT 'warm'
+                uid                INTEGER PRIMARY KEY,
+                enabled            INTEGER NOT NULL DEFAULT 0,
+                sol_amount         REAL    NOT NULL DEFAULT 0.03,
+                min_score          INTEGER NOT NULL DEFAULT 55,
+                max_mcap           REAL    NOT NULL DEFAULT 500000,
+                min_mcap_usd       REAL    NOT NULL DEFAULT 0,
+                daily_limit_sol    REAL    NOT NULL DEFAULT 1.0,
+                spent_today        REAL    NOT NULL DEFAULT 0.0,
+                spent_date         TEXT,
+                max_positions      INTEGER NOT NULL DEFAULT 5,
+                buy_tier           TEXT    NOT NULL DEFAULT 'warm',
+                min_liquidity_usd  REAL    NOT NULL DEFAULT 0,
+                max_liquidity_usd  REAL    NOT NULL DEFAULT 0,
+                min_age_mins       INTEGER NOT NULL DEFAULT 0,
+                max_age_mins       INTEGER NOT NULL DEFAULT 0,
+                min_txns_5m        INTEGER NOT NULL DEFAULT 0
             );
 
             -- Per-user list of already-bought token mints
@@ -180,6 +186,23 @@ def init():
             );
         """)
         c.commit()
+
+    # Migrate existing auto_buy_config tables that predate the new filter columns
+    _new_ab_cols = [
+        ("min_mcap_usd",      "REAL    NOT NULL DEFAULT 0"),
+        ("min_liquidity_usd", "REAL    NOT NULL DEFAULT 0"),
+        ("max_liquidity_usd", "REAL    NOT NULL DEFAULT 0"),
+        ("min_age_mins",      "INTEGER NOT NULL DEFAULT 0"),
+        ("max_age_mins",      "INTEGER NOT NULL DEFAULT 0"),
+        ("min_txns_5m",       "INTEGER NOT NULL DEFAULT 0"),
+    ]
+    for col, defn in _new_ab_cols:
+        try:
+            with _conn() as c:
+                c.execute(f"ALTER TABLE auto_buy_config ADD COLUMN {col} {defn}")
+                c.commit()
+        except Exception:
+            pass  # column already exists
 
 
 # ── Portfolios ─────────────────────────────────────────────────────────────────
@@ -330,11 +353,17 @@ _AB_DEFAULTS = {
     "sol_amount": 0.03,
     "min_score": 55,
     "max_mcap": 500_000,
+    "min_mcap_usd": 0,
     "daily_limit_sol": 1.0,
     "spent_today": 0.0,
     "spent_date": None,
     "max_positions": 5,
     "buy_tier": "warm",
+    "min_liquidity_usd": 0,
+    "max_liquidity_usd": 0,
+    "min_age_mins": 0,
+    "max_age_mins": 0,
+    "min_txns_5m": 0,
 }
 
 

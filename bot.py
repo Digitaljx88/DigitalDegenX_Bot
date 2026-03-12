@@ -130,9 +130,16 @@ def get_portfolio(uid: int) -> dict:
     return p
 
 def update_portfolio(uid: int, portfolio: dict):
-    """Persist a full portfolio dict — strips zero balances."""
+    """Persist a full portfolio dict — strips zero balances and removes stale assets."""
+    # Delete any asset that is in the DB but absent (or zero) in the new dict
+    existing = _db.get_portfolio(uid)
+    for asset in existing:
+        if asset not in portfolio or portfolio[asset] <= 0:
+            _db.set_asset(uid, asset, 0)
+    # Upsert remaining non-zero balances
     for asset, amount in portfolio.items():
-        _db.set_asset(uid, asset, float(amount))
+        if float(amount) > 0:
+            _db.set_asset(uid, asset, float(amount))
 
 def reset_portfolio(uid: int):
     """Reset paper portfolio to starting balance and clear all auto-sell configs."""
@@ -467,11 +474,17 @@ def set_auto_buy(uid: int, cfg: dict):
         sol_amount=cfg.get("sol_amount", 0.03),
         min_score=cfg.get("min_score", 55),
         max_mcap=cfg.get("max_mcap", 500_000),
+        min_mcap_usd=cfg.get("min_mcap_usd", 0),
         daily_limit_sol=cfg.get("daily_limit_sol", 1.0),
         spent_today=cfg.get("spent_today", 0.0),
         spent_date=cfg.get("spent_date"),
         max_positions=cfg.get("max_positions", 5),
         buy_tier=cfg.get("buy_tier", "warm"),
+        min_liquidity_usd=cfg.get("min_liquidity_usd", 0),
+        max_liquidity_usd=cfg.get("max_liquidity_usd", 0),
+        min_age_mins=cfg.get("min_age_mins", 0),
+        max_age_mins=cfg.get("max_age_mins", 0),
+        min_txns_5m=cfg.get("min_txns_5m", 0),
     )
 
 def _ab_reset_day_if_needed(cfg: dict) -> dict:
