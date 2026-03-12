@@ -200,6 +200,17 @@ def _apply_presets_to_open_positions(uid: int, presets: list) -> int:
 
 # ── Global settings ───────────────────────────────────────────────────────────
 
+def load_global_settings() -> dict:
+    """Return the raw global_settings.json dict (used by pumpfeed.py for channel IDs etc.)."""
+    try:
+        path = os.path.join(DATA_DIR, "global_settings.json")
+        if os.path.exists(path):
+            with open(path) as f:
+                return json.load(f)
+    except (json.JSONDecodeError, IOError):
+        pass
+    return {}
+
 def get_global_sl() -> dict:
     return _db.get_setting("stop_loss", {"enabled": False, "pct": 50, "sell_pct": 100})
 
