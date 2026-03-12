@@ -80,6 +80,29 @@ os.makedirs(DATA_DIR, exist_ok=True)
 
 DEFAULT_MCAP_MILESTONES = [100_000, 500_000, 1_000_000]
 
+# ─── Telegram Markdown escaping ───────────────────────────────────────────────
+
+def _esc(s: str) -> str:
+    """Escape Telegram Markdown v1 special chars in user-supplied strings."""
+    return (
+        str(s)
+        .replace("\\", "\\\\")
+        .replace("_",  "\\_")
+        .replace("*",  "\\*")
+        .replace("`",  "\\`")
+        .replace("[",  "\\[")
+    )
+
+# ─── Per-user portfolio lock ───────────────────────────────────────────────────
+
+_portfolio_locks: dict[int, asyncio.Lock] = {}
+
+def _portfolio_lock(uid: int) -> asyncio.Lock:
+    """Return a per-user asyncio.Lock for safe concurrent portfolio mutations."""
+    if uid not in _portfolio_locks:
+        _portfolio_locks[uid] = asyncio.Lock()
+    return _portfolio_locks[uid]
+
 # ─── Storage helpers ──────────────────────────────────────────────────────────
 
 def _load(path: str) -> dict:
@@ -2045,9 +2068,49 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     if not result.get("grad_buy") and score < min_score:
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {min_score}", flush=True)
         return
-    if mcap and mcap > cfg.get("max_mcap", 500_000):
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} > max ${cfg.get('max_mcap', 500_000):,.0f}", flush=True)
+
+    # ── MCap range filter ────────────────────────────────────────────────────
+    max_mcap = cfg.get("max_mcap", 500_000)
+    min_mcap = cfg.get("min_mcap_usd", 0)
+    if mcap and mcap > max_mcap:
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} > max ${max_mcap:,.0f}", flush=True)
         return
+    if min_mcap > 0 and mcap < min_mcap:
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} < min ${min_mcap:,.0f}", flush=True)
+        return
+
+    # ── Liquidity range filter ───────────────────────────────────────────────
+    liquidity    = result.get("liquidity", 0) or 0
+    min_liq      = cfg.get("min_liquidity_usd", 0)
+    max_liq      = cfg.get("max_liquidity_usd", 0)
+    if min_liq > 0 and liquidity < min_liq:
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} < min ${min_liq:,.0f}", flush=True)
+        return
+    if max_liq > 0 and liquidity > max_liq:
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} > max ${max_liq:,.0f}", flush=True)
+        return
+
+    # ── Age range filter ─────────────────────────────────────────────────────
+    import time as _time
+    pair_created_ms = result.get("pair_created", 0) or 0
+    if pair_created_ms:
+        age_mins_now = (_time.time() * 1000 - pair_created_ms) / 60_000
+        min_age = cfg.get("min_age_mins", 0)
+        max_age = cfg.get("max_age_mins", 0)
+        if min_age > 0 and age_mins_now < min_age:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m < min {min_age}m", flush=True)
+            return
+        if max_age > 0 and age_mins_now > max_age:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m > max {max_age}m", flush=True)
+            return
+
+    # ── Min 5m transactions filter ───────────────────────────────────────────
+    min_txns = cfg.get("min_txns_5m", 0)
+    if min_txns > 0:
+        txns_5m = result.get("txns_5m", 0) or 0
+        if txns_5m < min_txns:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — txns_5m {txns_5m} < min {min_txns}", flush=True)
+            return
 
     cfg = _ab_reset_day_if_needed(cfg)
 
@@ -3241,19 +3304,25 @@ def _format_autosell_config(cfg: dict) -> str:
 # ─── Auto-Buy UI ──────────────────────────────────────────────────────────────
 
 def _autobuy_status_text(uid: int) -> str:
-    cfg         = get_auto_buy(uid)
-    cfg         = _ab_reset_day_if_needed(cfg)
-    enabled     = cfg.get("enabled", False)
-    sol_amount  = cfg.get("sol_amount", 0.1)
-    min_score   = cfg.get("min_score", 70)
-    max_mcap    = cfg.get("max_mcap", 500_000)
-    daily_limit = cfg.get("daily_limit_sol", 1.0)
-    spent       = cfg.get("spent_today", 0.0)
-    bought      = cfg.get("bought", [])
-    max_pos     = cfg.get("max_positions", 0)
-    open_pos    = len(_db.get_all_auto_sells(uid))
-    mode        = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
-    buy_tier    = cfg.get("buy_tier", "")
+    cfg             = get_auto_buy(uid)
+    cfg             = _ab_reset_day_if_needed(cfg)
+    enabled         = cfg.get("enabled", False)
+    sol_amount      = cfg.get("sol_amount", 0.1)
+    min_score       = cfg.get("min_score", 70)
+    max_mcap        = cfg.get("max_mcap", 500_000)
+    min_mcap        = cfg.get("min_mcap_usd", 0)
+    daily_limit     = cfg.get("daily_limit_sol", 1.0)
+    spent           = cfg.get("spent_today", 0.0)
+    bought          = cfg.get("bought", [])
+    max_pos         = cfg.get("max_positions", 0)
+    open_pos        = len(_db.get_all_auto_sells(uid))
+    mode            = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
+    buy_tier        = cfg.get("buy_tier", "")
+    min_liq         = cfg.get("min_liquidity_usd", 0)
+    max_liq         = cfg.get("max_liquidity_usd", 0)
+    min_age         = cfg.get("min_age_mins", 0)
+    max_age         = cfg.get("max_age_mins", 0)
+    min_txns        = cfg.get("min_txns_5m", 0)
 
     # Resolve effective min score
     if buy_tier:
@@ -3271,13 +3340,37 @@ def _autobuy_status_text(uid: int) -> str:
         score_line = f"Min heat score: `{min_score}/100`"
 
     status = "🟢 ENABLED" if enabled else "🔴 DISABLED"
+
+    # Build filter lines
+    mcap_line = f"MCap: `${min_mcap:,.0f}` – `${max_mcap:,.0f}`" if min_mcap > 0 else f"Max MCap: `${max_mcap:,.0f}`"
+    if min_liq > 0 and max_liq > 0:
+        liq_line = f"Liquidity: `${min_liq:,.0f}` – `${max_liq:,.0f}`"
+    elif min_liq > 0:
+        liq_line = f"Min Liquidity: `${min_liq:,.0f}`"
+    elif max_liq > 0:
+        liq_line = f"Max Liquidity: `${max_liq:,.0f}`"
+    else:
+        liq_line = f"Liquidity: `Any`"
+    if min_age > 0 and max_age > 0:
+        age_line = f"Age: `{min_age}m` – `{max_age}m`"
+    elif min_age > 0:
+        age_line = f"Min Age: `{min_age}m`"
+    elif max_age > 0:
+        age_line = f"Max Age: `{max_age}m`"
+    else:
+        age_line = f"Age: `Any`"
+    txns_line = f"Min Txns (5m): `{min_txns}`" if min_txns > 0 else f"Min Txns (5m): `Any`"
+
     return (
         f"*🤖 Auto-Buy Settings*\n\n"
         f"Status: *{status}*\n"
         f"Mode: *{mode}*\n\n"
         f"SOL per trade: `{sol_amount} SOL`\n"
         f"{score_line}\n"
-        f"Max MCap: `${max_mcap:,.0f}`\n"
+        f"{mcap_line}\n"
+        f"{liq_line}\n"
+        f"{age_line}\n"
+        f"{txns_line}\n"
         f"Daily SOL limit: `{'Unlimited ♾️' if daily_limit == 0 else str(daily_limit) + ' SOL'}`\n"
         f"Spent today: `{spent:.3f} SOL`\n"
         f"Bought today: `{len(bought)}` token(s)\n"
@@ -3292,14 +3385,17 @@ def _autobuy_kb(uid: int) -> InlineKeyboardMarkup:
     enabled = cfg.get("enabled", False)
     toggle_lbl = "⏸️ Disable" if enabled else "▶️ Enable"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(toggle_lbl,            callback_data="autobuy:toggle")],
-        [InlineKeyboardButton("💰 SOL Amount",        callback_data="autobuy:set_sol"),
-         InlineKeyboardButton("🌡️ Buy Tier",           callback_data="autobuy:set_tier")],
-        [InlineKeyboardButton("🏦 Max MCap",          callback_data="autobuy:set_mcap"),
-         InlineKeyboardButton("📅 Daily Limit",       callback_data="autobuy:set_daily")],
-        [InlineKeyboardButton("� Max Positions",     callback_data="autobuy:set_maxpos")],
-        [InlineKeyboardButton("�🔄 Reset Today",       callback_data="autobuy:reset_day")],
-        [InlineKeyboardButton("⬅️ Back",              callback_data="menu:main")],
+        [InlineKeyboardButton(toggle_lbl,               callback_data="autobuy:toggle")],
+        [InlineKeyboardButton("💰 SOL Amount",           callback_data="autobuy:set_sol"),
+         InlineKeyboardButton("🌡️ Buy Tier",             callback_data="autobuy:set_tier")],
+        [InlineKeyboardButton("🏦 MCap Range",           callback_data="autobuy:set_mcap_range"),
+         InlineKeyboardButton("💧 Liquidity Filters",    callback_data="autobuy:set_liq")],
+        [InlineKeyboardButton("⏱️ Age Filters",          callback_data="autobuy:set_age"),
+         InlineKeyboardButton("🔄 Min Txns (5m)",        callback_data="autobuy:set_txns")],
+        [InlineKeyboardButton("📅 Daily Limit",          callback_data="autobuy:set_daily"),
+         InlineKeyboardButton("📊 Max Positions",        callback_data="autobuy:set_maxpos")],
+        [InlineKeyboardButton("🔄 Reset Today",          callback_data="autobuy:reset_day")],
+        [InlineKeyboardButton("⬅️ Back",                 callback_data="menu:main")],
     ])
 
 
@@ -3520,6 +3616,220 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "maxpos_preset":
         val = int(query.data.split(":")[2])
         cfg["max_positions"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    # ── MCap Range ────────────────────────────────────────────────────────────
+    elif action == "set_mcap_range":
+        cur_min = cfg.get("min_mcap_usd", 0)
+        cur_max = cfg.get("max_mcap", 500_000)
+        await query.edit_message_text(
+            "🏦 *MCap Range Filter*\n\n"
+            f"Current: `${cur_min:,.0f}` – `${cur_max:,.0f}`\n\n"
+            "Set the minimum and maximum market cap in USD.\n"
+            "Tokens outside this range are skipped.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📉 Set Min MCap", callback_data="autobuy:set_min_mcap"),
+                 InlineKeyboardButton("📈 Set Max MCap", callback_data="autobuy:set_mcap")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "set_min_mcap":
+        set_state(uid, waiting_for="ab_min_mcap")
+        await query.edit_message_text(
+            "📉 *Set minimum market cap for auto-buy*\n\n"
+            "Tokens below this MCap will be skipped.\n"
+            "Set to *0* for no minimum.\n"
+            f"Current: `${cfg.get('min_mcap_usd', 0):,.0f}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("$0 (None)",  callback_data="autobuy:min_mcap_preset:0"),
+                 InlineKeyboardButton("$10K",       callback_data="autobuy:min_mcap_preset:10000"),
+                 InlineKeyboardButton("$50K",       callback_data="autobuy:min_mcap_preset:50000")],
+                [InlineKeyboardButton("$100K",      callback_data="autobuy:min_mcap_preset:100000"),
+                 InlineKeyboardButton("$250K",      callback_data="autobuy:min_mcap_preset:250000"),
+                 InlineKeyboardButton("$500K",      callback_data="autobuy:min_mcap_preset:500000")],
+                [InlineKeyboardButton("⬅️ Back",    callback_data="autobuy:set_mcap_range")],
+            ])
+        )
+
+    elif action == "min_mcap_preset":
+        val = int(query.data.split(":")[2])
+        cfg["min_mcap_usd"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    # ── Liquidity Filters ────────────────────────────────────────────────────
+    elif action == "set_liq":
+        cur_min = cfg.get("min_liquidity_usd", 0)
+        cur_max = cfg.get("max_liquidity_usd", 0)
+        min_txt = f"${cur_min:,.0f}" if cur_min > 0 else "None"
+        max_txt = f"${cur_max:,.0f}" if cur_max > 0 else "None"
+        await query.edit_message_text(
+            "💧 *Liquidity Filters*\n\n"
+            f"Min Liquidity: `{min_txt}`\n"
+            f"Max Liquidity: `{max_txt}`\n\n"
+            "Set min/max pool liquidity in USD.\nSet to 0 to disable a limit.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📉 Set Min Liquidity", callback_data="autobuy:set_liq_min"),
+                 InlineKeyboardButton("📈 Set Max Liquidity", callback_data="autobuy:set_liq_max")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "set_liq_min":
+        set_state(uid, waiting_for="ab_min_liq")
+        await query.edit_message_text(
+            "💧 *Set minimum liquidity (USD)*\n\n"
+            "Tokens with less liquidity than this will be skipped.\n"
+            "Set to *0* for no minimum.\n"
+            f"Current: `${cfg.get('min_liquidity_usd', 0):,.0f}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("$0 (None)",  callback_data="autobuy:liq_min_preset:0"),
+                 InlineKeyboardButton("$1K",        callback_data="autobuy:liq_min_preset:1000"),
+                 InlineKeyboardButton("$5K",        callback_data="autobuy:liq_min_preset:5000")],
+                [InlineKeyboardButton("$10K",       callback_data="autobuy:liq_min_preset:10000"),
+                 InlineKeyboardButton("$25K",       callback_data="autobuy:liq_min_preset:25000"),
+                 InlineKeyboardButton("$50K",       callback_data="autobuy:liq_min_preset:50000")],
+                [InlineKeyboardButton("⬅️ Back",    callback_data="autobuy:set_liq")],
+            ])
+        )
+
+    elif action == "liq_min_preset":
+        val = int(query.data.split(":")[2])
+        cfg["min_liquidity_usd"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_liq_max":
+        set_state(uid, waiting_for="ab_max_liq")
+        await query.edit_message_text(
+            "💧 *Set maximum liquidity (USD)*\n\n"
+            "Tokens with more liquidity than this will be skipped.\n"
+            "Set to *0* for no limit.\n"
+            f"Current: `${cfg.get('max_liquidity_usd', 0):,.0f}` (0 = no limit)",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("$0 (No limit)", callback_data="autobuy:liq_max_preset:0"),
+                 InlineKeyboardButton("$25K",          callback_data="autobuy:liq_max_preset:25000"),
+                 InlineKeyboardButton("$50K",          callback_data="autobuy:liq_max_preset:50000")],
+                [InlineKeyboardButton("$100K",         callback_data="autobuy:liq_max_preset:100000"),
+                 InlineKeyboardButton("$250K",         callback_data="autobuy:liq_max_preset:250000"),
+                 InlineKeyboardButton("$500K",         callback_data="autobuy:liq_max_preset:500000")],
+                [InlineKeyboardButton("⬅️ Back",       callback_data="autobuy:set_liq")],
+            ])
+        )
+
+    elif action == "liq_max_preset":
+        val = int(query.data.split(":")[2])
+        cfg["max_liquidity_usd"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    # ── Age Filters ──────────────────────────────────────────────────────────
+    elif action == "set_age":
+        cur_min = cfg.get("min_age_mins", 0)
+        cur_max = cfg.get("max_age_mins", 0)
+        min_txt = f"{cur_min}m" if cur_min > 0 else "None"
+        max_txt = f"{cur_max}m" if cur_max > 0 else "None"
+        await query.edit_message_text(
+            "⏱️ *Age Filters*\n\n"
+            f"Min Age: `{min_txt}`\n"
+            f"Max Age: `{max_txt}`\n\n"
+            "Set min/max token pair age in minutes.\nSet to 0 to disable a limit.",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📉 Set Min Age", callback_data="autobuy:set_age_min"),
+                 InlineKeyboardButton("📈 Set Max Age", callback_data="autobuy:set_age_max")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "set_age_min":
+        set_state(uid, waiting_for="ab_min_age")
+        await query.edit_message_text(
+            "⏱️ *Set minimum token age (minutes)*\n\n"
+            "Token pair must be at least this many minutes old.\n"
+            "Set to *0* for no minimum.\n"
+            f"Current: `{cfg.get('min_age_mins', 0)}m`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("0 (None)", callback_data="autobuy:age_min_preset:0"),
+                 InlineKeyboardButton("5m",       callback_data="autobuy:age_min_preset:5"),
+                 InlineKeyboardButton("10m",      callback_data="autobuy:age_min_preset:10"),
+                 InlineKeyboardButton("30m",      callback_data="autobuy:age_min_preset:30")],
+                [InlineKeyboardButton("1h",       callback_data="autobuy:age_min_preset:60"),
+                 InlineKeyboardButton("2h",       callback_data="autobuy:age_min_preset:120"),
+                 InlineKeyboardButton("4h",       callback_data="autobuy:age_min_preset:240")],
+                [InlineKeyboardButton("⬅️ Back",  callback_data="autobuy:set_age")],
+            ])
+        )
+
+    elif action == "age_min_preset":
+        val = int(query.data.split(":")[2])
+        cfg["min_age_mins"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_age_max":
+        set_state(uid, waiting_for="ab_max_age")
+        await query.edit_message_text(
+            "⏱️ *Set maximum token age (minutes)*\n\n"
+            "Tokens older than this will be skipped.\n"
+            "Set to *0* for no limit.\n"
+            f"Current: `{cfg.get('max_age_mins', 0)}m` (0 = no limit)",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("0 (No limit)", callback_data="autobuy:age_max_preset:0"),
+                 InlineKeyboardButton("15m",          callback_data="autobuy:age_max_preset:15"),
+                 InlineKeyboardButton("30m",          callback_data="autobuy:age_max_preset:30")],
+                [InlineKeyboardButton("1h",           callback_data="autobuy:age_max_preset:60"),
+                 InlineKeyboardButton("2h",           callback_data="autobuy:age_max_preset:120"),
+                 InlineKeyboardButton("4h",           callback_data="autobuy:age_max_preset:240")],
+                [InlineKeyboardButton("⬅️ Back",      callback_data="autobuy:set_age")],
+            ])
+        )
+
+    elif action == "age_max_preset":
+        val = int(query.data.split(":")[2])
+        cfg["max_age_mins"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    # ── Min Txns (5m) ────────────────────────────────────────────────────────
+    elif action == "set_txns":
+        set_state(uid, waiting_for="ab_min_txns")
+        await query.edit_message_text(
+            "🔄 *Set minimum transactions in last 5 minutes*\n\n"
+            "Token must have at least this many buy+sell transactions in the last 5 min.\n"
+            "Set to *0* for no minimum.\n"
+            f"Current: `{cfg.get('min_txns_5m', 0)}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("0 (None)", callback_data="autobuy:txns_preset:0"),
+                 InlineKeyboardButton("5",        callback_data="autobuy:txns_preset:5"),
+                 InlineKeyboardButton("10",       callback_data="autobuy:txns_preset:10"),
+                 InlineKeyboardButton("20",       callback_data="autobuy:txns_preset:20")],
+                [InlineKeyboardButton("30",       callback_data="autobuy:txns_preset:30"),
+                 InlineKeyboardButton("50",       callback_data="autobuy:txns_preset:50"),
+                 InlineKeyboardButton("100",      callback_data="autobuy:txns_preset:100")],
+                [InlineKeyboardButton("⬅️ Back",  callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "txns_preset":
+        val = int(query.data.split(":")[2])
+        cfg["min_txns_5m"] = val
         set_auto_buy(uid, cfg)
         clear_state(uid)
         await _show_autobuy(query.edit_message_text, uid)
@@ -10138,6 +10448,132 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label = "Unlimited ♾️" if val == 0 else str(val)
         await update.message.reply_text(
             f"✅ Max positions set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_min_mcap":
+        try:
+            val = float(text.replace(",", "").replace("$", "").replace("k", "000").replace("K", "000").replace("m", "000000").replace("M", "000000"))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid MCap (e.g. 50000 or 50K). Use 0 for no minimum.")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["min_mcap_usd"] = int(val)
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "None" if int(val) == 0 else f"${int(val):,}"
+        await update.message.reply_text(
+            f"✅ Min MCap set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_min_liq":
+        try:
+            val = float(text.replace(",", "").replace("$", "").replace("k", "000").replace("K", "000").replace("m", "000000").replace("M", "000000"))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid USD amount (e.g. 5000 or 5K). Use 0 for no minimum.")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["min_liquidity_usd"] = int(val)
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "None" if int(val) == 0 else f"${int(val):,}"
+        await update.message.reply_text(
+            f"✅ Min Liquidity set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_max_liq":
+        try:
+            val = float(text.replace(",", "").replace("$", "").replace("k", "000").replace("K", "000").replace("m", "000000").replace("M", "000000"))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid USD amount (e.g. 100000 or 100K). Use 0 for no limit.")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["max_liquidity_usd"] = int(val)
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "No limit ♾️" if int(val) == 0 else f"${int(val):,}"
+        await update.message.reply_text(
+            f"✅ Max Liquidity set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_min_age":
+        try:
+            val = int(float(text.strip().replace("m", "").replace("min", "")))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number of minutes (e.g. `10` for 10 minutes). Use 0 for no minimum.")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["min_age_mins"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "None" if val == 0 else f"{val}m"
+        await update.message.reply_text(
+            f"✅ Min Age set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_max_age":
+        try:
+            val = int(float(text.strip().replace("m", "").replace("min", "")))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a number of minutes (e.g. `60` for 1 hour). Use 0 for no limit.")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["max_age_mins"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "No limit ♾️" if val == 0 else f"{val}m"
+        await update.message.reply_text(
+            f"✅ Max Age set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_min_txns":
+        try:
+            val = int(float(text.strip()))
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a whole number (e.g. `10`). Use 0 for no minimum.")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["min_txns_5m"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "None" if val == 0 else str(val)
+        await update.message.reply_text(
+            f"✅ Min Txns (5m) set to `{label}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
