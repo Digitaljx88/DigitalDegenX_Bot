@@ -62,7 +62,7 @@ NARRATIVES = {
 
 # ─── State helpers (all backed by SQLite via db.py) ───────────────────────────
 
-SEEN_TOKEN_TTL = _db.SEEN_TOKEN_TTL  # keep constant for backward compat
+SEEN_TOKEN_TTL = _db.SEEN_TOKEN_TTL  # legacy compat constant; seen-token cache is session-scoped
 
 
 def append_log(entry: dict):
@@ -131,7 +131,47 @@ def get_todays_alerts() -> list:
 
 MAX_TOKEN_AGE_HOURS  = 4     # ignore tokens older than this
 
-def _parse_pairs(pairs: list, tokens: dict):
+SOURCE_RANKS = {
+    "pumpfun_newest": 100,
+    "pumpfun_hot": 90,
+    "dex_pairs": 70,
+    "dex_lookup": 60,
+    "dex_profiles": 40,
+    "dex_boosts": 30,
+    "dex_search": 20,
+}
+
+
+def _merge_token_entry(tokens: dict, mint: str, incoming: dict, *, source_name: str, source_rank: int):
+    """
+    Merge token data while preserving the freshest launch timestamp and the highest-trust source.
+    Lower-signal sources should enrich a token, not overwrite stronger pump.fun/new-pair data.
+    """
+    entry = tokens.setdefault(mint, {"mint": mint, "_source_rank": source_rank, "_source_name": source_name})
+    current_rank = entry.get("_source_rank", -1)
+
+    incoming_created = incoming.get("pair_created") or 0
+    existing_created = entry.get("pair_created") or 0
+    if incoming_created and incoming_created > existing_created:
+        entry["pair_created"] = incoming_created
+
+    for key, value in incoming.items():
+        if key == "pair_created":
+            continue
+        if value in (None, "", 0, 0.0, False):
+            if key not in entry:
+                entry[key] = value
+            continue
+        if current_rank <= source_rank or not entry.get(key):
+            entry[key] = value
+
+    if source_rank > current_rank:
+        entry["_source_rank"] = source_rank
+        entry["_source_name"] = source_name
+    return entry
+
+
+def _parse_pairs(pairs: list, tokens: dict, *, source_name: str = "dex_pairs", source_rank: int = SOURCE_RANKS["dex_pairs"]):
     """Merge DexScreener pairs into the tokens dict. Skip old tokens."""
     cutoff_ms = (time.time() - MAX_TOKEN_AGE_HOURS * 3600) * 1000
     for p in pairs:
@@ -145,8 +185,7 @@ def _parse_pairs(pairs: list, tokens: dict):
         if pair_created and pair_created < cutoff_ms:
             continue
         mcap = float(p.get("marketCap") or p.get("fdv") or 0)
-        entry = tokens.setdefault(mint, {"mint": mint})
-        entry.update({
+        _merge_token_entry(tokens, mint, {
             "name":         p.get("baseToken", {}).get("name", ""),
             "symbol":       p.get("baseToken", {}).get("symbol", ""),
             "mcap":         mcap,
@@ -163,12 +202,12 @@ def _parse_pairs(pairs: list, tokens: dict):
             "dex":          p.get("dexId", ""),
             "pair_address": p.get("pairAddress", ""),
             "pair_created": pair_created,
-        })
+        }, source_name=source_name, source_rank=source_rank)
 
 
 def fetch_new_tokens() -> list[dict]:
     """
-    Fetch recent Solana tokens (last 24h only), sorted newest first.
+    Fetch recent Solana tokens within the configured freshness window, sorted newest first.
     """
     tokens: dict[str, dict] = {}
     cutoff_ms = (time.time() - MAX_TOKEN_AGE_HOURS * 3600) * 1000
@@ -179,10 +218,10 @@ def fetch_new_tokens() -> list[dict]:
             "https://api.dexscreener.com/latest/dex/pairs/solana",
             timeout=10
         ).json().get("pairs") or []
-        # Sort newest first, only keep tokens created in last 24h
+        # Sort newest first, only keep tokens created inside the freshness window
         pairs = [p for p in pairs if (p.get("pairCreatedAt") or 0) >= cutoff_ms]
         pairs.sort(key=lambda p: p.get("pairCreatedAt", 0), reverse=True)
-        _parse_pairs(pairs[:150], tokens)
+        _parse_pairs(pairs[:150], tokens, source_name="dex_pairs", source_rank=SOURCE_RANKS["dex_pairs"])
     except Exception:
         pass
 
@@ -194,15 +233,14 @@ def fetch_new_tokens() -> list[dict]:
             for p in sol_profiles[:50]:
                 mint = p.get("tokenAddress", "")
                 if mint:
-                    entry = tokens.setdefault(mint, {"mint": mint})
-                    entry.update({
+                    _merge_token_entry(tokens, mint, {
                         "twitter_url": next(
                             (l["url"] for l in p.get("links", []) if l.get("type") == "twitter"),
                             None
                         ),
                         "description": p.get("description", ""),
                         "has_icon":    bool(p.get("icon")),
-                    })
+                    }, source_name="dex_profiles", source_rank=SOURCE_RANKS["dex_profiles"])
     except Exception:
         pass
 
@@ -214,7 +252,7 @@ def fetch_new_tokens() -> list[dict]:
             for b in sol_boosts[:20]:
                 mint = b.get("tokenAddress", "")
                 if mint:
-                    tokens.setdefault(mint, {"mint": mint})
+                    _merge_token_entry(tokens, mint, {}, source_name="dex_boosts", source_rank=SOURCE_RANKS["dex_boosts"])
     except Exception:
         pass
 
@@ -231,7 +269,7 @@ def fetch_new_tokens() -> list[dict]:
             all_pair_batches = list(_ex.map(_fetch_mint_pairs, profile_mints[:25]))
         for pairs in all_pair_batches:
             if pairs:
-                _parse_pairs(pairs, tokens)
+                _parse_pairs(pairs, tokens, source_name="dex_lookup", source_rank=SOURCE_RANKS["dex_lookup"])
 
     # Source 5: pump.fun newest coins (pre-graduation tokens with low mcap)
     try:
@@ -252,18 +290,19 @@ def fetch_new_tokens() -> list[dict]:
                     created_ts *= 1000
                 if created_ts < cutoff_ms:
                     continue
-                entry = tokens.setdefault(mint, {"mint": mint})
-                entry.setdefault("name",         coin.get("name", ""))
-                entry.setdefault("symbol",        coin.get("symbol", ""))
-                entry.setdefault("mcap",          mcap)
-                entry.setdefault("pair_created",  created_ts)
-                entry.setdefault("description",   coin.get("description", ""))
-                entry.setdefault("twitter_url",   coin.get("twitter") or None)
-                entry.setdefault("price_usd",     0.0)
-                entry.setdefault("volume_h1",     0.0)
-                entry.setdefault("volume_m5",     0.0)
-                entry.setdefault("liquidity",     0.0)
-                entry.setdefault("dex",           "pumpfun")
+                _merge_token_entry(tokens, mint, {
+                    "name":         coin.get("name", ""),
+                    "symbol":       coin.get("symbol", ""),
+                    "mcap":         mcap,
+                    "pair_created": created_ts,
+                    "description":  coin.get("description", ""),
+                    "twitter_url":  coin.get("twitter") or None,
+                    "price_usd":    0.0,
+                    "volume_h1":    0.0,
+                    "volume_m5":    0.0,
+                    "liquidity":    0.0,
+                    "dex":          "pumpfun",
+                }, source_name="pumpfun_newest", source_rank=SOURCE_RANKS["pumpfun_newest"])
     except Exception:
         pass
 
@@ -284,18 +323,19 @@ def fetch_new_tokens() -> list[dict]:
                     created_ts *= 1000
                 if created_ts < cutoff_ms:
                     continue
-                entry = tokens.setdefault(mint, {"mint": mint})
-                entry.setdefault("name",        coin.get("name", ""))
-                entry.setdefault("symbol",      coin.get("symbol", ""))
-                entry.setdefault("mcap",        mcap)
-                entry.setdefault("pair_created", created_ts)
-                entry.setdefault("description", coin.get("description", ""))
-                entry.setdefault("twitter_url", coin.get("twitter") or None)
-                entry.setdefault("price_usd",   0.0)
-                entry.setdefault("volume_h1",   0.0)
-                entry.setdefault("volume_m5",   0.0)
-                entry.setdefault("liquidity",   0.0)
-                entry.setdefault("dex",         "pumpfun")
+                _merge_token_entry(tokens, mint, {
+                    "name":         coin.get("name", ""),
+                    "symbol":       coin.get("symbol", ""),
+                    "mcap":         mcap,
+                    "pair_created": created_ts,
+                    "description":  coin.get("description", ""),
+                    "twitter_url":  coin.get("twitter") or None,
+                    "price_usd":    0.0,
+                    "volume_h1":    0.0,
+                    "volume_m5":    0.0,
+                    "liquidity":    0.0,
+                    "dex":          "pumpfun",
+                }, source_name="pumpfun_hot", source_rank=SOURCE_RANKS["pumpfun_hot"])
     except Exception:
         pass
 
@@ -310,7 +350,8 @@ def fetch_new_tokens() -> list[dict]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _ex7:
         _search_results = list(_ex7.map(_dex_search, _trending_queries))
     for pairs in _search_results:
-        _parse_pairs(pairs[:20], tokens)
+        # Search is lowest-signal discovery: allow enrichment but keep stronger source metadata intact.
+        _parse_pairs(pairs[:20], tokens, source_name="dex_search", source_rank=SOURCE_RANKS["dex_search"])
 
     # Filter: must have name + mcap in range + created within cutoff
     # Also skip graduated DEX tokens with zero pool liquidity (rug indicator)
@@ -325,8 +366,8 @@ def fetch_new_tokens() -> list[dict]:
         )
     ]
 
-    # Sort newest first
-    result.sort(key=lambda t: t.get("pair_created", 0), reverse=True)
+    # Sort newest first; break ties in favor of stronger source provenance.
+    result.sort(key=lambda t: (t.get("pair_created", 0), t.get("_source_rank", 0)), reverse=True)
     return result
 
 
@@ -431,6 +472,82 @@ def age_str(pair_created_ms: int) -> str:
     if age_mins < 60:
         return f"{age_mins:.0f}m"
     return f"{age_mins/60:.1f}h"
+
+
+def classify_alert_tier(
+    effective_score: int,
+    momentum_alive: bool,
+    watch_threshold: int,
+    warm_threshold: int,
+    hot_threshold: int,
+    ultra_hot_threshold: int,
+) -> str | None:
+    """Resolve the alert tier for one token using recency-independent score rules."""
+    if effective_score >= ultra_hot_threshold and momentum_alive:
+        return "ULTRA_HOT"
+    if effective_score >= hot_threshold and momentum_alive:
+        return "HOT"
+    if effective_score >= warm_threshold and momentum_alive:
+        return "WARM"
+    if effective_score >= watch_threshold:
+        return "SCOUTED"
+    return None
+
+
+def select_newest_alerts(
+    scored_tokens: list[dict],
+    chat_ids: list[int],
+    user_settings_map: dict[int, dict],
+    *,
+    channel_enabled: bool = False,
+    channel_scouted_threshold: int = 35,
+    channel_hot_threshold: int = 70,
+) -> tuple[dict[int, tuple[str, dict]], tuple[str, dict] | None]:
+    """
+    Pick the newest qualifying token per user, plus the newest qualifying channel alert.
+    scored_tokens must already be sorted newest first.
+    """
+    selected_users: dict[int, tuple[str, dict]] = {}
+    selected_channel: tuple[str, dict] | None = None
+
+    for result in scored_tokens:
+        mcap = result.get("mcap", 0) or 0
+        effective_score = result.get("effective_score", result.get("total", 0))
+        momentum_alive = bool(result.get("momentum_alive", True))
+
+        for uid in chat_ids:
+            if uid in selected_users:
+                continue
+            user_cfg = user_settings_map.get(uid, {})
+            user_mcap_min = user_cfg.get("scanner_mcap_min", 15_000)
+            user_mcap_max = user_cfg.get("scanner_mcap_max", 10_000_000)
+            if not (user_mcap_min <= mcap <= user_mcap_max):
+                continue
+
+            tier = classify_alert_tier(
+                effective_score,
+                momentum_alive,
+                user_cfg.get("alert_scouted_threshold", 35),
+                user_cfg.get("alert_warm_threshold", 55),
+                user_cfg.get("alert_hot_threshold", 70),
+                user_cfg.get("alert_ultra_hot_threshold", 85),
+            )
+            if tier:
+                selected_users[uid] = (tier, result)
+
+        if channel_enabled and selected_channel is None:
+            tier = None
+            if effective_score >= channel_hot_threshold and momentum_alive:
+                tier = "HOT"
+            elif effective_score >= channel_scouted_threshold:
+                tier = "SCOUTED"
+            if tier:
+                selected_channel = (tier, result)
+
+        if len(selected_users) == len(chat_ids) and (not channel_enabled or selected_channel is not None):
+            break
+
+    return selected_users, selected_channel
 
 
 def format_alert(r: dict) -> str:
@@ -627,6 +744,8 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             flush=True,
         )
 
+    scored_candidates: list[dict] = []
+
     for token, rc_raw in zip(to_process, rugcheck_results):
         mint = token["mint"]
         mcap = token.get("mcap", 0)
@@ -704,119 +823,60 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 f"— capping to SCOUTED",
                 flush=True,
             )
+        result["momentum_alive"] = _momentum_alive
+        scored_candidates.append(result)
 
-        # Now determine which users get alerts using their v2 settings
-        user_tiers = {}
-        any_user_qualifies = False
+    if not scored_candidates:
+        return
 
-        for uid in chat_ids:
-            try:
-                user_cfg = settings_manager.get_user_settings(uid)
-                watch_threshold = user_cfg.get("alert_scouted_threshold", 35)
-                alert_threshold = user_cfg.get("alert_warm_threshold", 55)
-                user_mcap_min   = user_cfg.get("scanner_mcap_min", 15_000)
-                user_mcap_max   = user_cfg.get("scanner_mcap_max", 10_000_000)
-            except Exception:
-                watch_threshold, alert_threshold = 35, 55
-                user_mcap_min, user_mcap_max = 15_000, 10_000_000
+    user_settings_map = {}
+    for uid in chat_ids:
+        try:
+            user_settings_map[uid] = settings_manager.get_user_settings(uid)
+        except Exception:
+            user_settings_map[uid] = {}
 
-            # Skip if token mcap is outside this user's configured range
-            if not (user_mcap_min <= mcap <= user_mcap_max):
-                user_tiers[uid] = None
-                continue
+    selected_user_alerts, selected_channel_alert = select_newest_alerts(
+        scored_candidates,
+        chat_ids,
+        user_settings_map,
+        channel_enabled=bool(alert_channel),
+        channel_scouted_threshold=CH_SCOUTED_THR,
+        channel_hot_threshold=CH_HOT_THR,
+    )
 
-            # Classify into tier — use effective_score (includes velocity boost)
-            eff = result.get("effective_score", score)
-            ultra_hot_threshold = user_cfg.get("alert_ultra_hot_threshold", 85)
-            hot_threshold       = user_cfg.get("alert_hot_threshold", 70)
-            if eff >= ultra_hot_threshold and _momentum_alive:
-                user_tiers[uid] = "ULTRA_HOT"  # full DM alert — highest tier
-                any_user_qualifies = True
-            elif eff >= hot_threshold and _momentum_alive:
-                user_tiers[uid] = "HOT"        # full DM alert — strong momentum
-                any_user_qualifies = True
-            elif eff >= alert_threshold and _momentum_alive:
-                user_tiers[uid] = "WARM"       # full DM alert — warm momentum
-                any_user_qualifies = True
-            elif eff >= watch_threshold:
-                user_tiers[uid] = "SCOUTED"    # compact watchlist ping
-                any_user_qualifies = True
-            else:
-                user_tiers[uid] = None
+    alert_groups: dict[tuple[str, str], dict] = {}
+    autobuy_targets: dict[str, dict] = {}
+    for uid, (tier, result) in selected_user_alerts.items():
+        key = (result["mint"], tier)
+        group = alert_groups.setdefault(key, {"tier": tier, "result": result, "uids": []})
+        group["uids"].append(uid)
+        bucket = autobuy_targets.setdefault(result["mint"], {"result": result, "uids": set()})
+        bucket["uids"].add(uid)
 
-        # Separate scouted from hot alerts
-        scouted_uids = [uid for uid, tier in user_tiers.items() if tier == "SCOUTED"]
-        hot_uids     = [uid for uid, tier in user_tiers.items() if tier in ("HOT", "WARM", "ULTRA_HOT")]
+    ordered_alert_groups = sorted(
+        alert_groups.values(),
+        key=lambda g: g["result"].get("pair_created", 0),
+        reverse=True,
+    )
 
-        # ─── Send SCOUTED alerts ───────────────────────────────────────────
-        if scouted_uids or (alert_channel and score >= CH_SCOUTED_THR):
+    from telegram import InlineKeyboardMarkup, InlineKeyboardButton
+
+    for group in ordered_alert_groups:
+        tier = group["tier"]
+        result = group["result"]
+        mint = result["mint"]
+        mcap = result.get("mcap", 0)
+
+        if tier == "SCOUTED":
             add_to_watchlist(mint, {
                 "name": result["name"], "symbol": result["symbol"],
-                "score": score, "mcap": mcap, "mint": mint,
+                "score": result["total"], "mcap": mcap, "mint": mint,
                 "ts": time.time(),
             })
-
-            if scouted_uids or alert_channel:
-                _db.mark_scan_log_alerted(mint)
-
-                scout_msg = format_scouted_alert(result)[:4000]
-                from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-                scout_kb = InlineKeyboardMarkup([
-                    [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
-                     InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
-                     InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
-                    [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
-                     InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
-                     InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
-                ])
-                for uid in scouted_uids:
-                    try:
-                        await bot.send_message(
-                            chat_id=uid, text=scout_msg,
-                            parse_mode="Markdown", reply_markup=scout_kb,
-                            disable_web_page_preview=True,
-                        )
-                    except Exception:
-                        try:
-                            await bot.send_message(
-                                chat_id=uid, text=scout_msg,
-                                reply_markup=scout_kb, disable_web_page_preview=True,
-                            )
-                        except Exception as e:
-                            print(f"[SCANNER] scouted DM error uid={uid}: {e}", flush=True)
-                if alert_channel and score >= CH_SCOUTED_THR:
-                    channel_scout_kb = InlineKeyboardMarkup([
-                        [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
-                         InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
-                         InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
-                    ])
-                    try:
-                        await bot.send_message(
-                            chat_id=alert_channel, text=scout_msg,
-                            parse_mode="Markdown", reply_markup=channel_scout_kb,
-                            disable_web_page_preview=True,
-                        )
-                    except Exception as e:
-                        print(f"[SCANNER] scouted channel error ch={alert_channel}: {e}", flush=True)
-                if on_alert:
-                    try:
-                        await on_alert(bot, result)
-                    except Exception:
-                        pass
-
-        # ─── Send HOT alerts ────────────────────────────────────────────────
-        should_alert_hot = bool(hot_uids or alert_channel)
-
-        if should_alert_hot:
             _db.mark_scan_log_alerted(mint)
-
-            try:
-                msg = format_alert(result)[:4000]
-            except Exception as _fe:
-                print(f"[SCANNER] format_alert error for {sym}: {_fe}", flush=True)
-                continue
-            from telegram import InlineKeyboardMarkup, InlineKeyboardButton
-            kb  = InlineKeyboardMarkup([
+            scout_msg = format_scouted_alert(result)[:4000]
+            scout_kb = InlineKeyboardMarkup([
                 [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
                  InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
                  InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
@@ -824,32 +884,93 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                  InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
                  InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
             ])
-            for uid in hot_uids:
+            for uid in group["uids"]:
                 try:
                     await bot.send_message(
-                        chat_id=uid, text=msg,
-                        parse_mode="Markdown", reply_markup=kb,
-                        disable_web_page_preview=True
+                        chat_id=uid, text=scout_msg,
+                        parse_mode="Markdown", reply_markup=scout_kb,
+                        disable_web_page_preview=True,
                     )
-                except Exception as _e1:
-                    _e1s = str(_e1)
-                    if "Flood control" in _e1s or "Too Many Requests" in _e1s:
-                        import re as _re
-                        _wait = int((_re.search(r"Retry in (\d+)", _e1s) or [None, 5])[1])
-                        print(f"[SCANNER] flood control — waiting {_wait}s", flush=True)
-                        await asyncio.sleep(_wait + 1)
-                        try:
-                            await bot.send_message(chat_id=uid, text=msg, reply_markup=kb, disable_web_page_preview=True)
-                        except Exception as e:
-                            print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
-                    else:
-                        try:
-                            await bot.send_message(chat_id=uid, text=msg, reply_markup=kb, disable_web_page_preview=True)
-                        except Exception as e:
-                            print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
+                except Exception:
+                    try:
+                        await bot.send_message(
+                            chat_id=uid, text=scout_msg,
+                            reply_markup=scout_kb, disable_web_page_preview=True,
+                        )
+                    except Exception as e:
+                        print(f"[SCANNER] scouted DM error uid={uid}: {e}", flush=True)
+            continue
 
-            # Post to alert channel (URL buttons only — callback buttons don't work in channels)
-            if alert_channel and score >= CH_HOT_THR:
+        _db.mark_scan_log_alerted(mint)
+        try:
+            msg = format_alert(result)[:4000]
+        except Exception as _fe:
+            print(f"[SCANNER] format_alert error for {result.get('symbol', mint[:8])}: {_fe}", flush=True)
+            continue
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
+             InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
+             InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
+            [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+             InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
+             InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
+        ])
+        for uid in group["uids"]:
+            try:
+                await bot.send_message(
+                    chat_id=uid, text=msg,
+                    parse_mode="Markdown", reply_markup=kb,
+                    disable_web_page_preview=True,
+                )
+            except Exception as _e1:
+                _e1s = str(_e1)
+                if "Flood control" in _e1s or "Too Many Requests" in _e1s:
+                    import re as _re
+                    _wait = int((_re.search(r"Retry in (\d+)", _e1s) or [None, 5])[1])
+                    print(f"[SCANNER] flood control — waiting {_wait}s", flush=True)
+                    await asyncio.sleep(_wait + 1)
+                    try:
+                        await bot.send_message(chat_id=uid, text=msg, reply_markup=kb, disable_web_page_preview=True)
+                    except Exception as e:
+                        print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
+                else:
+                    try:
+                        await bot.send_message(chat_id=uid, text=msg, reply_markup=kb, disable_web_page_preview=True)
+                    except Exception as e:
+                        print(f"[SCANNER] DM send error uid={uid}: {e}", flush=True)
+
+    if selected_channel_alert and alert_channel:
+        channel_tier, channel_result = selected_channel_alert
+        mint = channel_result["mint"]
+        if channel_tier == "SCOUTED":
+            add_to_watchlist(mint, {
+                "name": channel_result["name"], "symbol": channel_result["symbol"],
+                "score": channel_result["total"], "mcap": channel_result.get("mcap", 0), "mint": mint,
+                "ts": time.time(),
+            })
+            _db.mark_scan_log_alerted(mint)
+            channel_msg = format_scouted_alert(channel_result)[:4000]
+            channel_kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
+                 InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
+                 InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
+            ])
+            try:
+                await bot.send_message(
+                    chat_id=alert_channel, text=channel_msg,
+                    parse_mode="Markdown", reply_markup=channel_kb,
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                print(f"[SCANNER] scouted channel error ch={alert_channel}: {e}", flush=True)
+        else:
+            _db.mark_scan_log_alerted(mint)
+            try:
+                channel_msg = format_alert(channel_result)[:4000]
+            except Exception as e:
+                print(f"[SCANNER] channel format error ch={alert_channel}: {e}", flush=True)
+                channel_msg = None
+            if channel_msg:
                 channel_kb = InlineKeyboardMarkup([
                     [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
                      InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
@@ -857,39 +978,32 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 ])
                 try:
                     await bot.send_message(
-                        chat_id=alert_channel, text=msg,
+                        chat_id=alert_channel, text=channel_msg,
                         parse_mode="Markdown", reply_markup=channel_kb,
-                        disable_web_page_preview=True
+                        disable_web_page_preview=True,
                     )
                 except Exception:
                     try:
                         await bot.send_message(
-                            chat_id=alert_channel, text=msg,
-                            reply_markup=channel_kb, disable_web_page_preview=True
+                            chat_id=alert_channel, text=channel_msg,
+                            reply_markup=channel_kb, disable_web_page_preview=True,
                         )
                     except Exception as e:
                         print(f"[SCANNER] channel send error ch={alert_channel}: {e}", flush=True)
 
-            # Trigger auto-buy callback
-            if on_alert:
-                try:
-                    await on_alert(bot, result)
-                except Exception:
-                    pass
-
-        # Trigger auto-buy independently for tokens that didn't fire a user alert
-        # (autobuy has its own min_score threshold checked in execute_auto_buy)
-        elif on_alert and not result.get("disqualified"):
-            # Require score >= minimum scouted threshold across all users before calling auto-buy
-            min_thr = min(
-                (settings_manager.get_user_settings(uid).get("alert_scouted_threshold", 35) for uid in chat_ids),
-                default=35,
-            )
-            if score >= min_thr:
-                try:
-                    await on_alert(bot, result)
-                except Exception:
-                    pass
+    if on_alert:
+        ordered_autobuy = sorted(
+            autobuy_targets.values(),
+            key=lambda g: g["result"].get("pair_created", 0),
+            reverse=True,
+        )
+        for group in ordered_autobuy:
+            try:
+                await on_alert(bot, group["result"], target_uids=sorted(group["uids"]))
+            except TypeError:
+                await on_alert(bot, group["result"])
+            except Exception:
+                pass
 
     # Log writes are now committed to SQLite directly in append_log; no flush needed.
 

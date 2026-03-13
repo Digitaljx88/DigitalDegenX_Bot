@@ -22,8 +22,9 @@ from pathlib import Path
 DB_PATH = Path(__file__).parent / "data" / "bot.db"
 
 _local = threading.local()
+_session_seen_tokens: set[str] = set()
 
-SEEN_TOKEN_TTL = 3600  # seconds — matches scanner.py constant
+SEEN_TOKEN_TTL = 3600  # legacy constant kept for backward compatibility
 
 
 # ── Connection management ──────────────────────────────────────────────────────
@@ -55,6 +56,12 @@ def _fetchone(sql: str, params: tuple = ()):
 def _fetchall(sql: str, params: tuple = ()):
     with _conn() as c:
         return c.execute(sql, params).fetchall()
+
+
+def _utc_day_start_ts(now_ts: float | None = None) -> float:
+    now = datetime.fromtimestamp(now_ts or time.time(), tz=timezone.utc)
+    day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
+    return day_start.timestamp()
 
 
 # ── Schema init ────────────────────────────────────────────────────────────────
@@ -135,7 +142,7 @@ def init():
                 PRIMARY KEY (uid, mint)
             );
 
-            -- Scanner: seen tokens (global, with TTL)
+            -- Scanner: legacy seen-token table retained for compatibility
             CREATE TABLE IF NOT EXISTS scanner_seen (
                 mint    TEXT PRIMARY KEY,
                 seen_at REAL NOT NULL
@@ -395,31 +402,57 @@ def set_auto_buy_config(uid: int, **fields):
     )
 
 
-def has_bought(uid: int, mint: str) -> bool:
+def has_bought(uid: int, mint: str, since_ts: float | None = None) -> bool:
+    """Return True if uid bought mint since since_ts. Defaults to current UTC day."""
+    if since_ts is None:
+        since_ts = _utc_day_start_ts()
     row = _fetchone(
-        "SELECT 1 FROM auto_buy_history WHERE uid=? AND mint=?", (uid, mint)
+        "SELECT 1 FROM auto_buy_history WHERE uid=? AND mint=? AND bought_at>=?",
+        (uid, mint, since_ts),
     )
     return row is not None
 
 
-def record_buy(uid: int, mint: str, sol_spent: float):
-    """Record that uid bought mint. Also increments spent_today."""
-    _exec(
-        "INSERT INTO auto_buy_history(uid, mint, bought_at, sol_spent) VALUES(?,?,?,?) "
-        "ON CONFLICT(uid, mint) DO NOTHING",
-        (uid, mint, time.time(), sol_spent),
+def record_buy(uid: int, mint: str, sol_spent: float, bought_at: float | None = None) -> bool:
+    """Record a buy once. Returns True when a new history row was inserted."""
+    ts = bought_at or time.time()
+    existing = _fetchone(
+        "SELECT bought_at FROM auto_buy_history WHERE uid=? AND mint=?",
+        (uid, mint),
     )
+    if existing:
+        if existing["bought_at"] >= _utc_day_start_ts(ts):
+            return False
+        _exec(
+            "UPDATE auto_buy_history SET bought_at=?, sol_spent=? WHERE uid=? AND mint=?",
+            (ts, sol_spent, uid, mint),
+        )
+    else:
+        _exec(
+            "INSERT INTO auto_buy_history(uid, mint, bought_at, sol_spent) VALUES(?,?,?,?)",
+            (uid, mint, ts, sol_spent),
+        )
     add_spent_today(uid, sol_spent)
+    return True
 
 
-def get_bought_list(uid: int) -> list[str]:
-    rows = _fetchall("SELECT mint FROM auto_buy_history WHERE uid=?", (uid,))
+def get_bought_list(uid: int, since_ts: float | None = None) -> list[str]:
+    """Return mints bought since since_ts. Defaults to the current UTC day."""
+    if since_ts is None:
+        since_ts = _utc_day_start_ts()
+    rows = _fetchall(
+        "SELECT mint FROM auto_buy_history WHERE uid=? AND bought_at>=?",
+        (uid, since_ts),
+    )
     return [r["mint"] for r in rows]
 
 
 def get_open_position_count(uid: int) -> int:
-    """Count active auto-sell positions (proxy for open positions)."""
-    row = _fetchone("SELECT COUNT(*) as n FROM auto_sell WHERE uid=?", (uid,))
+    """Count actual non-SOL holdings with non-zero balances."""
+    row = _fetchone(
+        "SELECT COUNT(*) as n FROM portfolios WHERE uid=? AND asset!='SOL' AND amount>0",
+        (uid,),
+    )
     return row["n"] if row else 0
 
 
@@ -451,24 +484,15 @@ def reset_day_if_needed(uid: int):
 # ── Scanner: seen tokens ───────────────────────────────────────────────────────
 
 def has_seen_token(mint: str) -> bool:
-    row = _fetchone("SELECT seen_at FROM scanner_seen WHERE mint=?", (mint,))
-    if not row:
-        return False
-    return (time.time() - row["seen_at"]) < SEEN_TOKEN_TTL
+    return mint in _session_seen_tokens
 
 
 def mark_seen_token(mint: str):
-    now = time.time()
-    # Prune expired entries and upsert in one transaction
-    with _conn() as c:
-        cutoff = now - SEEN_TOKEN_TTL
-        c.execute("DELETE FROM scanner_seen WHERE seen_at < ?", (cutoff,))
-        c.execute(
-            "INSERT INTO scanner_seen(mint, seen_at) VALUES(?,?) "
-            "ON CONFLICT(mint) DO UPDATE SET seen_at=excluded.seen_at",
-            (mint, now),
-        )
-        c.commit()
+    _session_seen_tokens.add(mint)
+
+
+def clear_seen_tokens():
+    _session_seen_tokens.clear()
 
 
 # ── Scanner: watchlist ─────────────────────────────────────────────────────────
@@ -531,6 +555,8 @@ def add_scan_target(uid: int):
 def remove_scan_target(uid: int):
     targets = [t for t in get_scan_targets() if t != uid]
     set_scan_targets(targets)
+    if not targets:
+        clear_seen_tokens()
 
 
 def get_user_min_score(uid: int) -> int:
