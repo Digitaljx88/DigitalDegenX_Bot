@@ -5,10 +5,9 @@ services:
       dockerfile: Dockerfile
     image: digitaldegenx-dashboard:latest
     restart: unless-stopped
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    network_mode: host
     environment:
-      BOT_API_BASE_URL: http://host.docker.internal:8080
+      BOT_API_BASE_URL: http://127.0.0.1:8080
       BOT_API_KEY: ${BOT_API_KEY}
       NODE_ENV: production
       PORT: "3000"

@@ -55,6 +55,7 @@ DEXSCREENER_TOKEN  = "https://api.dexscreener.com/latest/dex/tokens/"
 JUPITER_QUOTE_URL  = "https://lite-api.jup.ag/swap/v1/quote"
 JUPITER_SWAP_URL   = "https://lite-api.jup.ag/swap/v1/swap"
 SOL_MINT           = "So11111111111111111111111111111111111111112"
+DASHBOARD_URL      = getattr(_cfg, "DASHBOARD_URL", "https://www.digitaldegenx.online").rstrip("/")
 
 # Jito tip accounts (rotate randomly to spread load)
 JITO_TIP_ACCOUNTS = [
@@ -858,29 +859,13 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
     mode      = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
     targets   = _db.get_scan_targets()
     scan_lbl  = "🔕 Pause Scout" if uid in targets else "🔔 Start Scout"
-    pf_lbl    = "🟢 Pump Live ⚙️" if pf.is_subscribed(uid) else "🔴 Pump Live ⚙️"
-    pg_lbl    = "🟢 Pump Grad ⚙️" if pf.is_grad_subscribed(uid) else "🔴 Pump Grad ⚙️"
-    ab_cfg    = get_auto_buy(uid)
-    ab_lbl    = "🟢 Auto-Buy: ON" if ab_cfg.get("enabled") else "🔴 Auto-Buy: OFF"
-    gsl       = get_global_sl()
-    gsl_lbl   = "🟢 SL: ON" if gsl.get("enabled") else "🔴 SL: OFF"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("📊 Market",       callback_data="menu:market"),
-         InlineKeyboardButton("💰 Trade",        callback_data="menu:trade"),
-         InlineKeyboardButton("👜 Portfolio",    callback_data="menu:portfolio")],
-        [InlineKeyboardButton("🔍 Scout",         callback_data="menu:scout"),
-         InlineKeyboardButton("🤖 Auto-Sell",     callback_data="menu:autosell"),
-         InlineKeyboardButton(ab_lbl,             callback_data="menu:autobuy")],
         [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
          InlineKeyboardButton("👀 Scouted",       callback_data="scanner:watchlist"),
          InlineKeyboardButton("🏆 Top Scouts",    callback_data="scanner:topalerts")],
-        [InlineKeyboardButton("🌡️ Thresholds",     callback_data="scanner:set_threshold"),
-         InlineKeyboardButton("📢 Channels",      callback_data="channels:menu")],
-        [InlineKeyboardButton(pf_lbl,             callback_data="pumplive:menu")],
-        [InlineKeyboardButton(pg_lbl,             callback_data="pumpgrad:menu")],
-        [InlineKeyboardButton("👛 Wallet",        callback_data="wallet:menu"),
-         InlineKeyboardButton(gsl_lbl,            callback_data="gsl:menu")],
-        [InlineKeyboardButton(f"⚙️ Mode: {mode}", callback_data="menu:settings")],
+        [InlineKeyboardButton("⚙️ Settings",      callback_data="menu:settings"),
+         InlineKeyboardButton(f"Mode: {mode}",    callback_data="mode:paper" if get_mode(uid) == "live" else "mode:live")],
+        [InlineKeyboardButton("🌐 Open Dashboard", url=f"{DASHBOARD_URL}/scanner")],
     ])
 
 
@@ -3066,11 +3051,81 @@ async def do_trade_flow(msg, uid: int, context, action: str,
 
 async def show_main_menu(target, uid: int, edit=False):
     mode = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
-    text = f"*@DigitalDegenX\\_Bot*\n\nMode: *{mode}*\n\nChoose an option:"
+    text = (
+        f"*@DigitalDegenX\\_Bot*\n\n"
+        f"Mode: *{mode}*\n\n"
+        "Telegram is now optimized for alerts and settings.\n"
+        "Use the dashboard for trading, portfolio, analytics, wallet tools, and research."
+    )
     if edit:
         await target.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(uid))
     else:
         await target.reply_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(uid))
+
+
+def _dashboard_link(path: str = "/scanner") -> str:
+    path = path if path.startswith("/") else f"/{path}"
+    return f"{DASHBOARD_URL}{path}"
+
+
+def _dashboard_redirect_kb(path: str = "/scanner") -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🌐 Open Dashboard", url=_dashboard_link(path))],
+        [InlineKeyboardButton("⚙️ Telegram Settings", callback_data="menu:settings"),
+         InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
+    ])
+
+
+async def _send_dashboard_redirect(message, title: str, path: str, detail: str):
+    await message.reply_text(
+        f"{title}\n\n{detail}\n\nUse the dashboard for this workflow:\n{_dashboard_link(path)}",
+        parse_mode="Markdown",
+        reply_markup=_dashboard_redirect_kb(path),
+        disable_web_page_preview=True,
+    )
+
+
+async def dashboard_only_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    cmd = (update.message.text.split()[0].lstrip("/").split("@")[0] if update.message and update.message.text else "").lower()
+    mapping = {
+        "price": ("/scanner", "*Price lookup moved to the dashboard.*"),
+        "top": ("/top-alerts", "*Top-scout review moved to the dashboard.*"),
+        "buy": ("/scanner", "*Trading moved to the dashboard.*"),
+        "sell": ("/portfolio", "*Selling moved to the dashboard.*"),
+        "portfolio": ("/portfolio", "*Portfolio management moved to the dashboard.*"),
+        "trades": ("/trades", "*Trade Center moved to the dashboard.*"),
+        "research_log": ("/research", "*Research log downloads moved to the dashboard.*"),
+        "autosell": ("/portfolio", "*Auto-sell editing moved to the dashboard.*"),
+        "stoploss": ("/settings", "*Global stop-loss controls moved to the dashboard.*"),
+        "heatscore": ("/scanner", "*Manual scoring moved to the dashboard scanner.*"),
+        "presets": ("/settings", "*Preset management moved to the dashboard.*"),
+        "customize": ("/settings", "*Heat customization moved to the dashboard.*"),
+        "stats": ("/trades", "*Performance stats moved to the dashboard.*"),
+        "analytics": ("/trades", "*Analytics moved to the dashboard.*"),
+        "wallet": ("/portfolio", "*Wallet operations moved to the dashboard.*"),
+        "pumplive": ("/settings", "*Pump live subscriptions moved to the dashboard.*"),
+        "pumpgrad": ("/settings", "*Pump graduation subscriptions moved to the dashboard.*"),
+        "autobuy": ("/settings", "*Auto-buy controls moved to the dashboard.*"),
+        "pnl": ("/trades", "*P&L review moved to the dashboard.*"),
+        "wallets": ("/intel/wallets", "*Wallet intelligence moved to the dashboard.*"),
+        "narratives": ("/intel/narratives", "*Narrative intelligence moved to the dashboard.*"),
+        "cluster": ("/intel/cluster", "*Cluster analysis moved to the dashboard.*"),
+        "clustertop": ("/intel/cluster", "*Cluster leaderboards moved to the dashboard.*"),
+        "playbook": ("/intel/playbook", "*Launch playbook review moved to the dashboard.*"),
+        "discoverwallet": ("/intel/wallets", "*Wallet discovery moved to the dashboard.*"),
+        "bundle": ("/intel/bundle", "*Bundle analysis moved to the dashboard.*"),
+        "fingerprint": ("/intel/bundle", "*Wallet fingerprinting moved to the dashboard.*"),
+        "whalebuy": ("/intel/wallets", "*Whale tracking moved to the dashboard.*"),
+        "momentum": ("/scanner", "*Momentum review moved to the dashboard.*"),
+        "contract": ("/scanner", "*Contract lookup moved to the dashboard.*"),
+        "watchbuy": ("/scanner", "*Watch-buy workflows moved to the dashboard.*"),
+        "history": ("/history", "*History view moved to the dashboard.*"),
+        "launches": ("/top-alerts", "*Launch review moved to the dashboard.*"),
+        "watch": ("/portfolio", "*Portfolio watch management moved to the dashboard.*"),
+        "channels": ("/settings", "*Channel routing moved to the dashboard settings flow.*"),
+    }
+    path, title = mapping.get(cmd, ("/scanner", "*This workflow moved to the dashboard.*"))
+    await _send_dashboard_redirect(update.message, title, path, "Telegram now focuses on alerts and settings only.")
 
 
 async def _show_top(send_fn):
@@ -13345,38 +13400,14 @@ async def post_init(app):
     asyncio.create_task(_start_api_server(app))
 
     await app.bot.set_my_commands([
-        BotCommand("start",      "Launch the bot"),
-        BotCommand("menu",       "Show all options & buttons"),
-        BotCommand("price",      "Look up a token price"),
-        BotCommand("top",        "Our top scouted tokens ranked by MCap gain"),
-        BotCommand("buy",        "Buy a token (paper or live)"),
-        BotCommand("sell",       "Sell a token from your portfolio"),
-        BotCommand("portfolio",  "View your holdings & balances"),
-        BotCommand("trades",     "View trade history (filter: win/loss/symbol/date)"),
-        BotCommand("research_log", "Download research log CSV for data analysis"),
-        BotCommand("autosell",   "Configure auto-sell targets per token"),
-        BotCommand("stoploss",   "Global stop-loss settings (safety net)"),
-        BotCommand("mode",       "Switch between paper and live trading"),
-        BotCommand("scan",       "Resume live token alerts (always-on scanner)"),
+        BotCommand("start",      "Open alert controls and dashboard link"),
+        BotCommand("menu",       "Show alert controls and dashboard link"),
+        BotCommand("settings",   "Telegram settings and scanner controls"),
+        BotCommand("mode",       "Switch between paper and live mode"),
+        BotCommand("scan",       "Resume live token alerts"),
         BotCommand("stopscan",   "Pause your live token alerts"),
-        BotCommand("watchlist",  "Tokens scoring 50–69 (worth watching)"),
-        BotCommand("heatscore",  "Heat score any token on demand"),
-        BotCommand("topalerts",  "Best scanner alerts from today"),
-        BotCommand("settings",   "View & adjust heat score parameters (1-100)"),
-        BotCommand("presets",    "Quick-swap between trading style presets"),
-        BotCommand("customize",  "Fine-tune individual heat score settings"),
-        BotCommand("stats",      "Scout performance analytics by alert tier"),
-        BotCommand("analytics",  "Trade stats, scanner performance & log"),
-        BotCommand("wallet",     "Manage your Solana wallet"),
-        BotCommand("pumplive",   "Toggle live pump.fun launch notifications"),
-        BotCommand("pumpgrad",   "Alerts when pump.fun tokens hit 100% bonding curve"),
-        BotCommand("autobuy",    "Auto-buy tokens when scanner fires alerts"),
-        BotCommand("pnl",        "View realized & unrealized P&L summary"),
-        BotCommand("cluster",    "Co-investment cluster map for a token"),
-        BotCommand("clustertop", "Top co-investing wallet pairs ever"),
-        BotCommand("playbook",   "Predictive launch archetype win rates"),
-        BotCommand("wallets",    "Auto-tracked wallet intelligence & win rates"),
-        BotCommand("narratives", "Narrative performance stats & trending themes"),
+        BotCommand("watchlist",  "Scouted watchlist summary"),
+        BotCommand("topalerts",  "Best alerts from today"),
     ])
 
 
@@ -13393,47 +13424,23 @@ if __name__ == "__main__":
     # Slash commands
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("menu",       start))
-    app.add_handler(CommandHandler("price",      cmd_price))
-    app.add_handler(CommandHandler("top",        cmd_top))
-    app.add_handler(CommandHandler("buy",        cmd_buy))
-    app.add_handler(CommandHandler("sell",       cmd_sell))
-    app.add_handler(CommandHandler("portfolio",  cmd_portfolio))
-    app.add_handler(CommandHandler("trades",     cmd_trades_history))
-    app.add_handler(CommandHandler("research_log", cmd_research_log))
-    app.add_handler(CommandHandler("autosell",   cmd_autosell))
     app.add_handler(CommandHandler("mode",       cmd_mode))
     app.add_handler(CommandHandler("scan",       cmd_scan))
     app.add_handler(CommandHandler("stopscan",   cmd_stopscan))
     app.add_handler(CommandHandler("watchlist",  cmd_watchlist))
-    app.add_handler(CommandHandler("heatscore",  cmd_heatscore))
     app.add_handler(CommandHandler("topalerts",  cmd_topalerts))
     app.add_handler(CommandHandler("settings",   cmd_settings))
-    app.add_handler(CommandHandler("presets",    cmd_presets))
-    app.add_handler(CommandHandler("customize",  cmd_customize))
-    app.add_handler(CommandHandler("stats",      cmd_stats))
-    app.add_handler(CommandHandler("wallet",     cmd_wallet))
-    app.add_handler(CommandHandler("pumplive",   cmd_pumplive))
-    app.add_handler(CommandHandler("pumpgrad",   cmd_pumpgrad))
-    app.add_handler(CommandHandler("watch",      cmd_portfolio_watch))
-    app.add_handler(CommandHandler("launches",   cmd_launches))
-    app.add_handler(CommandHandler("channels",   cmd_channels))
-    app.add_handler(CommandHandler("whalebuy",        cmd_whalebuy))
-    app.add_handler(CommandHandler("momentum",        cmd_momentum))
-    app.add_handler(CommandHandler("contract",        cmd_contract))
-    app.add_handler(CommandHandler("discoverwallet",  cmd_discoverwallet))
-    app.add_handler(CommandHandler("bundle",          cmd_bundle))
-    app.add_handler(CommandHandler("fingerprint",     cmd_fingerprint))
-    app.add_handler(CommandHandler("cluster",         cmd_cluster))
-    app.add_handler(CommandHandler("clustertop",      cmd_clustertop))
-    app.add_handler(CommandHandler("playbook",        cmd_playbook))
-    app.add_handler(CommandHandler("analytics",  cmd_analytics))
-    app.add_handler(CommandHandler("autobuy",    cmd_autobuy))
-    app.add_handler(CommandHandler("pnl",        cmd_pnl))
-    app.add_handler(CommandHandler("stoploss",   cmd_stoploss))
-    app.add_handler(CommandHandler("wallets",    cmd_wallets_intel))
-    app.add_handler(CommandHandler("narratives", cmd_narratives_intel))
-    app.add_handler(CommandHandler("watchbuy",   cmd_watchbuy))
-    app.add_handler(CommandHandler("history",    cmd_history))
+    app.add_handler(CommandHandler(
+        [
+            "price", "top", "buy", "sell", "portfolio", "trades", "research_log",
+            "autosell", "stoploss", "heatscore", "presets", "customize", "stats",
+            "wallet", "pumplive", "pumpgrad", "watch", "launches", "channels",
+            "whalebuy", "momentum", "contract", "discoverwallet", "bundle",
+            "fingerprint", "cluster", "clustertop", "playbook", "analytics",
+            "autobuy", "pnl", "wallets", "narratives", "watchbuy", "history",
+        ],
+        dashboard_only_command,
+    ))
 
     # Button callbacks
     app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))

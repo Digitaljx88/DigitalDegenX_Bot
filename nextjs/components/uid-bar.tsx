@@ -1,56 +1,42 @@
 "use client";
 
-import { useEffect, useState, useTransition } from "react";
-import { usePathname, useRouter, useSearchParams } from "next/navigation";
-
-const STORAGE_KEY = "digitaldegenx_uid";
+import { useState, useTransition } from "react";
+import { useActiveUid } from "@/lib/active-uid";
 
 export function UidBar() {
-  const pathname = usePathname();
-  const router = useRouter();
-  const searchParams = useSearchParams();
   const [isPending, startTransition] = useTransition();
-  const currentUid = searchParams.get("uid") || "";
+  const { uid, error, setUid, clearUid } = useActiveUid();
+  const currentUid = uid ? String(uid) : "";
   const [draftUid, setDraftUid] = useState("");
-
-  useEffect(() => {
-    if (currentUid) {
-      localStorage.setItem(STORAGE_KEY, currentUid);
-      return;
-    }
-    const savedUid = localStorage.getItem(STORAGE_KEY);
-    if (savedUid) {
-      const next = new URLSearchParams(searchParams.toString());
-      next.set("uid", savedUid);
-      startTransition(() => {
-        router.replace(`${pathname}?${next.toString()}`);
-      });
-    }
-  }, [currentUid, pathname, router, searchParams]);
+  const [message, setMessage] = useState("");
 
   function applyUid() {
-    const next = new URLSearchParams(searchParams.toString());
     const value = draftUid.trim();
-    if (value) {
-      next.set("uid", value);
-      localStorage.setItem(STORAGE_KEY, value);
-    } else {
+    if (!value) {
       return;
     }
     startTransition(() => {
-      const qs = next.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname);
+      void setUid(value)
+        .then((nextUid) => {
+          setDraftUid(nextUid ? String(nextUid) : "");
+          setMessage(nextUid ? `UID ${nextUid} active` : "UID saved");
+        })
+        .catch((err) => {
+          setMessage(err instanceof Error ? err.message : "Failed to save UID");
+        });
     });
   }
 
   function clearUid() {
-    const next = new URLSearchParams(searchParams.toString());
-    next.delete("uid");
-    localStorage.removeItem(STORAGE_KEY);
-    setDraftUid("");
     startTransition(() => {
-      const qs = next.toString();
-      router.replace(qs ? `${pathname}?${qs}` : pathname);
+      void clearUid()
+        .then(() => {
+          setDraftUid("");
+          setMessage("Dashboard UID cleared");
+        })
+        .catch((err) => {
+          setMessage(err instanceof Error ? err.message : "Failed to clear UID");
+        });
     });
   }
 
@@ -59,8 +45,10 @@ export function UidBar() {
       <div>
         <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted-foreground)]">Active Telegram User</div>
         <div className="mt-1 text-sm text-white">
-          {searchParams.get("uid") ? `UID ${searchParams.get("uid")}` : "Set your Telegram user ID to unlock portfolio, trades, and controls."}
+          {currentUid ? `UID ${currentUid}` : "Set your Telegram user ID to unlock portfolio, trades, and controls."}
         </div>
+        {message ? <div className="mt-2 text-xs text-[var(--muted-foreground)]">{message}</div> : null}
+        {error ? <div className="mt-2 text-xs text-red-200">{error}</div> : null}
       </div>
       <div className="flex flex-col gap-2 sm:flex-row">
         <input

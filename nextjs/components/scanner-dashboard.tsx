@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useEffectEvent, useMemo, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type ScannerFeedItem = {
   mint: string;
@@ -22,6 +22,11 @@ type ScannerFeedResponse = {
   items: ScannerFeedItem[];
 };
 
+type ModeResponse = {
+  uid: number;
+  mode: "paper" | "live";
+};
+
 function formatMcap(value?: number) {
   if (!value) return "n/a";
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
@@ -30,13 +35,14 @@ function formatMcap(value?: number) {
 }
 
 export function ScannerDashboard() {
-  const searchParams = useSearchParams();
-  const uid = Number(searchParams.get("uid") || 0);
+  const { uid } = useActiveUid();
   const [feed, setFeed] = useState<ScannerFeedItem[]>([]);
   const [lastUpdated, setLastUpdated] = useState<string>("never");
   const [error, setError] = useState<string>("");
+  const [message, setMessage] = useState<string>("");
   const [submittingMint, setSubmittingMint] = useState<string>("");
   const [buyAmount, setBuyAmount] = useState("0.1");
+  const [tradeMode, setTradeMode] = useState<"paper" | "live">("paper");
 
   const loadFeed = useEffectEvent(async () => {
     try {
@@ -55,6 +61,22 @@ export function ScannerDashboard() {
     return () => window.clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    async function loadMode() {
+      if (!uid) {
+        setTradeMode("paper");
+        return;
+      }
+      try {
+        const data = await apiFetch<ModeResponse>("/mode", { query: { uid } });
+        setTradeMode(data.mode || "paper");
+      } catch {
+        setTradeMode("paper");
+      }
+    }
+    void loadMode();
+  }, [uid]);
+
   const newest = useMemo(() => feed.slice(0, 12), [feed]);
 
   async function quickBuy(mint: string) {
@@ -70,12 +92,14 @@ export function ScannerDashboard() {
           uid,
           mint,
           sol_amount: Number(buyAmount || 0),
-          mode: "paper",
+          mode: tradeMode,
         }),
       });
       setError("");
+      setMessage(`${tradeMode === "paper" ? "Paper" : "Live"} buy submitted for ${mint.slice(0, 8)}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Buy failed");
+      setMessage("");
     } finally {
       setSubmittingMint("");
     }
@@ -89,6 +113,14 @@ export function ScannerDashboard() {
             The dashboard prefers the freshest qualifying tokens and lets you paper-buy directly from the feed.
           </div>
           <div className="flex items-center gap-2">
+            <select
+              value={tradeMode}
+              onChange={(event) => setTradeMode(event.target.value as "paper" | "live")}
+              className="rounded-full border border-white/10 bg-black/25 px-4 py-2 text-sm text-white outline-none"
+            >
+              <option value="paper">Paper mode</option>
+              <option value="live">Live mode</option>
+            </select>
             <input
               value={buyAmount}
               onChange={(event) => setBuyAmount(event.target.value)}
@@ -98,6 +130,7 @@ export function ScannerDashboard() {
           </div>
         </div>
         {error ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
+        {message ? <div className="mb-4 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{message}</div> : null}
         <div className="overflow-hidden rounded-2xl border border-white/8">
           <table className="min-w-full divide-y divide-white/8 text-left text-sm">
             <thead className="bg-white/4 text-[var(--muted-foreground)]">
@@ -132,7 +165,7 @@ export function ScannerDashboard() {
                       disabled={!uid || !!item.dq || submittingMint === item.mint}
                       className="rounded-full bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-foreground)] disabled:opacity-50"
                     >
-                      {submittingMint === item.mint ? "Buying..." : "Paper Buy"}
+                      {submittingMint === item.mint ? "Buying..." : tradeMode === "paper" ? "Paper Buy" : "Live Buy"}
                     </button>
                   </td>
                 </tr>

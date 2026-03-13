@@ -1,9 +1,9 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type AutoBuyConfig = {
   enabled?: boolean;
@@ -24,11 +24,16 @@ type SettingsResponse = {
   settings: Record<string, number | string | boolean>;
 };
 
+type ModeResponse = {
+  uid: number;
+  mode: "paper" | "live";
+};
+
 export function SettingsDashboard() {
-  const searchParams = useSearchParams();
-  const uid = Number(searchParams.get("uid") || 0);
+  const { uid } = useActiveUid();
   const [autobuy, setAutobuy] = useState<AutoBuyConfig>({});
   const [settings, setSettings] = useState<Record<string, number | string | boolean>>({});
+  const [mode, setMode] = useState<"paper" | "live">("paper");
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -40,12 +45,14 @@ export function SettingsDashboard() {
         return;
       }
       try {
-        const [autobuyRes, settingsRes] = await Promise.all([
+        const [autobuyRes, settingsRes, modeRes] = await Promise.all([
           apiFetch<AutoBuyConfig>(`/autobuy/${uid}`),
           apiFetch<SettingsResponse>(`/settings/${uid}`),
+          apiFetch<ModeResponse>(`/mode`, { query: { uid } }),
         ]);
         setAutobuy(autobuyRes);
         setSettings(settingsRes.settings || {});
+        setMode(modeRes.mode || "paper");
         setError("");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load settings");
@@ -53,6 +60,20 @@ export function SettingsDashboard() {
     }
     load();
   }, [uid]);
+
+  async function saveMode(nextMode: "paper" | "live") {
+    try {
+      const response = await apiFetch<ModeResponse>("/mode", {
+        method: "POST",
+        body: JSON.stringify({ uid, mode: nextMode }),
+      });
+      setMode(response.mode || nextMode);
+      setMessage(`Trading mode set to ${response.mode || nextMode}.`);
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to update mode");
+    }
+  }
 
   async function saveAutobuy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -100,6 +121,30 @@ export function SettingsDashboard() {
 
   return (
     <div className="grid gap-6 xl:grid-cols-2">
+      <Panel title="Mode" subtitle="This controls what Telegram /portfolio shows and which trading path the bot treats as active.">
+        <div className="space-y-4">
+          <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-[var(--muted-foreground)]">
+            Current mode: <span className="font-medium text-white">{mode === "paper" ? "Paper" : "Live"}</span>
+          </div>
+          <div className="flex gap-3">
+            <button
+              type="button"
+              onClick={() => saveMode("paper")}
+              className="rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--accent-foreground)]"
+            >
+              Use Paper
+            </button>
+            <button
+              type="button"
+              onClick={() => saveMode("live")}
+              className="rounded-full border border-white/10 px-4 py-2 text-sm text-[var(--muted-foreground)]"
+            >
+              Use Live
+            </button>
+          </div>
+        </div>
+      </Panel>
+
       <Panel title="Auto-Buy" subtitle="Tune the key automation controls from the browser.">
         <form className="space-y-4" onSubmit={saveAutobuy}>
           <label className="flex items-center gap-3 text-sm text-white">

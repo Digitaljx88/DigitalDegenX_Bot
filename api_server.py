@@ -35,6 +35,7 @@ import os
 import time
 import asyncio
 import secrets
+from pathlib import Path
 from typing import Optional, Union
 
 from fastapi import FastAPI, HTTPException, Security, Depends
@@ -44,6 +45,7 @@ from pydantic import BaseModel
 import db as _db
 import settings_manager as sm
 import trade_center as tc
+import research_logger
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -154,6 +156,11 @@ class AutoBuyUpdate(BaseModel):
 class SettingsUpdate(BaseModel):
     settings: dict[str, Union[int, float, bool, str]]
 
+
+class ModeUpdate(BaseModel):
+    uid: int
+    mode: str
+
 # ─── Bot reference (set from bot.py after startup) ───────────────────────────
 _app_ref = None   # telegram Application instance
 
@@ -161,6 +168,25 @@ def set_bot_app(application):
     """Called from bot.py post_init to give us a handle to the running bot."""
     global _app_ref
     _app_ref = application
+
+
+def _derive_buy_price_usd(sol_amount: float, out_raw: int, decimals: int = 6) -> float:
+    if sol_amount <= 0 or out_raw <= 0:
+        return 0.0
+    try:
+        import pumpfun as _pf_mod
+        sol_price_usd = _pf_mod.get_sol_price() or 150.0
+    except Exception:
+        sol_price_usd = 150.0
+    ui_tokens = out_raw / (10 ** decimals)
+    return ((sol_amount * sol_price_usd) / ui_tokens) if ui_tokens > 0 else 0.0
+
+
+async def _fetch_pair_for_mint(loop, bot_mod, mint: str):
+    try:
+        return await loop.run_in_executor(None, bot_mod.fetch_sol_pair, mint)
+    except Exception:
+        return None
 
 # ─── Endpoints ────────────────────────────────────────────────────────────────
 
@@ -180,6 +206,31 @@ async def get_portfolio(uid: int):
     b = _bot()
     portfolio = b.get_portfolio(uid)
     return {"uid": uid, "portfolio": portfolio}
+
+
+@app.get("/mode", dependencies=[Depends(verify_key)])
+async def get_user_mode(uid: int):
+    """Return the current trading mode for a user."""
+    b = _bot()
+    return {"uid": uid, "mode": b.get_mode(uid)}
+
+
+@app.post("/mode", dependencies=[Depends(verify_key)])
+async def set_user_mode(req: ModeUpdate):
+    """Update the user's current trading mode."""
+    b = _bot()
+    chosen = str(req.mode or "").strip().lower()
+    if chosen not in {"paper", "live"}:
+        raise HTTPException(status_code=400, detail="mode must be 'paper' or 'live'")
+    if chosen == "live" and not getattr(b, "WALLET_PRIVATE_KEY", None):
+        raise HTTPException(status_code=400, detail="Live mode requires a configured wallet")
+
+    prev = b.get_mode(req.uid)
+    b.user_modes[req.uid] = chosen
+    b._save_user_modes()
+    if chosen == "paper" and prev != "paper":
+        b.reset_portfolio(req.uid)
+    return {"uid": req.uid, "mode": chosen}
 
 
 @app.get("/wallet", dependencies=[Depends(verify_key)])
@@ -212,10 +263,40 @@ async def scanner_watchlist():
     return {"count": len(items), "tokens": items}
 
 
+@app.get("/research-log", dependencies=[Depends(verify_key)])
+async def get_research_log(limit: int = 100):
+    """Return recent research log entries plus export metadata."""
+    records = research_logger.load_research_log_json() or []
+    trimmed = list(reversed(records[-max(1, min(limit, 500)):]))
+    csv_path = Path(research_logger.export_csv_path())
+    return {
+        "count": len(trimmed),
+        "items": trimmed,
+        "csv_filename": csv_path.name,
+    }
+
+
+@app.get("/history", dependencies=[Depends(verify_key)])
+async def get_history(uid: int, limit: int = 50, mode: Optional[str] = None):
+    """Return closed-trade history for a user."""
+    rows = _db.get_closed_trades(uid, limit=max(1, min(limit, 500)), mode=mode)
+    return {"uid": uid, "count": len(rows), "closed_trades": rows}
+
+
 @app.get("/scanner/feed", dependencies=[Depends(verify_key)])
 async def scanner_feed(limit: int = 50):
     """Return the rolling scanner feed, newest first."""
-    items = _db.get_scan_log(limit=max(1, min(limit, 500)))
+    raw_items = _db.get_scan_log(limit=max(1, min(limit * 5, 500)))
+    seen_mints: set[str] = set()
+    items: list[dict] = []
+    for item in raw_items:
+        mint = str(item.get("mint") or "").strip()
+        if not mint or mint in seen_mints:
+            continue
+        seen_mints.add(mint)
+        items.append(item)
+        if len(items) >= limit:
+            break
     return {"count": len(items), "items": items}
 
 
@@ -275,8 +356,20 @@ async def execute_buy(req: BuyRequest):
         portfolio["SOL"]      = sol_bal - req.sol_amount
         portfolio[req.mint]   = portfolio.get(req.mint, 0) + out_raw
         b.update_portfolio(req.uid, portfolio)
-        b.log_trade(req.uid, "paper", "buy", req.mint, quote.get("outputMint", req.mint)[:8],
-                    sol_amount=req.sol_amount, token_amount=out_raw)
+        pair = await _fetch_pair_for_mint(loop, b, req.mint)
+        symbol = (pair or {}).get("baseToken", {}).get("symbol") or quote.get("outputMint", req.mint)[:8]
+        price_usd = float((pair or {}).get("priceUsd", 0) or 0) or _derive_buy_price_usd(req.sol_amount, out_raw)
+        b.setup_auto_sell(req.uid, req.mint, symbol, price_usd, out_raw, 6, sol_amount=req.sol_amount)
+        b.log_trade(
+            req.uid,
+            "paper",
+            "buy",
+            req.mint,
+            symbol,
+            sol_amount=req.sol_amount,
+            token_amount=out_raw,
+            price_usd=price_usd,
+        )
         return {"mode": "paper", "sol_spent": req.sol_amount, "tokens_received": out_raw,
                 "new_sol_balance": portfolio["SOL"]}
 
@@ -293,6 +386,26 @@ async def execute_buy(req: BuyRequest):
         if "ERROR" in str(sig) or "error" in str(sig).lower():
             raise HTTPException(status_code=502, detail=f"Swap failed: {sig}")
         out_raw = int((quote or {}).get("outAmount", 0))
+        pair = await _fetch_pair_for_mint(loop, b, req.mint)
+        symbol = (pair or {}).get("baseToken", {}).get("symbol") or req.mint[:8]
+        price_usd = float((pair or {}).get("priceUsd", 0) or 0) or _derive_buy_price_usd(req.sol_amount, out_raw)
+        async with b._portfolio_lock(req.uid):
+            portfolio = b.get_portfolio(req.uid)
+            portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - req.sol_amount)
+            portfolio[req.mint] = portfolio.get(req.mint, 0) + out_raw
+            b.update_portfolio(req.uid, portfolio)
+        b.setup_auto_sell(req.uid, req.mint, symbol, price_usd, out_raw, 6, sol_amount=req.sol_amount)
+        b.log_trade(
+            req.uid,
+            "live",
+            "buy",
+            req.mint,
+            symbol,
+            sol_amount=req.sol_amount,
+            token_amount=out_raw,
+            price_usd=price_usd,
+            tx_sig=sig,
+        )
         return {
             "mode":             "live",
             "tx_sig":           sig,
@@ -350,6 +463,7 @@ async def execute_sell(req: SellRequest):
     else:
         pubkey   = b.get_wallet_pubkey()
         accounts = b.get_token_accounts(pubkey) if pubkey else []
+        accounts = accounts or []
         held     = next((a for a in accounts if a["mint"] == req.mint), None)
         if not held:
             raise HTTPException(status_code=400, detail="Token not in live wallet")
@@ -362,6 +476,41 @@ async def execute_sell(req: SellRequest):
         if "ERROR" in str(sig) or "error" in str(sig).lower():
             raise HTTPException(status_code=502, detail=f"Swap failed: {sig}")
         sol_recv = int((quote or {}).get("outAmount", 0)) / 1e9
+        pair = await _fetch_pair_for_mint(loop, b, req.mint)
+        symbol = (pair or {}).get("baseToken", {}).get("symbol") or req.mint[:8]
+        price_usd = float((pair or {}).get("priceUsd", 0) or 0)
+        as_cfg = b._db.get_auto_sell(req.uid, req.mint) or {}
+        buy_price = as_cfg.get("buy_price_usd") or b._get_buy_price(req.uid, req.mint)
+        exit_metrics = b.build_exit_trade_metrics(
+            req.uid,
+            req.mint,
+            price_usd,
+            reason="manual",
+            as_cfg=as_cfg,
+        )
+        async with b._portfolio_lock(req.uid):
+            portfolio = b.get_portfolio(req.uid)
+            portfolio["SOL"] = portfolio.get("SOL", 0) + sol_recv
+            current = portfolio.get(req.mint, 0)
+            if sell_raw >= current:
+                portfolio.pop(req.mint, None)
+                b.remove_auto_sell(req.uid, req.mint)
+            else:
+                portfolio[req.mint] = current - sell_raw
+            b.update_portfolio(req.uid, portfolio)
+        b.log_trade(
+            req.uid,
+            "live",
+            "sell",
+            req.mint,
+            symbol,
+            sol_received=sol_recv,
+            token_amount=sell_raw,
+            price_usd=price_usd,
+            buy_price_usd=buy_price,
+            tx_sig=sig,
+            **exit_metrics,
+        )
         return {
             "mode":         "live",
             "tx_sig":       sig,
@@ -436,6 +585,68 @@ async def get_trade_weekly_report(uid: int, days: int = 7, filter_spec: Optional
         "window_days": max(1, min(days, 30)),
         **report,
     }
+
+
+@app.get("/intel/wallets", dependencies=[Depends(verify_key)])
+async def get_wallet_intel(limit: int = 50):
+    import intelligence_tracker as intel
+
+    wallets = []
+    for address, record in intel.get_auto_tracked_wallets().items():
+        row = dict(record)
+        row["address"] = address
+        wallets.append(row)
+    wallets.sort(key=lambda row: (-float(row.get("reputation", 0) or 0), -int(row.get("appearances", 0) or 0)))
+    return {"count": len(wallets), "wallets": wallets[: max(1, min(limit, 200))]}
+
+
+@app.get("/intel/narratives", dependencies=[Depends(verify_key)])
+async def get_narrative_intel():
+    import intelligence_tracker as intel
+
+    items = []
+    for name, record in intel.get_narrative_stats().items():
+        row = dict(record)
+        row["name"] = name
+        items.append(row)
+    items.sort(key=lambda row: (-float(row.get("trending_score", 0) or 0), -float(row.get("win_rate", 0) or 0)))
+    return {"count": len(items), "narratives": items}
+
+
+@app.get("/intel/discovery", dependencies=[Depends(verify_key)])
+async def get_wallet_discovery(limit: int = 20):
+    import wallet_discovery
+
+    rows = wallet_discovery.get_top_discovered(limit=max(1, min(limit, 100))) or []
+    return {"count": len(rows), "wallets": rows}
+
+
+@app.get("/intel/clusters", dependencies=[Depends(verify_key)])
+async def get_cluster_intel(limit: int = 20):
+    import wallet_cluster
+
+    top_pairs = wallet_cluster.get_global_top_clusters(limit=max(1, min(limit, 100))) or []
+    cluster_log = wallet_cluster.get_cluster_log(limit=max(1, min(limit, 100))) or []
+    return {
+        "count": len(top_pairs),
+        "top_pairs": top_pairs,
+        "recent_events": cluster_log,
+    }
+
+
+@app.get("/intel/bundles", dependencies=[Depends(verify_key)])
+async def get_bundle_intel(limit: int = 20):
+    import wallet_fingerprint
+
+    rows = wallet_fingerprint.get_bundle_log(limit=max(1, min(limit, 100))) or []
+    return {"count": len(rows), "events": rows}
+
+
+@app.get("/intel/playbook", dependencies=[Depends(verify_key)])
+async def get_playbook_intel():
+    import launch_predictor
+
+    return launch_predictor.get_playbook_summary()
 
 
 @app.get("/autobuy/{uid}", dependencies=[Depends(verify_key)])

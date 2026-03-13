@@ -1,13 +1,31 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type PortfolioResponse = {
   uid: number;
   portfolio: Record<string, number>;
+};
+
+type WalletToken = {
+  mint: string;
+  amount: number;
+  ui_amount?: number;
+  symbol?: string;
+};
+
+type WalletResponse = {
+  pubkey: string;
+  sol: number;
+  tokens: WalletToken[];
+};
+
+type ModeResponse = {
+  uid: number;
+  mode: "paper" | "live";
 };
 
 async function fetchPortfolioFor(uid: number) {
@@ -15,9 +33,10 @@ async function fetchPortfolioFor(uid: number) {
 }
 
 export function PortfolioDashboard() {
-  const searchParams = useSearchParams();
-  const uid = Number(searchParams.get("uid") || 0);
+  const { uid } = useActiveUid();
   const [portfolio, setPortfolio] = useState<Record<string, number>>({});
+  const [wallet, setWallet] = useState<WalletResponse | null>(null);
+  const [mode, setMode] = useState<"paper" | "live">("paper");
   const [error, setError] = useState("");
   const [sellingMint, setSellingMint] = useState("");
 
@@ -25,11 +44,18 @@ export function PortfolioDashboard() {
     async function loadPortfolio() {
       if (!uid) {
         setPortfolio({});
+        setWallet(null);
         return;
       }
       try {
-        const data = await fetchPortfolioFor(uid);
-        setPortfolio(data.portfolio || {});
+        const [portfolioRes, walletRes, modeRes] = await Promise.all([
+          fetchPortfolioFor(uid),
+          apiFetch<WalletResponse>("/wallet"),
+          apiFetch<ModeResponse>("/mode", { query: { uid } }),
+        ]);
+        setPortfolio(portfolioRes.portfolio || {});
+        setWallet(walletRes);
+        setMode(modeRes.mode || "paper");
         setError("");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load portfolio");
@@ -45,8 +71,14 @@ export function PortfolioDashboard() {
         method: "POST",
         body: JSON.stringify({ uid, mint, pct, mode: "paper" }),
       });
-      const data = await fetchPortfolioFor(uid);
-      setPortfolio(data.portfolio || {});
+      const [portfolioRes, walletRes, modeRes] = await Promise.all([
+        fetchPortfolioFor(uid),
+        apiFetch<WalletResponse>("/wallet"),
+        apiFetch<ModeResponse>("/mode", { query: { uid } }),
+      ]);
+      setPortfolio(portfolioRes.portfolio || {});
+      setWallet(walletRes);
+      setMode(modeRes.mode || "paper");
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sell failed");
@@ -66,11 +98,19 @@ export function PortfolioDashboard() {
   }
 
   const entries = Object.entries(portfolio || {});
+  const liveTokens = (wallet?.tokens || []).filter((token) => Number(token.ui_amount || token.amount || 0) > 0);
 
   return (
     <div className="space-y-6">
-      <Panel title="Portfolio" subtitle="Current paper balances with quick sell controls for held tokens.">
+      <Panel
+        title="Portfolio"
+        subtitle={`Telegram mode is currently ${mode === "paper" ? "Paper" : "Live"}. Telegram /portfolio follows that mode, while this page shows both paper balances and live wallet holdings.`}
+      >
         {error ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
+        <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-[var(--muted-foreground)]">
+          Current mode: <span className="font-medium text-white">{mode === "paper" ? "Paper Portfolio" : "Live Wallet"}</span>
+        </div>
+        <div className="mb-3 text-sm font-medium text-white">Paper Portfolio</div>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {entries.map(([asset, amount]) => (
             <div key={asset} className="rounded-2xl border border-white/8 bg-black/10 p-4">
@@ -91,6 +131,23 @@ export function PortfolioDashboard() {
                   ))}
                 </div>
               ) : null}
+            </div>
+          ))}
+        </div>
+        <div className="mt-6 mb-3 text-sm font-medium text-white">Live Wallet</div>
+        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
+            <div className="text-sm text-[var(--muted-foreground)]">Wallet SOL</div>
+            <div className="mt-2 text-2xl font-semibold text-white">{Number(wallet?.sol || 0).toLocaleString()}</div>
+            {wallet?.pubkey ? <div className="mt-2 text-xs text-[var(--muted-foreground)]">{wallet.pubkey}</div> : null}
+          </div>
+          {liveTokens.map((token) => (
+            <div key={token.mint} className="rounded-2xl border border-white/8 bg-black/10 p-4">
+              <div className="text-sm text-[var(--muted-foreground)]">{token.symbol || token.mint.slice(0, 8)}</div>
+              <div className="mt-2 text-2xl font-semibold text-white">
+                {Number(token.ui_amount || token.amount || 0).toLocaleString()}
+              </div>
+              <div className="mt-2 text-xs text-[var(--muted-foreground)]">{token.mint}</div>
             </div>
           ))}
         </div>

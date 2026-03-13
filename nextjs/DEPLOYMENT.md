@@ -90,7 +90,7 @@ Your bot API should only listen on localhost:
 python3 -m uvicorn api_server:app --host 127.0.0.1 --port 8080
 ```
 
-That keeps it private while the dashboard talks to it through `host.docker.internal`.
+That keeps it private while the dashboard talks to it over localhost using host networking.
 
 ## Recommended Follow-Up
 

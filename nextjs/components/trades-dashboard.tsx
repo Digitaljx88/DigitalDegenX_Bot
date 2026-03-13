@@ -1,9 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useSearchParams } from "next/navigation";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type TradeRow = {
   ts?: number;
@@ -130,8 +130,7 @@ function CohortList({
 }
 
 export function TradesDashboard() {
-  const searchParams = useSearchParams();
-  const uid = Number(searchParams.get("uid") || 0);
+  const { uid } = useActiveUid();
   const [filter, setFilter] = useState("all");
   const [trades, setTrades] = useState<TradeRow[]>([]);
   const [stats, setStats] = useState<TradeStatsResponse["summary"] | null>(null);

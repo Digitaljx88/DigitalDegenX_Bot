@@ -15,8 +15,12 @@ function HeaderControls() {
       <nav className="flex flex-wrap gap-3">
         <NavLink href="/" label="Overview" />
         <NavLink href="/scanner" label="Scanner" />
+        <NavLink href="/watchlist" label="Watchlist" />
+        <NavLink href="/top-alerts" label="Top Alerts" />
         <NavLink href="/trades" label="Trades" />
         <NavLink href="/portfolio" label="Portfolio" />
+        <NavLink href="/research" label="Research" />
+        <NavLink href="/intel/wallets" label="Intel" />
         <NavLink href="/settings" label="Settings" />
       </nav>
       <UidBar />

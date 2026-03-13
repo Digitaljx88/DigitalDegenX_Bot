@@ -311,3 +311,106 @@ def test_weekly_optimization_report_ranks_recent_closed_cohorts(isolated_db):
     assert report["leaders"]["exit_reason"]["label"] == "tp_target_hit"
     assert report["cohorts"]["by_strategy"][0]["label"] == "launch_snipe"
     assert report["insights"][0].startswith("Best strategy this window: launch_snipe")
+
+
+def test_closed_trade_filters_and_top_labels_follow_realized_pnl(isolated_db):
+    db.log_trade(
+        uid=4,
+        mode="paper",
+        action="buy",
+        mint="mint-a",
+        symbol="AAA",
+        ts=_ts(8, 0),
+        sol_amount=1.0,
+        token_amount=100,
+        entry_source="pumpfun_newest",
+        entry_age_mins=4.0,
+        entry_score_effective=91,
+        entry_archetype="launch_snipe",
+        entry_strategy="launch_snipe",
+        narrative="AI",
+    )
+    db.log_trade(
+        uid=4,
+        mode="paper",
+        action="sell",
+        mint="mint-a",
+        symbol="AAA",
+        ts=_ts(8, 20),
+        sol_received=1.4,
+        token_amount=100,
+        narrative="AI",
+        exit_reason="tp_target_hit",
+        max_unrealized_pnl_pct=50.0,
+        giveback_pct=8.0,
+    )
+    db.log_trade(
+        uid=4,
+        mode="paper",
+        action="buy",
+        mint="mint-b",
+        symbol="BBB",
+        ts=_ts(9, 0),
+        sol_amount=1.0,
+        token_amount=100,
+        entry_source="dex_pairs_new",
+        entry_age_mins=12.0,
+        entry_score_effective=82,
+        entry_archetype="wallet_follow",
+        entry_strategy="wallet_follow",
+        narrative="Political",
+    )
+    db.log_trade(
+        uid=4,
+        mode="paper",
+        action="buy",
+        mint="mint-c",
+        symbol="CCC",
+        ts=_ts(9, 10),
+        sol_amount=1.0,
+        token_amount=100,
+        entry_source="dex_pairs_new",
+        entry_age_mins=14.0,
+        entry_score_effective=80,
+        entry_archetype="wallet_follow",
+        entry_strategy="wallet_follow",
+        narrative="Political",
+    )
+    db.log_trade(
+        uid=4,
+        mode="paper",
+        action="sell",
+        mint="mint-b",
+        symbol="BBB",
+        ts=_ts(9, 30),
+        sol_received=0.7,
+        token_amount=100,
+        narrative="Political",
+        exit_reason="hard_stop",
+        max_unrealized_pnl_pct=12.0,
+        giveback_pct=5.0,
+    )
+    db.log_trade(
+        uid=4,
+        mode="paper",
+        action="sell",
+        mint="mint-c",
+        symbol="CCC",
+        ts=_ts(9, 40),
+        sol_received=0.8,
+        token_amount=100,
+        narrative="Political",
+        exit_reason="hard_stop",
+        max_unrealized_pnl_pct=18.0,
+        giveback_pct=6.0,
+    )
+
+    trades = db.get_trades(4, limit=20)
+    closed = db.get_closed_trades(4, limit=20)
+    summary = tc.summarize_trades(trades, closed)
+
+    assert tc.filter_closed_trades(closed, "buys") == []
+    assert tc.filter_closed_trades(closed, "sells") == []
+    assert summary["top_source"] == "pumpfun_newest"
+    assert summary["top_narrative"] == "AI"
+    assert summary["top_archetype"] == "launch_snipe"

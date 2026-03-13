@@ -298,6 +298,8 @@ def filter_closed_trades(closed: list[dict], filter_spec: str) -> list[dict]:
     filter_spec = normalize_filter_spec(filter_spec)
     if filter_spec == "all":
         return list(closed)
+    if filter_spec in {"buys", "sells"}:
+        return []
     if filter_spec == "wins":
         return [t for t in closed if float(t.get("pnl_sol") or 0) > 0]
     if filter_spec == "losses":
@@ -347,6 +349,9 @@ def summarize_trades(trades: list[dict], closed: list[dict]) -> dict:
     cohort_summary = summarize_closed_cohorts(closed) if closed else {}
     exit_reason_rows = cohort_summary.get("by_exit_reason", [])
     strategy_rows = cohort_summary.get("by_strategy", [])
+    source_rows = cohort_summary.get("by_source", [])
+    narrative_rows = cohort_summary.get("by_narrative", [])
+    archetype_rows = cohort_summary.get("by_archetype", [])
     return {
         "total_rows": len(trades),
         "buy_count": sum(1 for t in trades if str(t.get("action", "")).lower() == "buy"),
@@ -361,9 +366,9 @@ def summarize_trades(trades: list[dict], closed: list[dict]) -> dict:
         "avg_peak_unrealized_pct": _avg_metric(closed, "max_unrealized_pnl_pct"),
         "best_trade": best,
         "worst_trade": worst,
-        "top_narrative": max(narratives, key=narratives.get) if narratives else "None",
-        "top_source": max(source_counts, key=source_counts.get) if source_counts else "None",
-        "top_archetype": max(archetype_counts, key=archetype_counts.get) if archetype_counts else "None",
+        "top_narrative": narrative_rows[0]["label"] if narrative_rows else (max(narratives, key=narratives.get) if narratives else "None"),
+        "top_source": source_rows[0]["label"] if source_rows else (max(source_counts, key=source_counts.get) if source_counts else "None"),
+        "top_archetype": archetype_rows[0]["label"] if archetype_rows else (max(archetype_counts, key=archetype_counts.get) if archetype_counts else "None"),
         "top_strategy": strategy_rows[0]["label"] if strategy_rows else (max(strategy_counts, key=strategy_counts.get) if strategy_counts else "None"),
         "top_exit_reason": exit_reason_rows[0]["label"] if exit_reason_rows else "None",
         "best_exit_reason": exit_reason_rows[0]["label"] if exit_reason_rows else "None",
