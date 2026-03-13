@@ -75,6 +75,25 @@ def test_seen_tokens_are_session_scoped(isolated_db):
     assert db.has_seen_token("mint123") is False
 
 
+def test_wallet_alert_rejects_invalid_address(isolated_db):
+    with pytest.raises(ValueError):
+        db.add_wallet_alert(1, "wallet123", "bad")
+
+
+def test_cleanup_invalid_wallet_alerts_removes_bad_rows(isolated_db):
+    valid_wallet = "So11111111111111111111111111111111111111112"
+    db._exec(
+        "INSERT INTO wallet_alerts(uid, wallet, label) VALUES(?,?,?)",
+        (1, "wallet123", "bad"),
+    )
+    db.add_wallet_alert(1, valid_wallet, "good")
+
+    removed = db.cleanup_invalid_wallet_alerts()
+
+    assert removed == 1
+    assert db.get_wallet_alerts(1) == [{"wallet": valid_wallet, "label": "good"}]
+
+
 def test_heat_score_disqualifies_active_mint_authority():
     result = heat_score_v2.calculate_heat_score_v2(
         {"mint": "mint1", "name": "Test", "symbol": "TST"},
@@ -108,6 +127,17 @@ def test_classify_alert_tier_caps_dead_momentum_to_scouted():
     )
 
     assert tier == "SCOUTED"
+
+
+def test_channel_alert_ready_respects_cooldown():
+    scanner._last_channel_alert_ts = 0.0
+
+    assert scanner.channel_alert_ready(now_ts=100.0) is True
+    scanner.mark_channel_alert_sent(now_ts=100.0)
+    assert scanner.channel_alert_ready(now_ts=110.0) is False
+    assert scanner.channel_alert_ready(
+        now_ts=100.0 + scanner.CHANNEL_ALERT_COOLDOWN_SECS + 0.1
+    ) is True
 
 
 def test_select_newest_alerts_prefers_newest_qualifying_token():

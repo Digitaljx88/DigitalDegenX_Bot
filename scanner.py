@@ -24,6 +24,7 @@ import settings_manager
 import config as _cfg
 import heat_momentum
 import db as _db
+from telegram_delivery import send_throttled_message
 
 _rugcheck_executor = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="rugcheck")
 
@@ -73,6 +74,9 @@ NARRATIVE_CLUSTER_LIMIT = 3
 WEAK_DISCOVERY_SOURCES = {"dex_search", "dex_profiles", "dex_boosts"}
 PRIMARY_DISCOVERY_SOURCES = {"pumpfun_newest", "pumpfun_hot", "dex_pairs", "dex_lookup"}
 STRICT_AUTOBUY_MAX_AGE_MINS = 20
+CHANNEL_ALERT_MIN_INTERVAL_SECS = 2.0
+CHANNEL_ALERT_COOLDOWN_SECS = 20.0
+_last_channel_alert_ts = 0.0
 
 
 def append_log(entry: dict):
@@ -140,6 +144,16 @@ def get_todays_alerts() -> list:
 def clear_quality_state():
     _quality_history.clear()
     _narrative_alert_history.clear()
+
+
+def channel_alert_ready(now_ts: float | None = None) -> bool:
+    current = now_ts if now_ts is not None else time.time()
+    return (current - _last_channel_alert_ts) >= CHANNEL_ALERT_COOLDOWN_SECS
+
+
+def mark_channel_alert_sent(now_ts: float | None = None):
+    global _last_channel_alert_ts
+    _last_channel_alert_ts = now_ts if now_ts is not None else time.time()
 
 
 # ─── Data fetching ────────────────────────────────────────────────────────────
@@ -1134,11 +1148,13 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         except Exception:
             user_settings_map[uid] = {}
 
+    channel_allowed = bool(alert_channel) and channel_alert_ready()
+
     selected_user_alerts, selected_channel_alert = select_newest_alerts(
         scored_candidates,
         chat_ids,
         user_settings_map,
-        channel_enabled=bool(alert_channel),
+        channel_enabled=channel_allowed,
         channel_scouted_threshold=CH_SCOUTED_THR,
         channel_hot_threshold=CH_HOT_THR,
     )
@@ -1257,11 +1273,14 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                  InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
             ])
             try:
-                await bot.send_message(
+                await send_throttled_message(
+                    bot,
                     chat_id=alert_channel, text=channel_msg,
                     parse_mode="Markdown", reply_markup=channel_kb,
                     disable_web_page_preview=True,
+                    min_interval_secs=CHANNEL_ALERT_MIN_INTERVAL_SECS,
                 )
+                mark_channel_alert_sent()
             except Exception as e:
                 print(f"[SCANNER] scouted channel error ch={alert_channel}: {e}", flush=True)
         else:
@@ -1279,17 +1298,23 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                      InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
                 ])
                 try:
-                    await bot.send_message(
+                    await send_throttled_message(
+                        bot,
                         chat_id=alert_channel, text=channel_msg,
                         parse_mode="Markdown", reply_markup=channel_kb,
                         disable_web_page_preview=True,
+                        min_interval_secs=CHANNEL_ALERT_MIN_INTERVAL_SECS,
                     )
+                    mark_channel_alert_sent()
                 except Exception:
                     try:
-                        await bot.send_message(
+                        await send_throttled_message(
+                            bot,
                             chat_id=alert_channel, text=channel_msg,
                             reply_markup=channel_kb, disable_web_page_preview=True,
+                            min_interval_secs=CHANNEL_ALERT_MIN_INTERVAL_SECS,
                         )
+                        mark_channel_alert_sent()
                     except Exception as e:
                         print(f"[SCANNER] channel send error ch={alert_channel}: {e}", flush=True)
 

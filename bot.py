@@ -441,13 +441,20 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
 # ─── User wallet alert tracker ────────────────────────────────────────────────
 
 def get_user_alert_wallets(uid: int) -> list:
-    return _db.get_wallet_alerts(uid)
+    return [
+        {"address": row["wallet"], "wallet": row["wallet"], "label": row.get("label", row["wallet"][:8])}
+        for row in _db.get_wallet_alerts(uid)
+    ]
 
 def add_user_alert_wallet(uid: int, address: str, label: str) -> bool:
+    address = str(address or "").strip()
     existing = _db.get_wallet_alerts(uid)
     if any(w["wallet"] == address for w in existing):
         return False
-    _db.add_wallet_alert(uid, address, label or address[:8])
+    try:
+        _db.add_wallet_alert(uid, address, label or address[:8])
+    except ValueError:
+        return False
     return True
 
 def remove_user_alert_wallet(uid: int, address: str):
@@ -11834,9 +11841,9 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif state == "wbalert_add_addr":
         addr = text.strip()
-        if len(addr) < 32 or len(addr) > 44:
+        if not _db.is_valid_solana_address(addr):
             await update.message.reply_text(
-                "❌ Invalid address. Paste a valid Solana wallet address (32–44 chars).",
+                "❌ Invalid address. Paste a valid Solana base58 wallet address.",
                 reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="wbalert:list")]])
             )
             return
@@ -13319,6 +13326,9 @@ async def _start_api_server(app):
 
 
 async def post_init(app):
+    removed_invalid_wallets = _db.cleanup_invalid_wallet_alerts()
+    if removed_invalid_wallets:
+        print(f"[BOOT] Removed {removed_invalid_wallets} invalid wallet alert rows", flush=True)
     # Inject auto-buy callback into pumpfeed (avoids circular import)
     pf.set_grad_autobuy_fn(execute_auto_buy)
     # Start pump.fun live feed WebSocket listener (supervised, auto-restarts)

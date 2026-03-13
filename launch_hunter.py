@@ -10,6 +10,10 @@ import time
 import httpx
 from typing import Dict, List, Tuple, Optional
 from datetime import datetime, timedelta
+from telegram_delivery import send_throttled_message
+
+CHANNEL_ALERT_MIN_INTERVAL_SECS = 2.0
+MAX_ALERTS_PER_PASS = 2
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -245,7 +249,8 @@ async def check_for_new_launches(
             limit_check=50
         )
         
-        # Process each new launch
+        # Process each new launch, preferring the freshest and capping burst volume.
+        launches = sorted(launches, key=lambda row: row[3])[:MAX_ALERTS_PER_PASS]
         for mint, symbol, liquidity, age_seconds in launches:
             # Check if we've already alerted for this token
             if not should_alert_launch(mint, state):
@@ -254,10 +259,12 @@ async def check_for_new_launches(
             # Format and send alert
             try:
                 message = format_launch_alert(mint, symbol, liquidity, age_seconds)
-                await bot.send_message(
+                await send_throttled_message(
+                    bot,
                     chat_id=launch_channel_id,
                     text=message,
-                    parse_mode="HTML"
+                    parse_mode="HTML",
+                    min_interval_secs=CHANNEL_ALERT_MIN_INTERVAL_SECS,
                 )
                 
                 # Mark as alerted

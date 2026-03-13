@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.digitaldegenx.bot</string>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/rosalindjames/DigitalDegenX_Bot</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/bin/zsh</string>
+        <string>-lc</string>
+        <string>cd /Users/rosalindjames/DigitalDegenX_Bot &amp;&amp; if [ -f venv/bin/activate ]; then source venv/bin/activate; fi &amp;&amp; exec python3 bot.py</string>
+    </array>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/rosalindjames/Library/Logs/DigitalDegenX/bot.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/rosalindjames/Library/Logs/DigitalDegenX/bot-error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PYTHONUNBUFFERED</key>
+        <string>1</string>
+    </dict>
+</dict>
+</plist>

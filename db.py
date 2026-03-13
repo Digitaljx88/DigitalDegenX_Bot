@@ -24,6 +24,7 @@ DB_PATH = Path(__file__).parent / "data" / "bot.db"
 
 _local = threading.local()
 _session_seen_tokens: set[str] = set()
+_SOLANA_ADDRESS_ALPHABET = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
 
 SEEN_TOKEN_TTL = 3600  # legacy constant kept for backward compatibility
 _FIFO_EPSILON = 1e-9
@@ -64,6 +65,14 @@ def _utc_day_start_ts(now_ts: float | None = None) -> float:
     now = datetime.fromtimestamp(now_ts or time.time(), tz=timezone.utc)
     day_start = datetime(now.year, now.month, now.day, tzinfo=timezone.utc)
     return day_start.timestamp()
+
+
+def is_valid_solana_address(address: str) -> bool:
+    """Cheap local validation for a Solana base58 public key."""
+    addr = str(address or "").strip()
+    if len(addr) < 32 or len(addr) > 44:
+        return False
+    return all(ch in _SOLANA_ADDRESS_ALPHABET for ch in addr)
 
 
 # ── Schema init ────────────────────────────────────────────────────────────────
@@ -1010,10 +1019,13 @@ def get_wallet_alerts(uid: int) -> list[dict]:
 
 
 def add_wallet_alert(uid: int, wallet: str, label: str = ""):
+    wallet = str(wallet or "").strip()
+    if not is_valid_solana_address(wallet):
+        raise ValueError(f"Invalid Solana wallet address: {wallet}")
     _exec(
         "INSERT INTO wallet_alerts(uid, wallet, label) VALUES(?,?,?) "
         "ON CONFLICT(uid, wallet) DO UPDATE SET label=excluded.label",
-        (uid, wallet, label),
+        (uid, wallet, (label or wallet[:8]).strip()),
     )
 
 
@@ -1028,3 +1040,20 @@ def get_all_wallet_alerts() -> dict:
     for r in rows:
         result.setdefault(r["uid"], []).append({"wallet": r["wallet"], "label": r["label"]})
     return result
+
+
+def cleanup_invalid_wallet_alerts(uid: int | None = None) -> int:
+    """Delete malformed wallet alert rows and return the number removed."""
+    if uid is None:
+        rows = _fetchall("SELECT uid, wallet FROM wallet_alerts")
+    else:
+        rows = _fetchall("SELECT uid, wallet FROM wallet_alerts WHERE uid=?", (uid,))
+
+    invalid_rows = [
+        (int(row["uid"]), str(row["wallet"]))
+        for row in rows
+        if not is_valid_solana_address(row["wallet"])
+    ]
+    for row_uid, wallet in invalid_rows:
+        _exec("DELETE FROM wallet_alerts WHERE uid=? AND wallet=?", (row_uid, wallet))
+    return len(invalid_rows)
