@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 import trade_center as tc
 
 
@@ -55,7 +57,7 @@ def test_build_closed_trades_pairs_buys_and_sells():
     closed = tc.build_closed_trades(trades)
     assert len(closed) == 1
     assert closed[0]["symbol"] == "BONK"
-    assert closed[0]["pnl_sol"] == 0.3
+    assert closed[0]["pnl_sol"] == pytest.approx(0.3)
 
 
 def test_summarize_trades_reports_realized_pnl_and_counts():

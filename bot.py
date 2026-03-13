@@ -35,9 +35,13 @@ from config import (
     TELEGRAM_TOKEN, SOLANA_RPC, WALLET_PRIVATE_KEY,
     ADMIN_IDS, PAPER_START_SOL, ALERT_CHECK_SECS,
     HELIUS_API_KEY,
-    PRIORITY_FEE_MICRO_LAMPORTS, PRIORITY_FEE_COMPUTE_UNITS,
-    JITO_ENABLED, JITO_TIP_LAMPORTS, JITO_ENDPOINT,
 )
+
+PRIORITY_FEE_MICRO_LAMPORTS = getattr(_cfg, "PRIORITY_FEE_MICRO_LAMPORTS", 500_000)
+PRIORITY_FEE_COMPUTE_UNITS = getattr(_cfg, "PRIORITY_FEE_COMPUTE_UNITS", 200_000)
+JITO_ENABLED = getattr(_cfg, "JITO_ENABLED", True)
+JITO_TIP_LAMPORTS = getattr(_cfg, "JITO_TIP_LAMPORTS", 50_000)
+JITO_ENDPOINT = getattr(_cfg, "JITO_ENDPOINT", "https://mainnet.block-engine.jito.wtf/api/v1/bundles")
 from telegram import (
     Update, InlineKeyboardButton, InlineKeyboardMarkup, BotCommand,
 )
