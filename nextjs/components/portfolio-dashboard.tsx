@@ -56,7 +56,13 @@ export function PortfolioDashboard() {
   }
 
   if (!uid) {
-    return <Panel title="Portfolio" subtitle="Set your Telegram UID to load balances and quick sell controls." />;
+    return (
+      <Panel title="Portfolio" subtitle="Set your Telegram UID to load balances and quick sell controls.">
+        <div className="text-sm text-[var(--muted-foreground)]">
+          Add your Telegram UID in the top bar, then this page will load your paper balances and quick sell actions.
+        </div>
+      </Panel>
+    );
   }
 
   const entries = Object.entries(portfolio || {});

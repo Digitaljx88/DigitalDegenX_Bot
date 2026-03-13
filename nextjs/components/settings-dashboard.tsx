@@ -84,7 +84,13 @@ export function SettingsDashboard() {
   }
 
   if (!uid) {
-    return <Panel title="Settings" subtitle="Set your Telegram UID to edit auto-buy controls and heat-score thresholds." />;
+    return (
+      <Panel title="Settings" subtitle="Set your Telegram UID to edit auto-buy controls and heat-score thresholds.">
+        <div className="text-sm text-[var(--muted-foreground)]">
+          Add your Telegram UID in the top bar to edit auto-buy controls and scanner alert thresholds from the browser.
+        </div>
+      </Panel>
+    );
   }
 
   return (

@@ -66,7 +66,13 @@ export function TradesDashboard() {
   }, [filter, uid]);
 
   if (!uid) {
-    return <Panel title="Trade Center" subtitle="Set your Telegram UID to load your ledger and closed-trade stats." />;
+    return (
+      <Panel title="Trade Center" subtitle="Set your Telegram UID to load your ledger and closed-trade stats.">
+        <div className="text-sm text-[var(--muted-foreground)]">
+          Add your Telegram UID in the top bar to unlock your trade history, filters, and performance stats.
+        </div>
+      </Panel>
+    );
   }
 
   return (
