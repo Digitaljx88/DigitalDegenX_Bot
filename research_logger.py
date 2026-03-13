@@ -15,17 +15,35 @@ os.makedirs(DATA_DIR, exist_ok=True)
 RESEARCH_LOG_CSV = os.path.join(DATA_DIR, "research_log.csv")
 RESEARCH_LOG_JSON = os.path.join(DATA_DIR, "research_log.json")
 CSV_MAX_LINES = 50_000
+CSV_FIELDS = [
+    "timestamp", "date", "user_id", "action", "mint", "symbol",
+    "narrative", "heat_score", "buy_price_usd", "sell_price_usd",
+    "sol_amount", "token_amount", "pnl_usd", "pnl_pct",
+    "hold_seconds", "mcap_at_entry", "mcap_at_exit",
+    "entry_source", "entry_age_mins", "entry_liquidity_usd",
+    "entry_txns_5m", "entry_score_raw", "entry_score_effective",
+    "entry_tier", "entry_wallet_signal", "entry_archetype",
+    "entry_source_rank", "entry_confidence", "exit_reason",
+    "exit_trigger",
+]
 
 
 def _rotate_csv_if_needed():
     """Archive current CSV if it exceeds CSV_MAX_LINES, start fresh."""
     if not os.path.exists(RESEARCH_LOG_CSV):
         return
+
+    expected_header = ",".join(CSV_FIELDS)
+    try:
+        with open(RESEARCH_LOG_CSV, "r") as f:
+            existing_header = f.readline().strip()
+    except Exception:
+        existing_header = ""
     
     with open(RESEARCH_LOG_CSV, "r") as f:
         line_count = sum(1 for _ in f.readlines())
     
-    if line_count > CSV_MAX_LINES:
+    if line_count > CSV_MAX_LINES or (existing_header and existing_header != expected_header):
         timestamp = datetime.now().strftime("%Y-%m-%d_%H%M%S")
         archive_name = f"research_log_{timestamp}.csv"
         archive_path = os.path.join(DATA_DIR, archive_name)
@@ -50,6 +68,7 @@ def log_trade(
     hold_seconds: int = None,
     mcap_at_entry: float = None,
     mcap_at_exit: float = None,
+    **extra,
 ):
     """
     Log a trade to both CSV and JSON research logs.
@@ -93,6 +112,19 @@ def log_trade(
         "hold_seconds": hold_seconds or 0,
         "mcap_at_entry": mcap_at_entry or 0.0,
         "mcap_at_exit": mcap_at_exit or 0.0,
+        "entry_source": extra.get("entry_source") or "",
+        "entry_age_mins": extra.get("entry_age_mins") or 0.0,
+        "entry_liquidity_usd": extra.get("entry_liquidity_usd") or 0.0,
+        "entry_txns_5m": extra.get("entry_txns_5m") or 0,
+        "entry_score_raw": extra.get("entry_score_raw") or 0,
+        "entry_score_effective": extra.get("entry_score_effective") or 0,
+        "entry_tier": extra.get("entry_tier") or "",
+        "entry_wallet_signal": extra.get("entry_wallet_signal") or 0.0,
+        "entry_archetype": extra.get("entry_archetype") or "",
+        "entry_source_rank": extra.get("entry_source_rank") or 0,
+        "entry_confidence": extra.get("entry_confidence") or 0.0,
+        "exit_reason": extra.get("exit_reason") or "",
+        "exit_trigger": extra.get("exit_trigger") or "",
     }
     
     # Write to CSV
@@ -110,13 +142,7 @@ def _write_csv(record: dict):
     
     try:
         with open(RESEARCH_LOG_CSV, "a", newline="") as f:
-            fieldnames = [
-                "timestamp", "date", "user_id", "action", "mint", "symbol",
-                "narrative", "heat_score", "buy_price_usd", "sell_price_usd",
-                "sol_amount", "token_amount", "pnl_usd", "pnl_pct",
-                "hold_seconds", "mcap_at_entry", "mcap_at_exit"
-            ]
-            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer = csv.DictWriter(f, fieldnames=CSV_FIELDS)
             if not file_exists:
                 writer.writeheader()
             writer.writerow(record)

@@ -503,12 +503,26 @@ def _ab_reset_day_if_needed(cfg: dict) -> dict:
         cfg["bought"]      = []
     return cfg
 
+
+def _score_tier_label(score: float | int | None) -> str:
+    value = float(score or 0)
+    if value >= 85:
+        return "ultra_hot"
+    if value >= 70:
+        return "hot"
+    if value >= 55:
+        return "warm"
+    if value >= 35:
+        return "watch"
+    return "skip"
+
+
 def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
               name: str = "", narrative: str = None, heat_score: int = None,
               sol_amount: float = None, sol_received: float = None,
               token_amount: int = 0, price_usd: float = 0.0,
               buy_price_usd: float = None, mcap: float = 0.0,
-              pnl_pct: float = None, tx_sig: str = None):
+              pnl_pct: float = None, tx_sig: str = None, **extra):
     trade_ts = time.time()
     if narrative is None:
         narrative = _detect_narrative(name, symbol)
@@ -526,6 +540,7 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
         sol_amount=sol_amount, sol_received=sol_received,
         token_amount=token_amount, price_usd=price_usd,
         buy_price_usd=buy_price_usd, mcap=mcap, pnl_pct=pnl_pct, tx_sig=tx_sig,
+        **extra,
     )
     
     # Log to research logger (CSV + JSON) for data analysis
@@ -548,8 +563,10 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
             token_amount=token_amount,
             pnl_usd=pnl_usd,
             pnl_pct=pnl_pct,
+            hold_seconds=extra.get("hold_seconds"),
             mcap_at_entry=mcap if action == "buy" else None,
             mcap_at_exit=mcap if action == "sell" else None,
+            **extra,
         )
     except Exception as e:
         print(f"[log_trade] Research logger error: {e}")
@@ -1509,9 +1526,13 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
     if raw_held <= 0:
         return False
 
+    as_cfg = _db.get_auto_sell(uid, mint) or {}
+    hold_seconds = None
+    if as_cfg.get("purchase_timestamp"):
+        hold_seconds = max(0.0, time.time() - float(as_cfg["purchase_timestamp"]))
+
     if mode == "paper":
         # Compute price outside the lock (sync HTTP call)
-        as_cfg    = _db.get_all_auto_sells(uid).get(mint, {})
         dec       = as_cfg.get("decimals", 6)
         sol_received = 0.0
         if price_usd:
@@ -1546,7 +1567,8 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
         log_trade(uid, mode, "sell", mint, symbol,
                   sol_received=sol_received, token_amount=sell_amount,
                   price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
-                  mcap=mcap)
+                  mcap=mcap, hold_seconds=hold_seconds,
+                  exit_reason=reason, exit_trigger=reason, exit_mcap=mcap)
         await bot.send_message(
             chat_id=uid,
             text=(
@@ -1593,7 +1615,8 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
             log_trade(uid, mode, "sell", mint, symbol,
                       sol_received=sol_received, token_amount=sell_amount,
                       price_usd=price_usd, buy_price_usd=buy_price,
-                      mcap=mcap, tx_sig=sig)
+                      mcap=mcap, tx_sig=sig, hold_seconds=hold_seconds,
+                      exit_reason=reason, exit_trigger=reason, exit_mcap=mcap)
             await bot.send_message(
                 chat_id=uid,
                 text=(
@@ -2070,13 +2093,32 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         print(f"[AUTOBUY] uid={uid} skipped — not enabled", flush=True)
         return
 
-    score     = result.get("total", 0)
+    score     = result.get("effective_score", result.get("total", 0))
     mint      = result.get("mint", "")
     symbol    = result.get("symbol", mint[:6])
     name      = result.get("name", symbol)
     mcap      = result.get("mcap", 0)
+    entry_score_effective = result.get("effective_score", score)
+    entry_score_raw = result.get("raw_total", score)
+    entry_source = result.get("_source_name") or result.get("source")
+    entry_source_rank = result.get("_source_rank")
+    entry_liquidity_usd = result.get("liquidity", 0) or 0
+    entry_txns_5m = result.get("txns_5m", 0) or 0
+    entry_wallet_signal = result.get("wallet_signal", result.get("wallet_boost", 0)) or 0
+    entry_archetype = result.get("archetype")
+    entry_confidence = result.get("archetype_conf")
+    entry_tier = _score_tier_label(entry_score_effective)
 
     print(f"[AUTOBUY] uid={uid} evaluating {symbol} mint={mint[:8]}.. score={score} mcap=${mcap:,.0f}", flush=True)
+
+    if result.get("entry_quality_autobuy_blocked"):
+        reasons = (
+            result.get("entry_quality_reasons", [])
+            + result.get("entry_quality_force_scouted_reasons", [])
+            + result.get("entry_quality_autobuy_only_reasons", [])
+        )
+        print(f"[AUTOBUY] uid={uid} skipped {symbol} — quality blocked: {reasons}", flush=True)
+        return
 
     # Use auto-buy min_score, but also respect v2 tier thresholds if configured
     min_score = cfg.get("min_score", 55)
@@ -2107,7 +2149,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         return
 
     # ── Liquidity range filter ───────────────────────────────────────────────
-    liquidity    = result.get("liquidity", 0) or 0
+    liquidity    = entry_liquidity_usd
     min_liq      = cfg.get("min_liquidity_usd", 0)
     max_liq      = cfg.get("max_liquidity_usd", 0)
     if min_liq > 0 and liquidity < min_liq:
@@ -2120,6 +2162,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     # ── Age range filter ─────────────────────────────────────────────────────
     import time as _time
     pair_created_ms = result.get("pair_created", 0) or 0
+    age_mins_now = None
     if pair_created_ms:
         age_mins_now = (_time.time() * 1000 - pair_created_ms) / 60_000
         min_age = cfg.get("min_age_mins", 0)
@@ -2134,7 +2177,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     # ── Min 5m transactions filter ───────────────────────────────────────────
     min_txns = cfg.get("min_txns_5m", 0)
     if min_txns > 0:
-        txns_5m = result.get("txns_5m", 0) or 0
+        txns_5m = entry_txns_5m
         if txns_5m < min_txns:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — txns_5m {txns_5m} < min {min_txns}", flush=True)
             return
@@ -2265,7 +2308,18 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         setup_auto_sell(uid, mint, symbol, price_usd, out_amount, decimals, sol_amount=sol_amount)
         log_trade(uid, "paper", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_amount,
-                  price_usd=price_usd, mcap=mcap, heat_score=score)
+                  price_usd=price_usd, mcap=mcap, heat_score=score,
+                  entry_source=entry_source,
+                  entry_age_mins=age_mins_now,
+                  entry_liquidity_usd=entry_liquidity_usd,
+                  entry_txns_5m=entry_txns_5m,
+                  entry_score_raw=entry_score_raw,
+                  entry_score_effective=entry_score_effective,
+                  entry_tier=entry_tier,
+                  entry_wallet_signal=entry_wallet_signal,
+                  entry_archetype=entry_archetype,
+                  entry_source_rank=entry_source_rank,
+                  entry_confidence=entry_confidence)
 
         _db.record_buy(uid, mint, sol_amount)
         cfg = get_auto_buy(uid)
@@ -2475,7 +2529,18 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals, sol_amount=sol_amount)
         log_trade(uid, "live", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_raw,
-                  price_usd=price_usd, mcap=mcap, heat_score=score, tx_sig=tx_sig)
+                  price_usd=price_usd, mcap=mcap, heat_score=score, tx_sig=tx_sig,
+                  entry_source=entry_source,
+                  entry_age_mins=age_mins_now,
+                  entry_liquidity_usd=entry_liquidity_usd,
+                  entry_txns_5m=entry_txns_5m,
+                  entry_score_raw=entry_score_raw,
+                  entry_score_effective=entry_score_effective,
+                  entry_tier=entry_tier,
+                  entry_wallet_signal=entry_wallet_signal,
+                  entry_archetype=entry_archetype,
+                  entry_source_rank=entry_source_rank,
+                  entry_confidence=entry_confidence)
 
         _db.record_buy(uid, mint, sol_amount)
         cfg = get_auto_buy(uid)
@@ -4017,7 +4082,7 @@ def _trade_center_kb(state: dict, page: int, total_pages: int) -> InlineKeyboard
 def _build_trade_center_page(uid: int) -> tuple[str, InlineKeyboardMarkup]:
     state = _trade_state(uid)
     trades = sorted(_db.get_trades(uid, limit=10000), key=lambda row: row.get("ts", 0), reverse=True)
-    closed = tc.build_closed_trades(trades)
+    closed = _db.get_closed_trades(uid, limit=10000)
     if not trades:
         return (
             "📊 *Trade Center*\n\nNo trades recorded yet.\n\n_Use /buy or /sell to start building your ledger._",
@@ -4056,6 +4121,8 @@ def _build_trade_center_page(uid: int) -> tuple[str, InlineKeyboardMarkup]:
             f"Paper: `{summary['paper_count']}` · Live: `{summary['live_count']}`",
             f"Avg hold: `{_hold_label(summary['avg_hold_s']) if summary['closed_count'] else 'n/a'}`",
             f"Top narrative: *{_esc(summary['top_narrative'])}*",
+            f"Top source: *{_esc(summary['top_source'])}*",
+            f"Top archetype: *{_esc(summary['top_archetype'])}*",
             "",
             f"Best: *{_esc(best['symbol'])}* `{best['pnl_sol']:+.4f}◎`" if best else "Best: `n/a`",
             f"Worst: *{_esc(worst['symbol'])}* `{worst['pnl_sol']:+.4f}◎`" if worst else "Worst: `n/a`",

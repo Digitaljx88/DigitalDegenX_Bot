@@ -397,12 +397,13 @@ async def get_trade_stats(uid: int, filter_spec: Optional[str] = None):
     """Return summarized trade-center stats for a user."""
     trades = _db.get_trades(uid, limit=10000)
     filtered = tc.filter_trades(trades, filter_spec or "all")
-    closed = tc.filter_closed_trades(tc.build_closed_trades(trades), filter_spec or "all")
+    closed = tc.filter_closed_trades(_db.get_closed_trades(uid, limit=10000), filter_spec or "all")
     return {
         "uid": uid,
         "filter": filter_spec or "all",
         "summary": tc.summarize_trades(filtered, closed),
         "closed_count": len(closed),
+        "cohorts": tc.summarize_closed_cohorts(closed),
     }
 
 

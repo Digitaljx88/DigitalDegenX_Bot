@@ -119,6 +119,76 @@ def build_closed_trades(trades: list[dict]) -> list[dict]:
     return sorted(closed, key=lambda row: row.get("sell_ts", 0), reverse=True)
 
 
+def _score_band(score: float | int | None) -> str:
+    value = float(score or 0)
+    if value >= 90:
+        return "90-100"
+    if value >= 80:
+        return "80-89"
+    if value >= 70:
+        return "70-79"
+    if value >= 55:
+        return "55-69"
+    return "<55"
+
+
+def _age_band(age_mins: float | int | None) -> str:
+    value = float(age_mins or 0)
+    if value < 5:
+        return "0-5m"
+    if value < 15:
+        return "5-15m"
+    if value < 30:
+        return "15-30m"
+    if value < 60:
+        return "30-60m"
+    return "60m+"
+
+
+def summarize_closed_cohorts(closed: list[dict]) -> dict:
+    def _group(rows: list[dict], field: str, default: str = "Unknown") -> list[dict]:
+        buckets: dict[str, dict] = {}
+        for row in rows:
+            key = str(row.get(field) or default)
+            bucket = buckets.setdefault(key, {"label": key, "count": 0, "wins": 0, "realized_pnl_sol": 0.0})
+            pnl_sol = float(row.get("pnl_sol") or 0)
+            bucket["count"] += 1
+            bucket["realized_pnl_sol"] += pnl_sol
+            if pnl_sol > 0:
+                bucket["wins"] += 1
+        result = []
+        for bucket in buckets.values():
+            count = bucket["count"] or 1
+            result.append({
+                "label": bucket["label"],
+                "count": bucket["count"],
+                "win_rate": bucket["wins"] / count * 100.0,
+                "realized_pnl_sol": bucket["realized_pnl_sol"],
+            })
+        return sorted(result, key=lambda row: (row["realized_pnl_sol"], row["count"]), reverse=True)
+
+    source_rows = _group(closed, "entry_source")
+    narrative_rows = _group(closed, "narrative", "Other")
+    archetype_rows = _group(closed, "entry_archetype", "NONE")
+
+    score_rows = _group(
+        [{**row, "_score_band": _score_band(row.get("entry_score_effective"))} for row in closed],
+        "_score_band",
+    )
+    age_rows = _group(
+        [{**row, "_age_band": _age_band(row.get("entry_age_mins"))} for row in closed],
+        "_age_band",
+    )
+
+    return {
+        "by_source": source_rows,
+        "by_narrative": narrative_rows,
+        "by_archetype": archetype_rows,
+        "by_score_band": score_rows,
+        "by_age_band": age_rows,
+    }
+
+
 def filter_closed_trades(closed: list[dict], filter_spec: str) -> list[dict]:
     filter_spec = normalize_filter_spec(filter_spec)
     if filter_spec == "all":
@@ -159,6 +229,13 @@ def summarize_trades(trades: list[dict], closed: list[dict]) -> dict:
         key = str(trade.get("narrative") or "Other")
         narratives[key] = narratives.get(key, 0) + 1
     avg_hold = sum(float(row.get("hold_s") or 0) for row in closed) / len(closed) if closed else 0.0
+    source_counts: dict[str, int] = {}
+    archetype_counts: dict[str, int] = {}
+    for row in closed:
+        src = str(row.get("entry_source") or "Unknown")
+        source_counts[src] = source_counts.get(src, 0) + 1
+        arch = str(row.get("entry_archetype") or "NONE")
+        archetype_counts[arch] = archetype_counts.get(arch, 0) + 1
     return {
         "total_rows": len(trades),
         "buy_count": sum(1 for t in trades if str(t.get("action", "")).lower() == "buy"),
@@ -172,4 +249,6 @@ def summarize_trades(trades: list[dict], closed: list[dict]) -> dict:
         "best_trade": best,
         "worst_trade": worst,
         "top_narrative": max(narratives, key=narratives.get) if narratives else "None",
+        "top_source": max(source_counts, key=source_counts.get) if source_counts else "None",
+        "top_archetype": max(archetype_counts, key=archetype_counts.get) if archetype_counts else "None",
     }

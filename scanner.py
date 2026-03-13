@@ -8,6 +8,7 @@ import asyncio
 import concurrent.futures
 import os
 import time
+from collections import defaultdict
 import requests
 from datetime import datetime, timezone
 import wallet_tracker
@@ -63,6 +64,14 @@ NARRATIVES = {
 # ─── State helpers (all backed by SQLite via db.py) ───────────────────────────
 
 SEEN_TOKEN_TTL = _db.SEEN_TOKEN_TTL  # legacy compat constant; seen-token cache is session-scoped
+_quality_history: dict[str, list[dict]] = defaultdict(list)
+_narrative_alert_history: dict[str, list[float]] = defaultdict(list)
+QUALITY_HISTORY_SECS = 1800
+NARRATIVE_CLUSTER_WINDOW_SECS = 900
+NARRATIVE_CLUSTER_LIMIT = 3
+WEAK_DISCOVERY_SOURCES = {"dex_search", "dex_profiles", "dex_boosts"}
+PRIMARY_DISCOVERY_SOURCES = {"pumpfun_newest", "pumpfun_hot", "dex_pairs", "dex_lookup"}
+STRICT_AUTOBUY_MAX_AGE_MINS = 20
 
 
 def append_log(entry: dict):
@@ -127,6 +136,11 @@ def get_todays_alerts() -> list:
     return _db.get_todays_alerts()
 
 
+def clear_quality_state():
+    _quality_history.clear()
+    _narrative_alert_history.clear()
+
+
 # ─── Data fetching ────────────────────────────────────────────────────────────
 
 MAX_TOKEN_AGE_HOURS  = 4     # ignore tokens older than this
@@ -171,7 +185,8 @@ def _merge_token_entry(tokens: dict, mint: str, incoming: dict, *, source_name: 
     return entry
 
 
-def _parse_pairs(pairs: list, tokens: dict, *, source_name: str = "dex_pairs", source_rank: int = SOURCE_RANKS["dex_pairs"]):
+def _parse_pairs(pairs: list, tokens: dict, *, source_name: str = "dex_pairs",
+                 source_rank: int = SOURCE_RANKS["dex_pairs"], require_existing: bool = False):
     """Merge DexScreener pairs into the tokens dict. Skip old tokens."""
     cutoff_ms = (time.time() - MAX_TOKEN_AGE_HOURS * 3600) * 1000
     for p in pairs:
@@ -179,6 +194,8 @@ def _parse_pairs(pairs: list, tokens: dict, *, source_name: str = "dex_pairs", s
             continue
         mint = p.get("baseToken", {}).get("address", "")
         if not mint:
+            continue
+        if require_existing and mint not in tokens:
             continue
         # Skip tokens older than MAX_TOKEN_AGE_HOURS
         pair_created = p.get("pairCreatedAt", 0) or 0
@@ -350,8 +367,13 @@ def fetch_new_tokens() -> list[dict]:
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as _ex7:
         _search_results = list(_ex7.map(_dex_search, _trending_queries))
     for pairs in _search_results:
-        # Search is lowest-signal discovery: allow enrichment but keep stronger source metadata intact.
-        _parse_pairs(pairs[:20], tokens, source_name="dex_search", source_rank=SOURCE_RANKS["dex_search"])
+        # Search is enrichment-only: do not let keyword search originate new autobuy candidates.
+        _parse_pairs(
+            pairs[:20], tokens,
+            source_name="dex_search",
+            source_rank=SOURCE_RANKS["dex_search"],
+            require_existing=True,
+        )
 
     # Filter: must have name + mcap in range + created within cutoff
     # Also skip graduated DEX tokens with zero pool liquidity (rug indicator)
@@ -474,15 +496,238 @@ def age_str(pair_created_ms: int) -> str:
     return f"{age_mins/60:.1f}h"
 
 
+def age_mins(pair_created_ms: int) -> float:
+    if not pair_created_ms:
+        return 9_999.0
+    return max(0.0, (time.time() * 1000 - pair_created_ms) / 60_000)
+
+
+def age_band(pair_created_ms: int) -> str:
+    mins = age_mins(pair_created_ms)
+    if mins < 5:
+        return "0-5m"
+    if mins < 15:
+        return "5-15m"
+    if mins < 30:
+        return "15-30m"
+    if mins < 60:
+        return "30-60m"
+    return "60m+"
+
+
+def _buy_ratio(txn_buys: int, txn_sells: int) -> float:
+    total = max(0, int(txn_buys or 0)) + max(0, int(txn_sells or 0))
+    if total <= 0:
+        return 0.5
+    return max(0.0, min(1.0, (txn_buys or 0) / total))
+
+
+def _max_holder_pct(rc: dict) -> float:
+    top_holders = rc.get("topHolders") or []
+    if not top_holders:
+        return 0.0
+    first = top_holders[0] or {}
+    if "pct" in first and first.get("pct") is not None:
+        return float(first.get("pct") or 0)
+    supply = float(rc.get("supply") or 0)
+    balance = float(first.get("balance") or 0)
+    if supply > 0:
+        return balance / supply * 100.0
+    return 0.0
+
+
+def _prune_quality_state(now_ts: float | None = None):
+    now_ts = now_ts or time.time()
+    cutoff = now_ts - QUALITY_HISTORY_SECS
+    stale = []
+    for mint, rows in _quality_history.items():
+        kept = [row for row in rows if row.get("ts", 0) >= cutoff]
+        if kept:
+            _quality_history[mint] = kept[-6:]
+        else:
+            stale.append(mint)
+    for mint in stale:
+        _quality_history.pop(mint, None)
+
+    narr_cutoff = now_ts - NARRATIVE_CLUSTER_WINDOW_SECS
+    stale_narr = []
+    for narrative, rows in _narrative_alert_history.items():
+        kept = [ts for ts in rows if ts >= narr_cutoff]
+        if kept:
+            _narrative_alert_history[narrative] = kept
+        else:
+            stale_narr.append(narrative)
+    for narrative in stale_narr:
+        _narrative_alert_history.pop(narrative, None)
+
+
+def record_narrative_alert(narrative: str, now_ts: float | None = None):
+    now_ts = now_ts or time.time()
+    _prune_quality_state(now_ts)
+    _narrative_alert_history[str(narrative or "Other")].append(now_ts)
+
+
+def _recent_narrative_alert_count(narrative: str, now_ts: float | None = None) -> int:
+    now_ts = now_ts or time.time()
+    _prune_quality_state(now_ts)
+    return len(_narrative_alert_history.get(str(narrative or "Other"), []))
+
+
+def build_entry_quality(token: dict, rc: dict, result: dict, narrative: str) -> dict:
+    now_ts = time.time()
+    _prune_quality_state(now_ts)
+
+    mint = result.get("mint") or token.get("mint") or ""
+    source_name = token.get("_source_name") or result.get("_source_name") or ""
+    source_rank = token.get("_source_rank", result.get("_source_rank", 0)) or 0
+    price_h1 = float(result.get("price_h1", token.get("price_h1", 0)) or 0)
+    volume_m5 = float(result.get("volume_m5", token.get("volume_m5", 0)) or 0)
+    volume_h1 = float(result.get("volume_h1", token.get("volume_h1", 0)) or 0)
+    liquidity = float(result.get("liquidity", token.get("liquidity", 0)) or 0)
+    mcap = float(result.get("mcap", token.get("mcap", 0)) or 0)
+    tx_buys = int(token.get("txns_m5_buys", 0) or 0)
+    tx_sells = int(token.get("txns_m5_sells", 0) or 0)
+    txns_5m = int(result.get("txns_5m", tx_buys + tx_sells) or 0)
+    buy_ratio_5m = _buy_ratio(tx_buys, tx_sells)
+    age_now = age_mins(result.get("pair_created", token.get("pair_created", 0) or 0))
+    holder_pct = _max_holder_pct(rc)
+    wallet_signal = float(result.get("wallet_signal", result.get("wallet_boost", 0)) or 0)
+    effective_score = float(result.get("effective_score", result.get("total", 0)) or 0)
+
+    prior_rows = _quality_history.get(mint, [])
+    prev = prior_rows[-1] if prior_rows else None
+    score_peak = max([effective_score] + [float(row.get("effective_score", 0) or 0) for row in prior_rows])
+    score_drop_from_peak = max(0.0, score_peak - effective_score)
+    score_slope = 0.0
+    liquidity_drop_pct = 0.0
+    buy_ratio_delta = 0.0
+    holder_concentration_delta = 0.0
+    if prev:
+        elapsed_mins = max(0.001, (now_ts - float(prev.get("ts", now_ts))) / 60.0)
+        score_slope = (effective_score - float(prev.get("effective_score", effective_score) or effective_score)) / elapsed_mins
+        prev_liq = float(prev.get("liquidity", 0) or 0)
+        if prev_liq > 0:
+            liquidity_drop_pct = (liquidity - prev_liq) / prev_liq * 100.0
+        buy_ratio_delta = buy_ratio_5m - float(prev.get("buy_ratio_5m", buy_ratio_5m) or buy_ratio_5m)
+        holder_concentration_delta = holder_pct - float(prev.get("holder_concentration_pct", holder_pct) or holder_pct)
+
+    liquidity_to_mcap_ratio = (liquidity / mcap) if mcap > 0 else 0.0
+    txns_per_10k_liq = txns_5m / max(liquidity / 10_000.0, 1.0) if liquidity > 0 else 0.0
+    narrative_cluster_count = _recent_narrative_alert_count(narrative, now_ts)
+
+    quality = {
+        "age_mins": age_now,
+        "age_band": age_band(result.get("pair_created", token.get("pair_created", 0) or 0)),
+        "source_name": source_name,
+        "source_rank": source_rank,
+        "buy_ratio_5m": buy_ratio_5m,
+        "liquidity_to_mcap_ratio": liquidity_to_mcap_ratio,
+        "txns_per_10k_liq": txns_per_10k_liq,
+        "holder_concentration_pct": holder_pct,
+        "holder_concentration_delta": holder_concentration_delta,
+        "score_peak": score_peak,
+        "score_drop_from_peak": score_drop_from_peak,
+        "score_slope": score_slope,
+        "liquidity_drop_pct": liquidity_drop_pct,
+        "buy_ratio_delta": buy_ratio_delta,
+        "wallet_signal": wallet_signal,
+        "narrative_cluster_count": narrative_cluster_count,
+        "price_h1": price_h1,
+        "volume_m5": volume_m5,
+        "volume_h1": volume_h1,
+        "mcap": mcap,
+        "liquidity": liquidity,
+        "txns_5m": txns_5m,
+        "narrative": narrative,
+    }
+
+    _quality_history[mint].append({
+        "ts": now_ts,
+        "effective_score": effective_score,
+        "liquidity": liquidity,
+        "buy_ratio_5m": buy_ratio_5m,
+        "holder_concentration_pct": holder_pct,
+    })
+    _quality_history[mint] = _quality_history[mint][-6:]
+    return quality
+
+
+def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum_alive: bool) -> dict:
+    reasons: list[str] = []
+    force_scouted: list[str] = []
+    autobuy_only: list[str] = []
+
+    source_name = quality.get("source_name", "")
+    age_now = float(quality.get("age_mins", 0) or 0)
+    wallet_signal = float(quality.get("wallet_signal", 0) or 0)
+    txns_5m = int(quality.get("txns_5m", 0) or 0)
+    buy_ratio_5m = float(quality.get("buy_ratio_5m", 0.5) or 0.5)
+    buy_ratio_delta = float(quality.get("buy_ratio_delta", 0) or 0)
+    liquidity_drop_pct = float(quality.get("liquidity_drop_pct", 0) or 0)
+    holder_pct = float(quality.get("holder_concentration_pct", 0) or 0)
+    holder_delta = float(quality.get("holder_concentration_delta", 0) or 0)
+    score_drop = float(quality.get("score_drop_from_peak", 0) or 0)
+    score_slope = float(quality.get("score_slope", 0) or 0)
+    liq_to_mcap = float(quality.get("liquidity_to_mcap_ratio", 0) or 0)
+    txns_per_10k_liq = float(quality.get("txns_per_10k_liq", 0) or 0)
+    mcap = float(quality.get("mcap", 0) or 0)
+    narrative_cluster_count = int(quality.get("narrative_cluster_count", 0) or 0)
+
+    if source_name in WEAK_DISCOVERY_SOURCES and effective_score < 85:
+        force_scouted.append("weak discovery source")
+    if source_name not in PRIMARY_DISCOVERY_SOURCES and wallet_signal < 5:
+        autobuy_only.append("source not trusted enough for auto-buy")
+
+    if age_now > 60 and wallet_signal < 5:
+        reasons.append("outside fresh launch window")
+    elif age_now > STRICT_AUTOBUY_MAX_AGE_MINS and wallet_signal < 5:
+        autobuy_only.append("outside first-20m auto-buy window")
+
+    if txns_5m >= 8 and buy_ratio_5m < 0.52:
+        reasons.append("buy ratio fading")
+    if txns_5m >= 8 and buy_ratio_delta <= -0.12:
+        reasons.append("buy pressure collapsing")
+    if liquidity_drop_pct <= -12:
+        reasons.append("liquidity dropping fast")
+    if score_drop >= 8 and score_slope < -3:
+        reasons.append("score decaying from peak")
+    if holder_pct >= 15 and holder_delta >= 2:
+        reasons.append("holder concentration rising")
+    if mcap >= 150_000 and liq_to_mcap < 0.025:
+        reasons.append("mcap outrunning liquidity")
+    if mcap >= 150_000 and txns_per_10k_liq < 2:
+        reasons.append("too few txns for pool depth")
+    if narrative_cluster_count >= NARRATIVE_CLUSTER_LIMIT and effective_score < 85:
+        reasons.append("narrative cluster overcrowded")
+    if not momentum_alive and effective_score < 85:
+        force_scouted.append("momentum no longer alive")
+
+    return {
+        "quality_reasons": reasons,
+        "force_scouted_reasons": force_scouted,
+        "autobuy_only_reasons": autobuy_only,
+        "alert_blocked": bool(reasons),
+        "autobuy_blocked": bool(reasons or autobuy_only or force_scouted),
+        "force_scouted": bool(force_scouted),
+        "primary_source": source_name in PRIMARY_DISCOVERY_SOURCES,
+    }
+
+
 def classify_alert_tier(
     effective_score: int,
     momentum_alive: bool,
-    watch_threshold: int,
-    warm_threshold: int,
-    hot_threshold: int,
-    ultra_hot_threshold: int,
+    quality_alert_ok: bool = True,
+    force_scouted: bool = False,
+    watch_threshold: int = 35,
+    warm_threshold: int = 55,
+    hot_threshold: int = 70,
+    ultra_hot_threshold: int = 85,
 ) -> str | None:
     """Resolve the alert tier for one token using recency-independent score rules."""
+    if not quality_alert_ok:
+        return None
+    if force_scouted and effective_score >= watch_threshold:
+        return "SCOUTED"
     if effective_score >= ultra_hot_threshold and momentum_alive:
         return "ULTRA_HOT"
     if effective_score >= hot_threshold and momentum_alive:
@@ -514,6 +759,8 @@ def select_newest_alerts(
         mcap = result.get("mcap", 0) or 0
         effective_score = result.get("effective_score", result.get("total", 0))
         momentum_alive = bool(result.get("momentum_alive", True))
+        quality_alert_ok = not bool(result.get("entry_quality_alert_blocked"))
+        force_scouted = bool(result.get("entry_quality_force_scouted"))
 
         for uid in chat_ids:
             if uid in selected_users:
@@ -527,6 +774,8 @@ def select_newest_alerts(
             tier = classify_alert_tier(
                 effective_score,
                 momentum_alive,
+                quality_alert_ok,
+                force_scouted,
                 user_cfg.get("alert_scouted_threshold", 35),
                 user_cfg.get("alert_warm_threshold", 55),
                 user_cfg.get("alert_hot_threshold", 70),
@@ -537,7 +786,11 @@ def select_newest_alerts(
 
         if channel_enabled and selected_channel is None:
             tier = None
-            if effective_score >= channel_hot_threshold and momentum_alive:
+            if not quality_alert_ok:
+                tier = None
+            elif force_scouted and effective_score >= channel_scouted_threshold:
+                tier = "SCOUTED"
+            elif effective_score >= channel_hot_threshold and momentum_alive:
                 tier = "HOT"
             elif effective_score >= channel_scouted_threshold:
                 tier = "SCOUTED"
@@ -785,6 +1038,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         _narr_lower = narr_reason.lower()
         matched_narrative = next((n for n in NARRATIVES if n.lower() in _narr_lower
                                   or any(k in _narr_lower for k in NARRATIVES[n])), "Other")
+        result["matched_narrative"] = matched_narrative
         append_log({
             "date":      datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "timestamp": time.time(),
@@ -824,6 +1078,30 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 flush=True,
             )
         result["momentum_alive"] = _momentum_alive
+
+        quality = build_entry_quality(token, rc, result, matched_narrative)
+        quality_flags = apply_entry_quality_rules(
+            quality,
+            effective_score=effective_score,
+            momentum_alive=_momentum_alive,
+        )
+        result.update(quality)
+        result["entry_quality_reasons"] = quality_flags["quality_reasons"]
+        result["entry_quality_force_scouted"] = quality_flags["force_scouted"]
+        result["entry_quality_alert_blocked"] = quality_flags["alert_blocked"]
+        result["entry_quality_autobuy_blocked"] = quality_flags["autobuy_blocked"]
+        result["entry_quality_force_scouted_reasons"] = quality_flags["force_scouted_reasons"]
+        result["entry_quality_autobuy_only_reasons"] = quality_flags["autobuy_only_reasons"]
+        result["entry_quality_primary_source"] = quality_flags["primary_source"]
+        if quality_flags["alert_blocked"] or quality_flags["force_scouted"] or quality_flags["autobuy_only_reasons"]:
+            print(
+                f"[SCANNER] {result.get('symbol', mint[:6])} quality "
+                f"alert_blocked={quality_flags['alert_blocked']} "
+                f"force_scouted={quality_flags['force_scouted']} "
+                f"autobuy_only={bool(quality_flags['autobuy_only_reasons'])} "
+                f"reasons={quality_flags['quality_reasons'] + quality_flags['force_scouted_reasons'] + quality_flags['autobuy_only_reasons']}",
+                flush=True,
+            )
         scored_candidates.append(result)
 
     if not scored_candidates:
@@ -869,6 +1147,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         mcap = result.get("mcap", 0)
 
         if tier == "SCOUTED":
+            record_narrative_alert(result.get("matched_narrative", "Other"))
             add_to_watchlist(mint, {
                 "name": result["name"], "symbol": result["symbol"],
                 "score": result["total"], "mcap": mcap, "mint": mint,
@@ -902,6 +1181,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             continue
 
         _db.mark_scan_log_alerted(mint)
+        record_narrative_alert(result.get("matched_narrative", "Other"))
         try:
             msg = format_alert(result)[:4000]
         except Exception as _fe:
@@ -943,6 +1223,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         channel_tier, channel_result = selected_channel_alert
         mint = channel_result["mint"]
         if channel_tier == "SCOUTED":
+            record_narrative_alert(channel_result.get("matched_narrative", "Other"))
             add_to_watchlist(mint, {
                 "name": channel_result["name"], "symbol": channel_result["symbol"],
                 "score": channel_result["total"], "mcap": channel_result.get("mcap", 0), "mint": mint,
@@ -965,6 +1246,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 print(f"[SCANNER] scouted channel error ch={alert_channel}: {e}", flush=True)
         else:
             _db.mark_scan_log_alerted(mint)
+            record_narrative_alert(channel_result.get("matched_narrative", "Other"))
             try:
                 channel_msg = format_alert(channel_result)[:4000]
             except Exception as e:

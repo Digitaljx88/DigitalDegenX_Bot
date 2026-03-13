@@ -15,6 +15,7 @@ import json
 import sqlite3
 import threading
 import time
+from collections import defaultdict
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +26,7 @@ _local = threading.local()
 _session_seen_tokens: set[str] = set()
 
 SEEN_TOKEN_TTL = 3600  # legacy constant kept for backward compatibility
+_FIFO_EPSILON = 1e-9
 
 
 # ── Connection management ──────────────────────────────────────────────────────
@@ -98,10 +100,58 @@ def init():
                 buy_price_usd REAL,
                 mcap         REAL,
                 pnl_pct      REAL,
-                tx_sig       TEXT
+                tx_sig       TEXT,
+                entry_source TEXT,
+                entry_age_mins REAL,
+                entry_liquidity_usd REAL,
+                entry_txns_5m INTEGER,
+                entry_score_raw INTEGER,
+                entry_score_effective INTEGER,
+                entry_tier TEXT,
+                entry_wallet_signal REAL,
+                entry_archetype TEXT,
+                entry_source_rank INTEGER,
+                entry_confidence REAL,
+                exit_reason TEXT,
+                exit_trigger TEXT,
+                exit_score_effective INTEGER,
+                exit_mcap REAL,
+                hold_seconds REAL
             );
             CREATE INDEX IF NOT EXISTS idx_trades_uid_ts ON trades(uid, ts DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_mint   ON trades(uid, mint);
+
+            -- Closed-trade attribution with FIFO lot matching
+            CREATE TABLE IF NOT EXISTS closed_trades (
+                id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid                   INTEGER NOT NULL,
+                mint                  TEXT    NOT NULL,
+                mode                  TEXT    NOT NULL,
+                symbol                TEXT,
+                name                  TEXT,
+                narrative             TEXT,
+                buy_trade_id          INTEGER NOT NULL,
+                sell_trade_id         INTEGER NOT NULL,
+                buy_ts                REAL    NOT NULL,
+                sell_ts               REAL    NOT NULL,
+                qty_sold              REAL    NOT NULL,
+                sol_in                REAL    NOT NULL,
+                sol_out               REAL    NOT NULL,
+                pnl_sol               REAL    NOT NULL,
+                pnl_pct               REAL    NOT NULL,
+                hold_s                REAL    NOT NULL,
+                buy_price_usd         REAL,
+                sell_price_usd        REAL,
+                tx_sig                TEXT,
+                entry_source          TEXT,
+                entry_age_mins        REAL,
+                entry_score_effective INTEGER,
+                entry_confidence      REAL,
+                entry_archetype       TEXT,
+                exit_reason           TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_closed_trades_uid_sell_ts ON closed_trades(uid, sell_ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_closed_trades_uid_mint ON closed_trades(uid, mint);
 
             -- Auto-sell rules per user/token (complex config stored as JSON blob)
             CREATE TABLE IF NOT EXISTS auto_sell (
@@ -211,6 +261,32 @@ def init():
         except Exception:
             pass  # column already exists
 
+    _new_trade_cols = [
+        ("entry_source", "TEXT"),
+        ("entry_age_mins", "REAL"),
+        ("entry_liquidity_usd", "REAL"),
+        ("entry_txns_5m", "INTEGER"),
+        ("entry_score_raw", "INTEGER"),
+        ("entry_score_effective", "INTEGER"),
+        ("entry_tier", "TEXT"),
+        ("entry_wallet_signal", "REAL"),
+        ("entry_archetype", "TEXT"),
+        ("entry_source_rank", "INTEGER"),
+        ("entry_confidence", "REAL"),
+        ("exit_reason", "TEXT"),
+        ("exit_trigger", "TEXT"),
+        ("exit_score_effective", "INTEGER"),
+        ("exit_mcap", "REAL"),
+        ("hold_seconds", "REAL"),
+    ]
+    for col, defn in _new_trade_cols:
+        try:
+            with _conn() as c:
+                c.execute(f"ALTER TABLE trades ADD COLUMN {col} {defn}")
+                c.commit()
+        except Exception:
+            pass
+
 
 # ── Portfolios ─────────────────────────────────────────────────────────────────
 
@@ -276,6 +352,22 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str = "",
         "mcap":         kwargs.get("mcap"),
         "pnl_pct":      kwargs.get("pnl_pct"),
         "tx_sig":       kwargs.get("tx_sig"),
+        "entry_source": kwargs.get("entry_source"),
+        "entry_age_mins": kwargs.get("entry_age_mins"),
+        "entry_liquidity_usd": kwargs.get("entry_liquidity_usd"),
+        "entry_txns_5m": kwargs.get("entry_txns_5m"),
+        "entry_score_raw": kwargs.get("entry_score_raw"),
+        "entry_score_effective": kwargs.get("entry_score_effective"),
+        "entry_tier": kwargs.get("entry_tier"),
+        "entry_wallet_signal": kwargs.get("entry_wallet_signal"),
+        "entry_archetype": kwargs.get("entry_archetype"),
+        "entry_source_rank": kwargs.get("entry_source_rank"),
+        "entry_confidence": kwargs.get("entry_confidence"),
+        "exit_reason": kwargs.get("exit_reason"),
+        "exit_trigger": kwargs.get("exit_trigger"),
+        "exit_score_effective": kwargs.get("exit_score_effective"),
+        "exit_mcap": kwargs.get("exit_mcap"),
+        "hold_seconds": kwargs.get("hold_seconds"),
     }
     cols = ", ".join(row.keys())
     placeholders = ", ".join("?" * len(row))
@@ -283,6 +375,7 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str = "",
         f"INSERT INTO trades({cols}) VALUES({placeholders})",
         tuple(row.values()),
     )
+    reconcile_closed_trades(uid)
     return cur.lastrowid
 
 
@@ -312,6 +405,150 @@ def get_trade_count(uid: int, mode: str | None = None) -> int:
         params.append(mode)
     row = _fetchone(f"SELECT COUNT(*) as n FROM trades WHERE {where}", tuple(params))
     return row["n"] if row else 0
+
+
+def reconcile_closed_trades(uid: int | None = None) -> int:
+    """
+    Rebuild FIFO closed-trade attribution from raw trades.
+
+    Each sell is matched against prior buy lots for the same uid/mode/mint.
+    Partial sells are allocated proportionally across remaining buy lots.
+    """
+    where = ""
+    params: tuple = ()
+    if uid is not None:
+        where = "WHERE uid=?"
+        params = (uid,)
+
+    with _conn() as c:
+        if uid is None:
+            c.execute("DELETE FROM closed_trades")
+        else:
+            c.execute("DELETE FROM closed_trades WHERE uid=?", (uid,))
+
+        rows = c.execute(
+            f"SELECT * FROM trades {where} ORDER BY uid ASC, mode ASC, mint ASC, ts ASC, id ASC",
+            params,
+        ).fetchall()
+
+        lots: dict[tuple[int, str, str], list[dict]] = defaultdict(list)
+        inserted = 0
+        for row in rows:
+            trade = dict(row)
+            action = str(trade.get("action") or "").lower()
+            key = (
+                int(trade.get("uid") or 0),
+                str(trade.get("mode") or ""),
+                str(trade.get("mint") or ""),
+            )
+
+            if action == "buy":
+                qty = float(trade.get("token_amount") or 0)
+                sol_in = float(trade.get("sol_amount") or 0)
+                if qty > _FIFO_EPSILON and sol_in > 0:
+                    lots[key].append({
+                        "trade": trade,
+                        "qty_left": qty,
+                        "sol_left": sol_in,
+                    })
+                continue
+
+            if action != "sell":
+                continue
+
+            sell_qty = float(trade.get("token_amount") or 0)
+            sell_sol_total = float(trade.get("sol_received") or 0)
+            if sell_qty <= _FIFO_EPSILON or sell_sol_total <= 0:
+                continue
+
+            queue = lots.get(key) or []
+            if not queue:
+                continue
+
+            qty_remaining = sell_qty
+            sol_out_remaining = sell_sol_total
+            while qty_remaining > _FIFO_EPSILON and queue:
+                buy_lot = queue[0]
+                buy_trade = buy_lot["trade"]
+                qty_left = float(buy_lot["qty_left"] or 0)
+                if qty_left <= _FIFO_EPSILON:
+                    queue.pop(0)
+                    continue
+
+                matched_qty = min(qty_remaining, qty_left)
+                buy_sol_share = float(buy_lot["sol_left"] or 0) * (matched_qty / qty_left)
+                is_last_match = matched_qty >= (qty_remaining - _FIFO_EPSILON) or len(queue) == 1
+                sell_sol_share = sol_out_remaining if is_last_match else sell_sol_total * (matched_qty / sell_qty)
+                pnl_sol = sell_sol_share - buy_sol_share
+                pnl_pct = (pnl_sol / buy_sol_share * 100.0) if buy_sol_share > 0 else 0.0
+                hold_s = max(0.0, float(trade.get("ts") or 0) - float(buy_trade.get("ts") or 0))
+
+                c.execute(
+                    """
+                    INSERT INTO closed_trades(
+                        uid, mint, mode, symbol, name, narrative,
+                        buy_trade_id, sell_trade_id, buy_ts, sell_ts,
+                        qty_sold, sol_in, sol_out, pnl_sol, pnl_pct, hold_s,
+                        buy_price_usd, sell_price_usd, tx_sig,
+                        entry_source, entry_age_mins, entry_score_effective,
+                        entry_confidence, entry_archetype, exit_reason
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    """,
+                    (
+                        buy_trade.get("uid"),
+                        buy_trade.get("mint"),
+                        trade.get("mode") or buy_trade.get("mode"),
+                        trade.get("symbol") or buy_trade.get("symbol"),
+                        trade.get("name") or buy_trade.get("name"),
+                        buy_trade.get("narrative") or trade.get("narrative"),
+                        buy_trade.get("id"),
+                        trade.get("id"),
+                        buy_trade.get("ts"),
+                        trade.get("ts"),
+                        matched_qty,
+                        buy_sol_share,
+                        sell_sol_share,
+                        pnl_sol,
+                        pnl_pct,
+                        hold_s,
+                        buy_trade.get("price_usd"),
+                        trade.get("price_usd"),
+                        trade.get("tx_sig"),
+                        buy_trade.get("entry_source"),
+                        buy_trade.get("entry_age_mins"),
+                        buy_trade.get("entry_score_effective") or buy_trade.get("heat_score"),
+                        buy_trade.get("entry_confidence"),
+                        buy_trade.get("entry_archetype"),
+                        trade.get("exit_reason") or trade.get("exit_trigger"),
+                    ),
+                )
+                inserted += 1
+
+                buy_lot["qty_left"] = qty_left - matched_qty
+                buy_lot["sol_left"] = float(buy_lot["sol_left"] or 0) - buy_sol_share
+                qty_remaining -= matched_qty
+                sol_out_remaining -= sell_sol_share
+
+                if buy_lot["qty_left"] <= _FIFO_EPSILON:
+                    queue.pop(0)
+
+        c.commit()
+        return inserted
+
+
+def get_closed_trades(uid: int, limit: int = 200, offset: int = 0,
+                      mode: str | None = None) -> list[dict]:
+    """Return FIFO-attributed closed trades for uid, newest closed first."""
+    where = "uid=?"
+    params: list = [uid]
+    if mode:
+        where += " AND mode=?"
+        params.append(mode)
+    rows = _fetchall(
+        f"SELECT * FROM closed_trades WHERE {where} ORDER BY sell_ts DESC, id DESC LIMIT ? OFFSET ?",
+        tuple(params) + (limit, offset),
+    )
+    return [dict(r) for r in rows]
 
 
 # ── Auto-sell ──────────────────────────────────────────────────────────────────

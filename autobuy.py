@@ -117,6 +117,24 @@ def gate_momentum(result: dict) -> tuple[bool, str]:
     return True, ""
 
 
+def gate_entry_quality(result: dict) -> tuple[bool, str]:
+    """
+    Block trades the scanner already flagged as weak-quality or out of the
+    strict fresh-launch autobuy window.
+    """
+    reasons: list[str] = []
+    reasons.extend(result.get("entry_quality_reasons") or [])
+    if result.get("entry_quality_autobuy_only_reasons"):
+        reasons.extend(result.get("entry_quality_autobuy_only_reasons") or [])
+    if result.get("entry_quality_force_scouted"):
+        reasons.extend(result.get("entry_quality_force_scouted_reasons") or ["force scouted"])
+    if result.get("entry_quality_autobuy_blocked"):
+        if reasons:
+            return False, "entry quality blocked — " + ", ".join(dict.fromkeys(str(r) for r in reasons if r))
+        return False, "entry quality blocked"
+    return True, ""
+
+
 def gate_freshness(mint: str) -> tuple[bool, str, float, float]:
     """
     Re-fetch DexScreener pair data to verify token is still active.
@@ -139,8 +157,14 @@ def gate_freshness(mint: str) -> tuple[bool, str, float, float]:
         price_h1 = float((pair.get("priceChange") or {}).get("h1", 0) or 0)
         vol_h1   = float((pair.get("volume") or {}).get("h1", 1) or 1)
         m5_pace  = vol_m5 * 12
+        tx_buys  = int(((pair.get("txns") or {}).get("m5") or {}).get("buys", 0) or 0)
+        tx_sells = int(((pair.get("txns") or {}).get("m5") or {}).get("sells", 0) or 0)
+        total_tx = tx_buys + tx_sells
+        buy_ratio = (tx_buys / total_tx) if total_tx > 0 else 0.5
         if vol_m5 < 50:
             return False, f"fresh data: zero activity (vol_m5=${vol_m5:.0f} < $50 floor)", vol_m5, price_h1
+        if total_tx >= 8 and buy_ratio < 0.52:
+            return False, f"fresh data: buy ratio fading ({buy_ratio:.0%})", vol_m5, price_h1
         if not (price_h1 >= -5 or m5_pace >= vol_h1 * 0.3):
             return False, (
                 f"fresh data: momentum dead — "
@@ -164,7 +188,7 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
     mint   = result.get("mint", "")
     symbol = result.get("symbol", mint[:6])
     name   = result.get("name", symbol)
-    score  = result.get("total", 0)
+    score  = result.get("effective_score", result.get("total", 0))
     mcap   = result.get("mcap", 0)
 
     # Reset daily spend counter if it's a new UTC day
@@ -189,6 +213,7 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
         lambda: gate_daily_limit(uid, cfg, sol_amount),
         lambda: gate_position_limit(uid, cfg),
         lambda: gate_momentum(result),
+        lambda: gate_entry_quality(result),
     ]
 
     for g in gates:
