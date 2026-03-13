@@ -202,7 +202,10 @@ async def _build_paper_portfolio_view(uid: int) -> dict:
     portfolio = b.get_portfolio(uid) or {}
     sol_balance = _safe_float(portfolio.get("SOL", 0))
     pumpfun_mod = getattr(b, "pumpfun", None)
-    sol_usd = _safe_float(pumpfun_mod.get_sol_price() if pumpfun_mod else None, 150.0) or 150.0
+    try:
+        sol_usd = _safe_float(pumpfun_mod.get_sol_price() if pumpfun_mod else None, 150.0) or 150.0
+    except Exception:
+        sol_usd = 150.0
 
     raw_positions = [(mint, amount) for mint, amount in portfolio.items() if mint != "SOL" and _safe_float(amount) > 0]
     if not raw_positions:
@@ -225,81 +228,105 @@ async def _build_paper_portfolio_view(uid: int) -> dict:
     total_value_usd = sol_balance * sol_usd
 
     for (mint, raw_amount), data in zip(raw_positions, price_data):
-        payload = data if isinstance(data, dict) else {}
-        pair = payload.get("pair") or {}
-        bc = payload.get("bc") or {}
-        coin = payload.get("coin") or {}
-        cfg = auto_sell_configs.get(mint, {})
+        try:
+            payload = data if isinstance(data, dict) else {}
+            pair = payload.get("pair") or {}
+            bc = payload.get("bc") or {}
+            coin = payload.get("coin") or {}
+            cfg = auto_sell_configs.get(mint, {})
 
-        base = pair.get("baseToken") or {}
-        decimals = int(base.get("decimals") or cfg.get("decimals") or 6)
-        ui_amount = _safe_float(raw_amount) / (10 ** max(decimals, 0))
+            base = pair.get("baseToken") or {}
+            decimals = int(base.get("decimals") or cfg.get("decimals") or 6)
+            ui_amount = _safe_float(raw_amount) / (10 ** max(decimals, 0))
 
-        price_sol = _safe_float(pair.get("priceNative"))
-        price_usd = _safe_float(pair.get("priceUsd"))
-        if not price_sol and bc.get("virtual_token_reserves") and bc.get("virtual_token_reserves", 0) > 0:
-            try:
-                price_sol = (
-                    _safe_float(bc.get("virtual_sol_reserves"))
-                    / _safe_float(bc.get("virtual_token_reserves"))
-                    / 1e9
-                    * 1e6
-                )
-            except Exception:
-                price_sol = 0.0
-        if not price_usd and price_sol:
-            price_usd = price_sol * sol_usd
+            price_sol = _safe_float(pair.get("priceNative"))
+            price_usd = _safe_float(pair.get("priceUsd"))
+            virtual_token_reserves = _safe_float(bc.get("virtual_token_reserves"))
+            if not price_sol and virtual_token_reserves > 0:
+                try:
+                    price_sol = (
+                        _safe_float(bc.get("virtual_sol_reserves"))
+                        / virtual_token_reserves
+                        / 1e9
+                        * 1e6
+                    )
+                except Exception:
+                    price_sol = 0.0
+            if not price_usd and price_sol:
+                price_usd = price_sol * sol_usd
 
-        value_sol = price_sol * ui_amount if price_sol else 0.0
-        value_usd = price_usd * ui_amount if price_usd else 0.0
-        total_value_sol += value_sol
-        total_value_usd += value_usd
+            value_sol = price_sol * ui_amount if price_sol else 0.0
+            value_usd = price_usd * ui_amount if price_usd else 0.0
+            total_value_sol += value_sol
+            total_value_usd += value_usd
 
-        buy_price_usd = _safe_float(cfg.get("buy_price_usd"))
-        pnl_pct = None
-        if buy_price_usd > 0 and price_usd > 0:
-            pnl_pct = ((price_usd - buy_price_usd) / buy_price_usd) * 100.0
+            buy_price_usd = _safe_float(cfg.get("buy_price_usd"))
+            pnl_pct = None
+            if buy_price_usd > 0 and price_usd > 0:
+                pnl_pct = ((price_usd - buy_price_usd) / buy_price_usd) * 100.0
 
-        next_target = None
-        for target in cfg.get("mult_targets", []) or []:
-            if not target.get("triggered"):
-                next_target = target.get("label") or f"{target.get('multiplier', 0)}x"
-                break
+            next_target = None
+            for target in cfg.get("mult_targets", []) or []:
+                if not target.get("triggered"):
+                    next_target = target.get("label") or f"{target.get('multiplier', 0)}x"
+                    break
 
-        symbol = (
-            cfg.get("symbol")
-            or base.get("symbol")
-            or coin.get("symbol")
-            or mint[:8]
-        )
-        name = (
-            cfg.get("name")
-            or base.get("name")
-            or coin.get("name")
-            or symbol
-        )
-        mcap = _safe_float(pair.get("marketCap") or coin.get("usd_market_cap") or coin.get("market_cap"))
+            symbol = (
+                cfg.get("symbol")
+                or base.get("symbol")
+                or coin.get("symbol")
+                or mint[:8]
+            )
+            name = (
+                cfg.get("name")
+                or base.get("name")
+                or coin.get("name")
+                or symbol
+            )
+            mcap = _safe_float(pair.get("marketCap") or coin.get("usd_market_cap") or coin.get("market_cap"))
 
-        positions.append(
-            {
-                "mint": mint,
-                "symbol": symbol,
-                "name": name,
-                "raw_amount": _safe_float(raw_amount),
-                "ui_amount": ui_amount,
-                "decimals": decimals,
-                "price_sol": price_sol or None,
-                "price_usd": price_usd or None,
-                "value_sol": value_sol or None,
-                "value_usd": value_usd or None,
-                "buy_price_usd": buy_price_usd or None,
-                "pnl_pct": pnl_pct,
-                "mcap": mcap or None,
-                "auto_sell_enabled": bool(cfg.get("enabled")),
-                "entry_sol": _safe_float(cfg.get("sol_amount")) or None,
-                "next_target": next_target,
-            }
-        )
+            positions.append(
+                {
+                    "mint": mint,
+                    "symbol": symbol,
+                    "name": name,
+                    "raw_amount": _safe_float(raw_amount),
+                    "ui_amount": ui_amount,
+                    "decimals": decimals,
+                    "price_sol": price_sol or None,
+                    "price_usd": price_usd or None,
+                    "value_sol": value_sol or None,
+                    "value_usd": value_usd or None,
+                    "buy_price_usd": buy_price_usd or None,
+                    "pnl_pct": pnl_pct,
+                    "mcap": mcap or None,
+                    "auto_sell_enabled": bool(cfg.get("enabled")),
+                    "entry_sol": _safe_float(cfg.get("sol_amount")) or None,
+                    "next_target": next_target,
+                }
+            )
+        except Exception as exc:
+            positions.append(
+                {
+                    "mint": mint,
+                    "symbol": mint[:8],
+                    "name": mint[:8],
+                    "raw_amount": _safe_float(raw_amount),
+                    "ui_amount": _safe_float(raw_amount) / 1e6,
+                    "decimals": 6,
+                    "price_sol": None,
+                    "price_usd": None,
+                    "value_sol": None,
+                    "value_usd": None,
+                    "buy_price_usd": None,
+                    "pnl_pct": None,
+                    "mcap": None,
+                    "auto_sell_enabled": False,
+                    "entry_sol": None,
+                    "next_target": None,
+                    "error": str(exc),
+                }
+            )
 
     positions.sort(key=lambda item: _safe_float(item.get("value_sol")), reverse=True)
 
@@ -328,7 +355,17 @@ async def get_portfolio(uid: int):
     """Return raw and enriched paper portfolio data for a user."""
     b = _bot()
     portfolio = b.get_portfolio(uid)
-    paper_view = await _build_paper_portfolio_view(uid)
+    try:
+        paper_view = await _build_paper_portfolio_view(uid)
+    except Exception as exc:
+        paper_view = {
+            "sol_balance": _safe_float(portfolio.get("SOL", 0)),
+            "sol_price_usd": 150.0,
+            "positions": [],
+            "total_value_sol": _safe_float(portfolio.get("SOL", 0)),
+            "total_value_usd": _safe_float(portfolio.get("SOL", 0)) * 150.0,
+            "error": str(exc),
+        }
     return {"uid": uid, "portfolio": portfolio, "paper": paper_view}
 
 
