@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { Suspense } from "react";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { NavLink } from "@/components/nav-link";
@@ -18,6 +19,21 @@ export const metadata: Metadata = {
   title: "DigitalDegenX Control",
   description: "Scanner, trades, portfolio, and bot controls for DigitalDegenX.",
 };
+
+function HeaderControls() {
+  return (
+    <>
+      <nav className="flex flex-wrap gap-3">
+        <NavLink href="/" label="Overview" />
+        <NavLink href="/scanner" label="Scanner" />
+        <NavLink href="/trades" label="Trades" />
+        <NavLink href="/portfolio" label="Portfolio" />
+        <NavLink href="/settings" label="Settings" />
+      </nav>
+      <UidBar />
+    </>
+  );
+}
 
 export default function RootLayout({
   children,
@@ -39,14 +55,9 @@ export default function RootLayout({
                   Telegram for alerts, browser for real operations. This dashboard reads directly from your bot API.
                 </p>
               </div>
-              <nav className="flex flex-wrap gap-3">
-                <NavLink href="/" label="Overview" />
-                <NavLink href="/scanner" label="Scanner" />
-                <NavLink href="/trades" label="Trades" />
-                <NavLink href="/portfolio" label="Portfolio" />
-                <NavLink href="/settings" label="Settings" />
-              </nav>
-              <UidBar />
+              <Suspense fallback={<div className="text-sm text-[var(--muted-foreground)]">Loading controls...</div>}>
+                <HeaderControls />
+              </Suspense>
             </header>
             <main className="flex-1">{children}</main>
           </div>
