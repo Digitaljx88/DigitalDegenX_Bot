@@ -1,0 +1,15 @@
+[Unit]
+Description=DigitalDegenX FastAPI Control API
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/Users/rosalindjames/DigitalDegenX_Bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/Library/Developer/CommandLineTools/usr/bin/python3 -m uvicorn api_server:app --host 127.0.0.1 --port 8080
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

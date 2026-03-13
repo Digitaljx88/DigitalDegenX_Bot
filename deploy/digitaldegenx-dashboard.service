@@ -1,0 +1,17 @@
+[Unit]
+Description=DigitalDegenX Next.js Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=%i
+WorkingDirectory=/Users/rosalindjames/DigitalDegenX_Bot/nextjs
+Environment=NODE_ENV=production
+Environment=BOT_API_BASE_URL=http://127.0.0.1:8080
+Environment=BOT_API_KEY=ddx_local_dashboard_2026
+ExecStart=/opt/homebrew/bin/npm run start -- --hostname 127.0.0.1 --port 3000
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

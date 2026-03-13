@@ -25,6 +25,7 @@ import wallet_manager as wm
 import research_logger
 import portfolio_alerts
 import settings_manager as sm
+import trade_center as tc
 
 import db as _db
 _db.init()
@@ -3922,135 +3923,16 @@ async def cmd_portfolio(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cmd_trades_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    View trade history with filtering.
-    Usage:
-      /trades [filter] [page]
-    Filters:
-      (none)         - All trades (latest first)
-      win            - Profitable trades only
-      loss           - Losing trades only
-      <symbol|CA>    - Filter by symbol or contract address
-      <date1:date2>  - Date range (YYYY-MM-DD:YYYY-MM-DD)
-    Examples:
-      /trades
-      /trades win
-      /trades BONK
-      /trades 2024-03-01:2024-03-05 page 2
-    """
     uid = update.effective_user.id
-    filter_type = context.args[0].lower() if context.args else None
-    page_num = 1
+    query = tc.parse_trade_args(context.args or [])
+    set_state(uid, trade_center={
+        "view": query.view,
+        "filter_spec": query.filter_spec,
+        "page": query.page,
+    })
     try:
-        if len(context.args) >= 2 and context.args[-2].lower() == "page":
-            page_num = max(1, int(context.args[-1]))
-    except (ValueError, IndexError):
-        pass
-
-    set_state(uid, trades_filter=filter_type, trades_page=page_num)
-
-    try:
-        trades = _db.get_trades(uid, limit=10000)
-        if not isinstance(trades, list):
-            trades = []
-
-        # Apply filters
-        filtered_trades = trades[:]  # Copy list
-        
-        if filter_type == "win":
-            filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) > 0 and t.get("action") == "sell"]
-        elif filter_type == "loss":
-            filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) <= 0 and t.get("action") == "sell"]
-        elif filter_type and ":" in filter_type and len(filter_type.split(":")[0]) == 10:
-            try:
-                date1, date2 = filter_type.split(":")
-                filtered_trades = [
-                    t for t in filtered_trades 
-                    if date1 <= t.get("date", "") <= date2
-                ]
-            except Exception:
-                pass
-        elif filter_type and filter_type not in ("page", "win", "loss"):
-            query_lower = filter_type.lower()
-            filtered_trades = [
-                t for t in filtered_trades
-                if query_lower in t.get("symbol", "").lower() or query_lower in t.get("mint", "").lower()
-            ]
-        
-        filtered_trades = sorted(filtered_trades, key=lambda t: t.get("ts", 0), reverse=True)
-        
-        if not filtered_trades:
-            await update.message.reply_text(
-                "📊 *Trade History*\n\nNo trades match that filter.",
-                parse_mode="Markdown", reply_markup=back_kb("menu:main")
-            )
-            return
-        
-        # Pagination
-        trades_per_page = 20
-        total_pages = max(1, (len(filtered_trades) + trades_per_page - 1) // trades_per_page)
-        page_num = min(page_num, total_pages)
-        start_idx = (page_num - 1) * trades_per_page
-        end_idx = start_idx + trades_per_page
-        page_trades = filtered_trades[start_idx:end_idx]
-        
-        # Format output
-        lines = [
-            f"📊 *Trade History* — Page {page_num}/{total_pages}",
-            f"Total: {len(filtered_trades)} trades",
-            "",
-            "```",
-            "Date       Sym    Action  Price        SOL",
-            "──────────────────────────────────────────",
-        ]
-
-        for trade in page_trades:
-            try:
-                date_str = str(trade.get("date", "????-??-??"))[:10]
-                mint = trade.get("mint", "???")
-                sym = trade.get("symbol", mint[:6] if mint else "???")
-                symbol = str(sym)[:6].ljust(6)
-                action = str(trade.get("action", "?")).upper()
-
-                if action == "BUY":
-                    price = float(trade.get("price_usd") or 0)
-                    price_str = (f"${price:.6g}" if price else "-").ljust(12)
-                    sol = float(trade.get("sol_amount") or 0)
-                    sol_str = f"-{sol:.3f}◎"
-                    status_str = "🟢 BUY  "
-                else:
-                    pnl_pct = float(trade.get("pnl_pct") or 0)
-                    price = float(trade.get("buy_price_usd") or trade.get("price_usd") or 0)
-                    price_str = (f"${price:.6g}" if price else "-").ljust(12)
-                    sol = float(trade.get("sol_received") or 0)
-                    sol_str = f"+{sol:.3f}◎"
-                    if pnl_pct > 0:
-                        status_str = f"✅+{pnl_pct:.1f}%"
-                    else:
-                        status_str = f"❌{pnl_pct:.1f}%"
-
-                lines.append(f"{date_str}  {symbol} {status_str}  {price_str} {sol_str}")
-            except Exception as e:
-                print(f"[TRADES] Error formatting trade: {e}")
-                continue
-
-        lines.append("```")
-        
-        # Navigation
-        kb = []
-        if page_num > 1:
-            kb.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"trades:page:{page_num - 1}"))
-        if page_num < total_pages:
-            kb.append(InlineKeyboardButton("Next ➡️", callback_data=f"trades:page:{page_num + 1}"))
-        
-        nav_kb = [kb] if kb else []
-        nav_kb.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
-        
-        await update.message.reply_text(
-            "\n".join(lines),
-            parse_mode="Markdown", 
-            reply_markup=InlineKeyboardMarkup(nav_kb)
-        )
+        text, kb = _build_trade_center_page(uid)
+        await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
     except Exception as e:
         print(f"[TRADES] Command error: {e}")
         import traceback
@@ -4062,112 +3944,184 @@ async def cmd_trades_history(update: Update, context: ContextTypes.DEFAULT_TYPE)
         )
 
 
-async def trades_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    uid = query.from_user.id
-    try:
-        page_num = max(1, int(query.data.split(":")[2]))
-    except (ValueError, IndexError):
-        await query.answer("Invalid page", show_alert=False)
-        return
+def _trade_state(uid: int) -> dict:
+    state = get_state(uid, "trade_center", {"view": "ledger", "filter_spec": "all", "page": 1})
+    return {
+        "view": state.get("view", "ledger"),
+        "filter_spec": tc.normalize_filter_spec(state.get("filter_spec", "all")),
+        "page": max(1, int(state.get("page", 1))),
+    }
 
-    filter_type = get_state(uid, "trades_filter")
-    set_state(uid, trades_page=page_num)
-    await query.answer()
 
-    trades = _db.get_trades(uid, limit=10000)
-    if not isinstance(trades, list):
-        trades = []
+def _trade_filter_label(filter_spec: str) -> str:
+    if filter_spec.startswith("search:"):
+        return f"Search: {filter_spec.split(':', 1)[1]}"
+    if filter_spec.startswith("date:"):
+        return f"Date: {filter_spec.split(':', 1)[1]}"
+    return {
+        "all": "All",
+        "wins": "Wins",
+        "losses": "Losses",
+        "buys": "Buys",
+        "sells": "Sells",
+        "paper": "Paper",
+        "live": "Live",
+    }.get(filter_spec, filter_spec.title())
 
-    filtered_trades = trades[:]
-    if filter_type == "win":
-        filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) > 0 and t.get("action") == "sell"]
-    elif filter_type == "loss":
-        filtered_trades = [t for t in filtered_trades if t.get("pnl_pct", 0) <= 0 and t.get("action") == "sell"]
-    elif filter_type and ":" in filter_type and len(filter_type.split(":")[0]) == 10:
-        try:
-            date1, date2 = filter_type.split(":")
-            filtered_trades = [
-                t for t in filtered_trades
-                if date1 <= t.get("date", "") <= date2
-            ]
-        except Exception:
-            pass
-    elif filter_type and filter_type not in ("page", "win", "loss"):
-        query_lower = filter_type.lower()
-        filtered_trades = [
-            t for t in filtered_trades
-            if query_lower in t.get("symbol", "").lower() or query_lower in t.get("mint", "").lower()
-        ]
 
-    filtered_trades = sorted(filtered_trades, key=lambda t: t.get("ts", 0), reverse=True)
+def _hold_label(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds/60)}m"
+    if seconds < 86400:
+        return f"{int(seconds/3600)}h"
+    return f"{int(seconds/86400)}d"
 
-    if not filtered_trades:
-        await query.edit_message_text(
-            "📊 *Trade History*\n\nNo trades match that filter.",
-            parse_mode="Markdown",
-            reply_markup=back_kb("menu:main"),
+
+def _trade_center_kb(state: dict, page: int, total_pages: int) -> InlineKeyboardMarkup:
+    rows = [
+        [
+            InlineKeyboardButton("📒 Ledger", callback_data="trades:view:ledger"),
+            InlineKeyboardButton("📈 Closed", callback_data="trades:view:closed"),
+            InlineKeyboardButton("📊 Stats", callback_data="trades:view:stats"),
+        ],
+        [
+            InlineKeyboardButton("All", callback_data="trades:filter:all"),
+            InlineKeyboardButton("Wins", callback_data="trades:filter:wins"),
+            InlineKeyboardButton("Losses", callback_data="trades:filter:losses"),
+        ],
+        [
+            InlineKeyboardButton("Buys", callback_data="trades:filter:buys"),
+            InlineKeyboardButton("Sells", callback_data="trades:filter:sells"),
+            InlineKeyboardButton("Paper", callback_data="trades:filter:paper"),
+            InlineKeyboardButton("Live", callback_data="trades:filter:live"),
+        ],
+    ]
+    nav = []
+    if page > 1:
+        nav.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"trades:page:{page-1}"))
+    if total_pages > 1:
+        nav.append(InlineKeyboardButton(f"{page}/{total_pages}", callback_data="trades:noop"))
+    if page < total_pages:
+        nav.append(InlineKeyboardButton("Next ➡️", callback_data=f"trades:page:{page+1}"))
+    if nav:
+        rows.append(nav)
+    rows.append([
+        InlineKeyboardButton("🔄 Refresh", callback_data="trades:refresh"),
+        InlineKeyboardButton("⬅️ Menu", callback_data="menu:main"),
+    ])
+    return InlineKeyboardMarkup(rows)
+
+
+def _build_trade_center_page(uid: int) -> tuple[str, InlineKeyboardMarkup]:
+    state = _trade_state(uid)
+    trades = sorted(_db.get_trades(uid, limit=10000), key=lambda row: row.get("ts", 0), reverse=True)
+    closed = tc.build_closed_trades(trades)
+    if not trades:
+        return (
+            "📊 *Trade Center*\n\nNo trades recorded yet.\n\n_Use /buy or /sell to start building your ledger._",
+            _trade_center_kb(state, 1, 1),
         )
-        return
 
-    trades_per_page = 20
-    total_pages = max(1, (len(filtered_trades) + trades_per_page - 1) // trades_per_page)
-    page_num = min(page_num, total_pages)
-    start_idx = (page_num - 1) * trades_per_page
-    end_idx = start_idx + trades_per_page
-    page_trades = filtered_trades[start_idx:end_idx]
+    if state["view"] == "closed":
+        rows = tc.filter_closed_trades(closed, state["filter_spec"])
+        per_page = 8
+    elif state["view"] == "stats":
+        rows = []
+        per_page = 1
+    else:
+        rows = tc.filter_trades(trades, state["filter_spec"])
+        per_page = 10
+
+    summary = tc.summarize_trades(tc.filter_trades(trades, state["filter_spec"]), tc.filter_closed_trades(closed, state["filter_spec"]))
+    total_pages = max(1, (len(rows) + per_page - 1) // per_page) if state["view"] != "stats" else 1
+    page = min(state["page"], total_pages)
+    state["page"] = page
+    set_state(uid, trade_center=state)
 
     lines = [
-        f"📊 *Trade History* — Page {page_num}/{total_pages}",
-        f"Total: {len(filtered_trades)} trades",
+        f"📊 *Trade Center* — {_trade_filter_label(state['filter_spec'])}",
+        f"View: *{state['view'].title()}*",
+        f"Trades: `{summary['total_rows']}` · Closed: `{summary['closed_count']}` · Win rate: `{summary['win_rate']:.0f}%`",
+        f"Realized P&L: `{'+' if summary['realized_pnl_sol'] >= 0 else ''}{summary['realized_pnl_sol']:.4f} SOL`",
         "",
-        "```",
-        "Date       Sym    Action  Price        SOL",
-        "──────────────────────────────────────────",
     ]
 
-    for trade in page_trades:
+    if state["view"] == "stats":
+        best = summary["best_trade"]
+        worst = summary["worst_trade"]
+        lines.extend([
+            f"Buys: `{summary['buy_count']}` · Sells: `{summary['sell_count']}`",
+            f"Paper: `{summary['paper_count']}` · Live: `{summary['live_count']}`",
+            f"Avg hold: `{_hold_label(summary['avg_hold_s']) if summary['closed_count'] else 'n/a'}`",
+            f"Top narrative: *{_esc(summary['top_narrative'])}*",
+            "",
+            f"Best: *{_esc(best['symbol'])}* `{best['pnl_sol']:+.4f}◎`" if best else "Best: `n/a`",
+            f"Worst: *{_esc(worst['symbol'])}* `{worst['pnl_sol']:+.4f}◎`" if worst else "Worst: `n/a`",
+        ])
+        return "\n".join(lines), _trade_center_kb(state, 1, 1)
+
+    if not rows:
+        lines.append("_No trades match this filter._")
+        return "\n".join(lines), _trade_center_kb(state, 1, 1)
+
+    page_rows = rows[(page - 1) * per_page : page * per_page]
+    if state["view"] == "closed":
+        for row in page_rows:
+            sold_at = datetime.fromtimestamp(float(row.get("sell_ts") or 0), tz=timezone.utc).strftime("%m/%d %H:%M")
+            lines.append(
+                f"{'✅' if row['pnl_sol'] >= 0 else '❌'} *${_esc(row['symbol'])}* {'📄' if row['mode']=='paper' else '🔴'} `{sold_at}`\n"
+                f"   In `{row['sol_in']:.4f}◎` → Out `{row['sol_out']:.4f}◎` · `{row['pnl_pct']:+.1f}%` "
+                f"(`{row['pnl_sol']:+.4f}◎`) · hold `{_hold_label(row['hold_s'])}`"
+            )
+    else:
+        for row in page_rows:
+            ts = datetime.fromtimestamp(float(row.get("ts") or 0), tz=timezone.utc).strftime("%m/%d %H:%M")
+            action = str(row.get("action", "")).lower()
+            is_buy = action == "buy"
+            sol = float(row.get("sol_amount") or 0) if is_buy else float(row.get("sol_received") or 0)
+            extra = ""
+            pnl_text = ""
+            if not is_buy and row.get("tx_sig"):
+                extra = f" · [Tx](https://solscan.io/tx/{row['tx_sig']})"
+            if not is_buy:
+                pnl_text = f" · pnl `{float(row.get('pnl_pct') or 0):+.1f}%`"
+            lines.append(
+                f"{'🟢 BUY' if is_buy else '🔻 SELL'} *${_esc(row.get('symbol') or row.get('mint','')[:6])}* "
+                f"{'📄' if str(row.get('mode','')).lower()=='paper' else '🔴'} `{ts}`\n"
+                f"   SOL `{sol:.4f}◎` · tokens `{int(row.get('token_amount') or 0):,}` · "
+                f"price `${float(row.get('price_usd') or 0):.8f}`"
+                f"{pnl_text}{extra}"
+            )
+    return "\n".join(lines), _trade_center_kb(state, page, total_pages)
+
+
+async def trade_center_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    uid = query.from_user.id
+    parts = query.data.split(":")
+    await query.answer()
+    state = _trade_state(uid)
+    action = parts[1] if len(parts) > 1 else ""
+    if action == "page" and len(parts) > 2:
         try:
-            date_str = str(trade.get("date", "????-??-??"))[:10]
-            mint = trade.get("mint", "???")
-            sym = trade.get("symbol", mint[:6] if mint else "???")
-            symbol = str(sym)[:6].ljust(6)
-            action = str(trade.get("action", "?")).upper()
-
-            if action == "BUY":
-                price = float(trade.get("price_usd") or 0)
-                price_str = (f"${price:.6g}" if price else "-").ljust(12)
-                sol = float(trade.get("sol_amount") or 0)
-                sol_str = f"-{sol:.3f}◎"
-                status_str = "🟢 BUY  "
-            else:
-                pnl_pct = float(trade.get("pnl_pct") or 0)
-                price = float(trade.get("buy_price_usd") or trade.get("price_usd") or 0)
-                price_str = (f"${price:.6g}" if price else "-").ljust(12)
-                sol = float(trade.get("sol_received") or 0)
-                sol_str = f"+{sol:.3f}◎"
-                status_str = f"✅+{pnl_pct:.1f}%" if pnl_pct > 0 else f"❌{pnl_pct:.1f}%"
-
-            lines.append(f"{date_str}  {symbol} {status_str}  {price_str} {sol_str}")
-        except Exception as e:
-            print(f"[TRADES] Error formatting trade: {e}")
-            continue
-
-    lines.append("```")
-
-    kb = []
-    if page_num > 1:
-        kb.append(InlineKeyboardButton("⬅️ Previous", callback_data=f"trades:page:{page_num - 1}"))
-    if page_num < total_pages:
-        kb.append(InlineKeyboardButton("Next ➡️", callback_data=f"trades:page:{page_num + 1}"))
-
-    nav_kb = [kb] if kb else []
-    nav_kb.append([InlineKeyboardButton("⬅️ Back", callback_data="menu:main")])
-    await query.edit_message_text(
-        "\n".join(lines),
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup(nav_kb),
-    )
+            state["page"] = max(1, int(parts[2]))
+        except ValueError:
+            pass
+    elif action == "filter" and len(parts) > 2:
+        state["filter_spec"] = tc.normalize_filter_spec(parts[2])
+        state["page"] = 1
+    elif action == "view" and len(parts) > 2:
+        state["view"] = parts[2]
+        state["page"] = 1
+    elif action == "refresh":
+        pass
+    elif action == "noop":
+        return
+    set_state(uid, trade_center=state)
+    text, kb = _build_trade_center_page(uid)
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def cmd_watchbuy(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -4329,35 +4283,24 @@ def _build_history_page(uid: int, page: int) -> tuple:
 
 
 async def cmd_history(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Realized PnL — pairs buys with sells per token, shows closed trade P&L."""
-    uid  = update.effective_user.id
-    args = context.args or []
-    page = 1
-    try:
-        page = int(args[0]) if args else 1
-    except ValueError:
-        pass
-
-    all_trades = _db.get_trades(uid, limit=10000)
-    if not any(t.get("action") == "sell" for t in all_trades):
-        await update.message.reply_text(
-            "📈 *Realized P&L History*\n\nNo closed trades yet.\n\n"
-            "_Buy and sell a token to see your P&L here._",
-            parse_mode="Markdown", reply_markup=back_kb("menu:main")
-        )
-        return
-
-    text, kb = _build_history_page(uid, page)
-    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb)
+    uid = update.effective_user.id
+    query = tc.parse_trade_args(context.args or [])
+    set_state(uid, trade_center={"view": "closed", "filter_spec": query.filter_spec, "page": query.page})
+    text, kb = _build_trade_center_page(uid)
+    await update.message.reply_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def history_page_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    uid   = query.from_user.id
-    page  = int(query.data.split(":")[1])
+    uid = query.from_user.id
+    page = int(query.data.split(":")[1])
     await query.answer()
-    text, kb = _build_history_page(uid, page)
-    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb)
+    state = _trade_state(uid)
+    state["view"] = "closed"
+    state["page"] = page
+    set_state(uid, trade_center=state)
+    text, kb = _build_trade_center_page(uid)
+    await query.edit_message_text(text, parse_mode="Markdown", reply_markup=kb, disable_web_page_preview=True)
 
 
 async def cmd_research_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -12917,7 +12860,7 @@ if __name__ == "__main__":
     app.add_handler(CallbackQueryHandler(gte_callback,                 pattern=r"^gte:"))
     app.add_handler(CallbackQueryHandler(intel_callback,               pattern=r"^intel:"))
     app.add_handler(CallbackQueryHandler(wbalert_callback,             pattern=r"^wbalert:"))
-    app.add_handler(CallbackQueryHandler(trades_page_callback,         pattern=r"^trades:page:"))
+    app.add_handler(CallbackQueryHandler(trade_center_callback,        pattern=r"^trades:"))
     app.add_handler(CallbackQueryHandler(history_page_callback,        pattern=r"^history_page:"))
     app.add_handler(CallbackQueryHandler(qb_preset_callback,           pattern=r"^qb_preset:"))
 

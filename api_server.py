@@ -35,12 +35,15 @@ import os
 import time
 import asyncio
 import secrets
-from typing import Optional
+from typing import Optional, Union
 
 from fastapi import FastAPI, HTTPException, Security, Depends
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+import db as _db
+import settings_manager as sm
+import trade_center as tc
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -132,6 +135,20 @@ class MessageRequest(BaseModel):
     text: str
     parse_mode: str = "Markdown"
 
+
+class AutoBuyUpdate(BaseModel):
+    enabled: Optional[bool] = None
+    sol_amount: Optional[float] = None
+    min_score: Optional[int] = None
+    max_mcap: Optional[float] = None
+    daily_limit_sol: Optional[float] = None
+    max_positions: Optional[int] = None
+    buy_tier: Optional[str] = None
+
+
+class SettingsUpdate(BaseModel):
+    settings: dict[str, Union[int, float, bool, str]]
+
 # ─── Bot reference (set from bot.py after startup) ───────────────────────────
 _app_ref = None   # telegram Application instance
 
@@ -188,6 +205,13 @@ async def scanner_watchlist():
     wl = sc.get_watchlist() or {}
     items = sorted(wl.values(), key=lambda x: -x.get("score", 0))
     return {"count": len(items), "tokens": items}
+
+
+@app.get("/scanner/feed", dependencies=[Depends(verify_key)])
+async def scanner_feed(limit: int = 50):
+    """Return the rolling scanner feed, newest first."""
+    items = _db.get_scan_log(limit=max(1, min(limit, 500)))
+    return {"count": len(items), "items": items}
 
 
 @app.get("/price/{mint}", dependencies=[Depends(verify_key)])
@@ -353,14 +377,68 @@ async def set_threshold(req: ThresholdRequest):
 
 
 @app.get("/trades", dependencies=[Depends(verify_key)])
-async def get_trades(uid: int, limit: int = 20, action: Optional[str] = None):
-    """Return recent trades for a user, optionally filtered by action (buy/sell)."""
-    b      = _bot()
-    trades = [t for t in b.load_trade_log() if t.get("uid") == uid]
-    if action:
-        trades = [t for t in trades if t.get("action") == action]
-    trades = sorted(trades, key=lambda t: t.get("ts", 0), reverse=True)[:limit]
+async def get_trades(
+    uid: int,
+    limit: int = 20,
+    action: Optional[str] = None,
+    mode: Optional[str] = None,
+    filter_spec: Optional[str] = None,
+):
+    """Return recent trades for a user with optional filters."""
+    trades = _db.get_trades(uid, limit=10000, mode=mode, action=action)
+    if filter_spec:
+        trades = tc.filter_trades(trades, filter_spec)
+    trades = sorted(trades, key=lambda t: t.get("ts", 0), reverse=True)[: max(1, min(limit, 500))]
     return {"uid": uid, "count": len(trades), "trades": trades}
+
+
+@app.get("/trades/stats", dependencies=[Depends(verify_key)])
+async def get_trade_stats(uid: int, filter_spec: Optional[str] = None):
+    """Return summarized trade-center stats for a user."""
+    trades = _db.get_trades(uid, limit=10000)
+    filtered = tc.filter_trades(trades, filter_spec or "all")
+    closed = tc.filter_closed_trades(tc.build_closed_trades(trades), filter_spec or "all")
+    return {
+        "uid": uid,
+        "filter": filter_spec or "all",
+        "summary": tc.summarize_trades(filtered, closed),
+        "closed_count": len(closed),
+    }
+
+
+@app.get("/autobuy/{uid}", dependencies=[Depends(verify_key)])
+async def get_autobuy(uid: int):
+    """Return auto-buy configuration for a user."""
+    b = _bot()
+    return b.get_auto_buy(uid)
+
+
+@app.post("/autobuy/{uid}", dependencies=[Depends(verify_key)])
+async def update_autobuy(uid: int, update: AutoBuyUpdate):
+    """Update auto-buy configuration for a user."""
+    b = _bot()
+    cfg = b.get_auto_buy(uid)
+    for field, value in update.model_dump(exclude_none=True).items():
+        cfg[field] = value
+    b.set_auto_buy(uid, cfg)
+    return {"uid": uid, "autobuy": b.get_auto_buy(uid)}
+
+
+@app.get("/settings/{uid}", dependencies=[Depends(verify_key)])
+async def get_settings(uid: int):
+    """Return user scanner/heat-score settings."""
+    return {"uid": uid, "settings": sm.get_user_settings(uid)}
+
+
+@app.post("/settings/{uid}", dependencies=[Depends(verify_key)])
+async def update_settings(uid: int, update: SettingsUpdate):
+    """Persist partial heat-score settings for a user."""
+    current = sm.get_user_settings(uid)
+    current.update(update.settings or {})
+    ok = sm.save_user_settings(uid, current)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Failed to save settings")
+    return {"uid": uid, "settings": sm.get_user_settings(uid)}
 
 
 @app.get("/autosell/{mint}", dependencies=[Depends(verify_key)])
