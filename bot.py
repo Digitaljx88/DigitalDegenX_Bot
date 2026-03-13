@@ -13259,10 +13259,20 @@ async def _supervised_task(name: str, coro_fn, *args):
         except asyncio.CancelledError:
             print(f"[{name}] cancelled", flush=True)
             return
+        except RuntimeError as e:
+            # Happens during interpreter/event-loop shutdown. Do not try to back off/restart.
+            if "no running event loop" in str(e).lower():
+                print(f"[{name}] stopping during loop shutdown", flush=True)
+                return
+            raise
         except Exception as e:
             print(f"[{name}] CRASHED: {e} — restarting in {delay}s", flush=True)
             traceback.print_exc()
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.sleep(delay)
+            except (asyncio.CancelledError, RuntimeError):
+                print(f"[{name}] restart backoff interrupted by shutdown", flush=True)
+                return
             delay = min(delay * 2, 120)
 
 
@@ -13275,7 +13285,7 @@ async def _start_api_server(app):
         port = getattr(__import__("config"), "API_PORT", 8080)
         cfg  = uvicorn.Config(
             _api.app,
-            host="0.0.0.0",
+            host="127.0.0.1",
             port=port,
             log_level="warning",
             loop="none",                  # reuse the existing asyncio loop
