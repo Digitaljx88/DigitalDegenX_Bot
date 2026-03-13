@@ -17,7 +17,7 @@ function normalizeUid(value: unknown): string {
 
 function routeNeedsUid(path: string[]): boolean {
   const head = path[0] || "";
-  if (head === "portfolio" || head === "trades" || head === "buy" || head === "sell" || head === "mode") {
+  if (head === "portfolio" || head === "trades" || head === "history" || head === "research-log" || head === "buy" || head === "sell" || head === "mode") {
     return true;
   }
   if (head === "autobuy" || head === "settings" || head === "autosell") {

@@ -388,9 +388,11 @@ async def scanner_watchlist():
 
 
 @app.get("/research-log", dependencies=[Depends(verify_key)])
-async def get_research_log(limit: int = 100):
+async def get_research_log(limit: int = 100, uid: Optional[int] = None):
     """Return recent research log entries plus export metadata."""
     records = research_logger.load_research_log_json() or []
+    if uid is not None:
+        records = [record for record in records if int(record.get("user_id") or 0) == int(uid)]
     trimmed = list(reversed(records[-max(1, min(limit, 500)):]))
     csv_path = Path(research_logger.export_csv_path())
     return {

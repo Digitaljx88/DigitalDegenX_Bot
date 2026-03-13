@@ -39,21 +39,38 @@ export function ResearchDashboard() {
   const { uid } = useActiveUid();
   const [research, setResearch] = useState<ResearchResponse | null>(null);
   const [history, setHistory] = useState<HistoryResponse | null>(null);
-  const [error, setError] = useState("");
+  const [researchError, setResearchError] = useState("");
+  const [historyError, setHistoryError] = useState("");
 
   useEffect(() => {
     async function load() {
-      if (!uid) return;
-      try {
-        const [researchRes, historyRes] = await Promise.all([
-          apiFetch<ResearchResponse>("/research-log", { query: { limit: 25 } }),
-          apiFetch<HistoryResponse>("/history", { query: { uid, limit: 25 } }),
-        ]);
-        setResearch(researchRes);
-        setHistory(historyRes);
-        setError("");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load research data");
+      if (!uid) {
+        setResearch(null);
+        setHistory(null);
+        setResearchError("");
+        setHistoryError("");
+        return;
+      }
+      const activeUid = uid;
+      const [researchRes, historyRes] = await Promise.allSettled([
+        apiFetch<ResearchResponse>("/research-log", { query: { uid: activeUid, limit: 25 } }),
+        apiFetch<HistoryResponse>("/history", { query: { uid: activeUid, limit: 25 } }),
+      ]);
+
+      if (researchRes.status === "fulfilled") {
+        setResearch(researchRes.value);
+        setResearchError("");
+      } else {
+        setResearch(null);
+        setResearchError(researchRes.reason instanceof Error ? researchRes.reason.message : "Failed to load research log");
+      }
+
+      if (historyRes.status === "fulfilled") {
+        setHistory(historyRes.value);
+        setHistoryError("");
+      } else {
+        setHistory(null);
+        setHistoryError(historyRes.reason instanceof Error ? historyRes.reason.message : "Failed to load trade history");
       }
     }
     void load();
@@ -63,7 +80,7 @@ export function ResearchDashboard() {
     <div className="grid gap-6 xl:grid-cols-2">
       <Panel title="History" subtitle="Recent closed trades with realized outcomes and exit reasons.">
         {!uid ? <div className="text-sm text-[var(--muted-foreground)]">Set your Telegram UID to load closed-trade history.</div> : null}
-        {error ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
+        {historyError ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{historyError}</div> : null}
         <div className="space-y-3">
           {(history?.closed_trades || []).map((row, index) => (
             <div key={`${row.mint}-${index}`} className="rounded-2xl border border-white/8 bg-black/10 p-4 text-sm">
@@ -79,7 +96,7 @@ export function ResearchDashboard() {
       </Panel>
 
       <Panel title="Research Log" subtitle={`Recent research rows. CSV export file: ${research?.csv_filename || "n/a"}`}>
-        {error ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
+        {researchError ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{researchError}</div> : null}
         <div className="space-y-3">
           {(research?.items || []).map((row, index) => (
             <div key={`${row.date}-${row.symbol}-${index}`} className="rounded-2xl border border-white/8 bg-black/10 p-4 text-sm">
