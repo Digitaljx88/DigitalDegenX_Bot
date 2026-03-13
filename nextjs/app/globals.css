@@ -13,12 +13,12 @@
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-panel: var(--panel);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-sans: "Avenir Next", "Segoe UI", sans-serif;
+  --font-mono: "SFMono-Regular", "Menlo", "Monaco", monospace;
 }
 
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: var(--font-geist-sans), sans-serif;
+  font-family: "Avenir Next", "Segoe UI", sans-serif;
 }

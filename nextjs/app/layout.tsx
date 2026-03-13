@@ -1,19 +1,8 @@
 import type { Metadata } from "next";
 import { Suspense } from "react";
-import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { NavLink } from "@/components/nav-link";
 import { UidBar } from "@/components/uid-bar";
-
-const geistSans = Geist({
-  variable: "--font-geist-sans",
-  subsets: ["latin"],
-});
-
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
-  subsets: ["latin"],
-});
 
 export const metadata: Metadata = {
   title: "DigitalDegenX Control",
@@ -42,7 +31,7 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en">
-      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+      <body className="antialiased">
         <div className="min-h-screen bg-[radial-gradient(circle_at_top_left,_rgba(255,122,0,0.2),_transparent_32%),linear-gradient(180deg,_#0b1015,_#111a22_45%,_#090d12)]">
           <div className="mx-auto flex min-h-screen w-full max-w-7xl flex-col px-6 py-8">
             <header className="mb-8 flex flex-col gap-6 rounded-[32px] border border-white/10 bg-black/20 px-6 py-5 shadow-[0_24px_80px_rgba(0,0,0,0.28)] backdrop-blur">

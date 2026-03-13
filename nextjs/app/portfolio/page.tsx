@@ -1,5 +1,10 @@
+import { Suspense } from "react";
 import { PortfolioDashboard } from "@/components/portfolio-dashboard";
 
 export default function PortfolioPage() {
-  return <PortfolioDashboard />;
+  return (
+    <Suspense fallback={null}>
+      <PortfolioDashboard />
+    </Suspense>
+  );
 }
