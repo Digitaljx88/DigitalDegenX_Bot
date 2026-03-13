@@ -27,7 +27,7 @@ export function UidBar() {
     });
   }
 
-  function clearUid() {
+  function handleClearUid() {
     startTransition(() => {
       void clearUid()
         .then(() => {
@@ -67,7 +67,7 @@ export function UidBar() {
         </button>
         <button
           type="button"
-          onClick={clearUid}
+          onClick={handleClearUid}
           className="rounded-full border border-white/10 px-4 py-2 text-sm text-[var(--muted-foreground)]"
         >
           Clear

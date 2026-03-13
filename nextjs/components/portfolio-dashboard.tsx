@@ -47,11 +47,12 @@ export function PortfolioDashboard() {
         setWallet(null);
         return;
       }
+      const activeUid = uid;
       try {
         const [portfolioRes, walletRes, modeRes] = await Promise.all([
-          fetchPortfolioFor(uid),
+          fetchPortfolioFor(activeUid),
           apiFetch<WalletResponse>("/wallet"),
-          apiFetch<ModeResponse>("/mode", { query: { uid } }),
+          apiFetch<ModeResponse>("/mode", { query: { uid: activeUid } }),
         ]);
         setPortfolio(portfolioRes.portfolio || {});
         setWallet(walletRes);
@@ -65,16 +66,21 @@ export function PortfolioDashboard() {
   }, [uid]);
 
   async function quickSell(mint: string, pct: number) {
+    const activeUid = uid;
+    if (!activeUid) {
+      setError("Set a Telegram UID before selling.");
+      return;
+    }
     setSellingMint(`${mint}:${pct}`);
     try {
       await apiFetch("/sell", {
         method: "POST",
-        body: JSON.stringify({ uid, mint, pct, mode: "paper" }),
+        body: JSON.stringify({ uid: activeUid, mint, pct, mode: "paper" }),
       });
       const [portfolioRes, walletRes, modeRes] = await Promise.all([
-        fetchPortfolioFor(uid),
+        fetchPortfolioFor(activeUid),
         apiFetch<WalletResponse>("/wallet"),
-        apiFetch<ModeResponse>("/mode", { query: { uid } }),
+        apiFetch<ModeResponse>("/mode", { query: { uid: activeUid } }),
       ]);
       setPortfolio(portfolioRes.portfolio || {});
       setWallet(walletRes);
