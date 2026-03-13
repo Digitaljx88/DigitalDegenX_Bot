@@ -13189,6 +13189,16 @@ async def user_wallet_alert_loop(app):
     print("[WALLET_ALERT] loop started", flush=True)
     # last_tokens is transient state — kept in memory, safe to lose on restart
     _last_tokens: dict[str, dict] = {}  # addr → {mint: amount}
+    _invalid_wallets_warned: set[str] = set()
+
+    def _looks_like_solana_wallet(addr: str) -> bool:
+        addr = str(addr or "").strip()
+        # Solana public keys are base58 and typically 32-44 chars.
+        if len(addr) < 32 or len(addr) > 44:
+            return False
+        alphabet = set("123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz")
+        return all(ch in alphabet for ch in addr)
+
     while True:
         try:
             loop = asyncio.get_running_loop()
@@ -13201,8 +13211,16 @@ async def user_wallet_alert_loop(app):
                     wallet_users.setdefault(e["wallet"], []).append((uid_int, e.get("label", "")))
 
             for addr, uid_entries in wallet_users.items():
+                if not _looks_like_solana_wallet(addr):
+                    if addr not in _invalid_wallets_warned:
+                        print(f"[WALLET_ALERT] skipping invalid wallet entry: {addr}", flush=True)
+                        _invalid_wallets_warned.add(addr)
+                    continue
                 try:
                     current_toks = await loop.run_in_executor(None, get_token_accounts, addr)
+                    if current_toks is None:
+                        print(f"[WALLET_ALERT] fetch unavailable {addr[:8]}: token accounts unknown", flush=True)
+                        continue
                     current_map  = {t["mint"]: t["amount"] for t in current_toks}
                 except Exception as e:
                     print(f"[WALLET_ALERT] fetch error {addr[:8]}: {e}", flush=True)
