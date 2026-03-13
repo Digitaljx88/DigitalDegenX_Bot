@@ -1,0 +1,30 @@
+services:
+  dashboard:
+    build:
+      context: /root/meme-trade-bot/nextjs
+      dockerfile: Dockerfile
+    image: digitaldegenx-dashboard:latest
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      BOT_API_BASE_URL: http://host.docker.internal:8080
+      BOT_API_KEY: ${BOT_API_KEY}
+      NODE_ENV: production
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.digitaldegenx.rule=Host(`digitaldegenx.online`) || Host(`www.digitaldegenx.online`)"
+      - "traefik.http.routers.digitaldegenx.entrypoints=websecure"
+      - "traefik.http.routers.digitaldegenx.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.digitaldegenx.middlewares=digitaldegenx-auth,digitaldegenx-security"
+      - "traefik.http.middlewares.digitaldegenx-auth.basicauth.users=${DASHBOARD_BASIC_AUTH}"
+      - "traefik.http.middlewares.digitaldegenx-security.headers.framedeny=true"
+      - "traefik.http.middlewares.digitaldegenx-security.headers.browserxssfilter=true"
+      - "traefik.http.middlewares.digitaldegenx-security.headers.contenttypenosniff=true"
+      - "traefik.http.middlewares.digitaldegenx-security.headers.referrerpolicy=no-referrer"
+      - "traefik.http.middlewares.digitaldegenx-security.headers.stsseconds=31536000"
+      - "traefik.http.middlewares.digitaldegenx-security.headers.stsincludesubdomains=true"
+      - "traefik.http.middlewares.digitaldegenx-security.headers.stspreload=true"
+      - "traefik.http.services.digitaldegenx.loadbalancer.server.port=3000"
