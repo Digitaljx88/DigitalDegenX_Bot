@@ -26,6 +26,9 @@ import research_logger
 import portfolio_alerts
 import settings_manager as sm
 import trade_center as tc
+import exit_logic
+import position_sizing
+import strategy_profiles
 
 import db as _db
 _db.init()
@@ -311,28 +314,28 @@ STRATEGIES = {
     "scalp": {
         "mult_targets": [{"mult": 1.5, "sell_pct": 75, "triggered": False, "label": "1.5x"}],
         "stop_loss":    {"enabled": True, "pct": 25, "sell_pct": 100, "triggered": False},
-        "trailing_stop": {"enabled": False, "trail_pct": 20, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_stop": {"enabled": False, "trail_pct": 20, "sell_pct": 100, "peak_price": 0.0, "triggered": False, "post_partial_trail_pct": 14, "tightened": False},
         "trailing_tp":  {"enabled": False, "activate_mult": 2.0, "trail_pct": 20, "sell_pct": 50, "active": False, "peak_price": 0.0, "triggered": False},
         "time_exit":    {"enabled": True, "hours": 2, "target_mult": 1.5, "sell_pct": 100, "triggered": False},
     },
     "standard": {
         "mult_targets": [{"mult": 2.0, "sell_pct": 50, "triggered": False, "label": "2x"}, {"mult": 4.0, "sell_pct": 50, "triggered": False, "label": "4x"}],
         "stop_loss":    {"enabled": True, "pct": 40, "sell_pct": 100, "triggered": False},
-        "trailing_stop": {"enabled": True, "trail_pct": 25, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_stop": {"enabled": True, "trail_pct": 25, "sell_pct": 100, "peak_price": 0.0, "triggered": False, "post_partial_trail_pct": 18, "tightened": False},
         "trailing_tp":  {"enabled": False, "activate_mult": 2.0, "trail_pct": 20, "sell_pct": 50, "active": False, "peak_price": 0.0, "triggered": False},
         "time_exit":    {"enabled": False, "hours": 24, "target_mult": 2.0, "sell_pct": 100, "triggered": False},
     },
     "diamond": {
         "mult_targets": [{"mult": 3.0, "sell_pct": 33, "triggered": False, "label": "3x"}, {"mult": 6.0, "sell_pct": 50, "triggered": False, "label": "6x"}],
         "stop_loss":    {"enabled": False, "pct": 50, "sell_pct": 100, "triggered": False},
-        "trailing_stop": {"enabled": False, "trail_pct": 30, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_stop": {"enabled": False, "trail_pct": 30, "sell_pct": 100, "peak_price": 0.0, "triggered": False, "post_partial_trail_pct": 20, "tightened": False},
         "trailing_tp":  {"enabled": True, "activate_mult": 3.0, "trail_pct": 20, "sell_pct": 100, "active": False, "peak_price": 0.0, "triggered": False},
         "time_exit":    {"enabled": False, "hours": 24, "target_mult": 2.0, "sell_pct": 100, "triggered": False},
     },
     "moon": {
         "mult_targets": [{"mult": 2.0, "sell_pct": 80, "triggered": False, "label": "2x"}],
         "stop_loss":    {"enabled": False, "pct": 50, "sell_pct": 100, "triggered": False},
-        "trailing_stop": {"enabled": False, "trail_pct": 30, "sell_pct": 100, "peak_price": 0.0, "triggered": False},
+        "trailing_stop": {"enabled": False, "trail_pct": 30, "sell_pct": 100, "peak_price": 0.0, "triggered": False, "post_partial_trail_pct": 18, "tightened": False},
         "trailing_tp":  {"enabled": True, "activate_mult": 5.0, "trail_pct": 15, "sell_pct": 100, "active": False, "peak_price": 0.0, "triggered": False},
         "time_exit":    {"enabled": False, "hours": 24, "target_mult": 2.0, "sell_pct": 100, "triggered": False},
     },
@@ -341,9 +344,13 @@ STRATEGIES = {
 
 def setup_auto_sell(uid: int, mint: str, symbol: str,
                     buy_price_usd: float, raw_amount: int, decimals: int,
-                    sol_amount: float = 0.0):
+                    sol_amount: float = 0.0, name: str = "",
+                    narrative: str | None = None,
+                    entry_score_effective: float | int | None = None,
+                    strategy_profile: str | None = None):
     """Called after every buy to create default auto-sell config using user presets."""
     existing = get_auto_sell(uid, mint)
+    narrative = narrative or _detect_narrative(name, symbol)
     # Get user's preset multipliers — only apply if presets are enabled
     mult_targets = []
     if get_user_as_presets_enabled(uid):
@@ -358,6 +365,8 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
     
     config = {
         "symbol":             symbol,
+        "narrative":          narrative,
+        "strategy_profile":   strategy_profile,
         "buy_price_usd":      buy_price_usd,
         "sol_amount":         sol_amount,        # SOL spent on this buy
         "purchase_timestamp": time.time(),
@@ -415,6 +424,12 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
             "triggered": False,
         },
     }
+    exit_logic.ensure_exit_blocks(
+        config,
+        narrative=narrative,
+        entry_score_effective=entry_score_effective,
+    )
+    strategy_profiles.apply_auto_sell_profile(config, strategy_profile)
     set_auto_sell(uid, mint, config)
     return config
 
@@ -459,6 +474,62 @@ def _get_buy_price(uid: int, mint: str) -> float | None:
     cfg = _db.get_auto_sell(uid, mint)
     return cfg.get("buy_price_usd") if cfg else None
 
+
+def _peak_exit_price(as_cfg: dict | None, current_price: float = 0.0) -> float:
+    cfg = as_cfg or {}
+    peaks = [current_price]
+    ts = cfg.get("trailing_stop") or {}
+    ttp = cfg.get("trailing_tp") or {}
+    peaks.extend([
+        ts.get("peak_price"),
+        ttp.get("peak_price"),
+        cfg.get("_gts_peak"),
+        cfg.get("_gttp_peak"),
+    ])
+    valid = []
+    for value in peaks:
+        try:
+            numeric = float(value or 0)
+        except Exception:
+            continue
+        if numeric > 0:
+            valid.append(numeric)
+    return max(valid) if valid else float(current_price or 0)
+
+
+def build_exit_trade_metrics(uid: int, mint: str, current_price: float = 0.0,
+                             *, reason: str = "manual",
+                             as_cfg: dict | None = None) -> dict:
+    cfg = as_cfg if as_cfg is not None else (_db.get_auto_sell(uid, mint) or {})
+    metrics = {
+        "exit_reason": reason,
+        "exit_trigger": reason,
+    }
+    if cfg.get("purchase_timestamp"):
+        try:
+            metrics["hold_seconds"] = max(0.0, time.time() - float(cfg["purchase_timestamp"]))
+        except Exception:
+            pass
+
+    buy_price = cfg.get("buy_price_usd")
+    try:
+        buy_price = float(buy_price or 0)
+    except Exception:
+        buy_price = 0.0
+    try:
+        current_price = float(current_price or 0)
+    except Exception:
+        current_price = 0.0
+    if buy_price <= 0 or current_price <= 0:
+        return metrics
+
+    peak_price = _peak_exit_price(cfg, current_price=current_price)
+    realized_pct = ((current_price - buy_price) / buy_price) * 100.0
+    max_unrealized_pct = ((peak_price - buy_price) / buy_price) * 100.0
+    metrics["max_unrealized_pnl_pct"] = max_unrealized_pct
+    metrics["giveback_pct"] = max(0.0, max_unrealized_pct - realized_pct)
+    return metrics
+
 # ── Auto-buy configs ──────────────────────────────────────────────────────────
 
 def get_auto_buy(uid: int) -> dict:
@@ -473,6 +544,9 @@ def set_auto_buy(uid: int, cfg: dict):
         uid,
         enabled=cfg.get("enabled", False),
         sol_amount=cfg.get("sol_amount", 0.03),
+        max_sol_amount=cfg.get("max_sol_amount", 0.10),
+        min_confidence=cfg.get("min_confidence", 0.35),
+        confidence_scale_enabled=cfg.get("confidence_scale_enabled", True),
         min_score=cfg.get("min_score", 55),
         max_mcap=cfg.get("max_mcap", 500_000),
         min_mcap_usd=cfg.get("min_mcap_usd", 0),
@@ -480,6 +554,8 @@ def set_auto_buy(uid: int, cfg: dict):
         spent_today=cfg.get("spent_today", 0.0),
         spent_date=cfg.get("spent_date"),
         max_positions=cfg.get("max_positions", 5),
+        max_narrative_exposure=cfg.get("max_narrative_exposure", 2),
+        max_archetype_exposure=cfg.get("max_archetype_exposure", 0),
         buy_tier=cfg.get("buy_tier", "warm"),
         min_liquidity_usd=cfg.get("min_liquidity_usd", 0),
         max_liquidity_usd=cfg.get("max_liquidity_usd", 0),
@@ -1530,6 +1606,15 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
     hold_seconds = None
     if as_cfg.get("purchase_timestamp"):
         hold_seconds = max(0.0, time.time() - float(as_cfg["purchase_timestamp"]))
+    exit_metrics = build_exit_trade_metrics(
+        uid,
+        mint,
+        price_usd,
+        reason=reason,
+        as_cfg=as_cfg,
+    )
+    if hold_seconds is not None:
+        exit_metrics["hold_seconds"] = hold_seconds
 
     if mode == "paper":
         # Compute price outside the lock (sync HTTP call)
@@ -1567,8 +1652,7 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
         log_trade(uid, mode, "sell", mint, symbol,
                   sol_received=sol_received, token_amount=sell_amount,
                   price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
-                  mcap=mcap, hold_seconds=hold_seconds,
-                  exit_reason=reason, exit_trigger=reason, exit_mcap=mcap)
+                  mcap=mcap, exit_mcap=mcap, **exit_metrics)
         await bot.send_message(
             chat_id=uid,
             text=(
@@ -1615,8 +1699,7 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
             log_trade(uid, mode, "sell", mint, symbol,
                       sol_received=sol_received, token_amount=sell_amount,
                       price_usd=price_usd, buy_price_usd=buy_price,
-                      mcap=mcap, tx_sig=sig, hold_seconds=hold_seconds,
-                      exit_reason=reason, exit_trigger=reason, exit_mcap=mcap)
+                      mcap=mcap, tx_sig=sig, exit_mcap=mcap, **exit_metrics)
             await bot.send_message(
                 chat_id=uid,
                 text=(
@@ -1706,6 +1789,8 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
 
             symbol  = cfg.get("symbol", mint[:6])
             changed = False
+            if exit_logic.ensure_exit_blocks(cfg, narrative=cfg.get("narrative")):
+                changed = True
 
             # ── Dead-token exit (MCap < $5K for > 5 min) ─────────────────────
             _DEAD_MCAP  = 5_000   # USD
@@ -1742,6 +1827,78 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                     if sold:
                         sl["triggered"] = True
                         changed = True
+
+            # ── First risk-off: de-risk winners early, then tighten trailing ──
+            fro = cfg.get("first_risk_off", {})
+            if fro.get("enabled") and not fro.get("triggered") and buy_price > 0:
+                if price >= buy_price * fro.get("activate_mult", 1.75):
+                    sold = await execute_auto_sell(
+                        context.bot, uid, mint, symbol,
+                        fro.get("sell_pct", 30),
+                        f"First Risk-Off {fro.get('activate_mult', 1.75)}x", mode,
+                        price_usd=price, mcap=mcap or 0
+                    )
+                    if sold:
+                        fro["triggered"] = True
+                        fro["trigger_price"] = price
+                        cfg["partial_profit_taken"] = True
+                        changed = True
+                        if fro.get("tighten_trailing", True):
+                            if exit_logic.tighten_trailing_after_partial(cfg, current_price=price):
+                                changed = True
+                        try:
+                            await context.bot.send_message(
+                                uid,
+                                f"🪂 *First Risk-Off Executed* — `${symbol}`\n"
+                                f"Sold `{fro.get('sell_pct', 30)}%` at `{fro.get('activate_mult', 1.75)}x`.\n"
+                                + (
+                                    f"Trailing stop tightened to `{cfg.get('trailing_stop', {}).get('trail_pct', 0)}%`."
+                                    if cfg.get("trailing_stop", {}).get("tightened")
+                                    else "Position de-risked."
+                                ),
+                                parse_mode="Markdown"
+                            )
+                        except Exception:
+                            pass
+                        continue
+
+            # ── Velocity roll-over: trim when score collapses while momentum flips ──
+            vro = cfg.get("velocity_rollover", {})
+            if vro.get("enabled") and not vro.get("triggered") and buy_price > 0:
+                if price >= buy_price * vro.get("activate_mult", 1.5):
+                    now_ts = time.time()
+                    cooldown = float(vro.get("check_cooldown_secs", 180) or 180)
+                    if now_ts - float(vro.get("last_check_ts", 0) or 0) >= cooldown:
+                        try:
+                            current_score_card = await sc.score_single_token(mint)
+                        except Exception:
+                            current_score_card = None
+                        if current_score_card:
+                            current_score = float(current_score_card.get("total", 0) or 0)
+                            sc.heat_momentum.record(mint, current_score)
+                            velocity, _velocity_label = sc.heat_momentum.get_velocity(mint)
+                            peak_score = max(float(vro.get("peak_score", 0) or 0), current_score)
+                            score_drop = max(0.0, peak_score - current_score)
+                            vro["peak_score"] = peak_score
+                            vro["last_score"] = current_score
+                            vro["last_velocity"] = velocity
+                            vro["last_check_ts"] = now_ts
+                            changed = True
+                            if score_drop >= float(vro.get("min_score_drop", 10) or 10) and velocity <= float(vro.get("min_velocity", -2.0) or -2.0):
+                                sold = await execute_auto_sell(
+                                    context.bot, uid, mint, symbol,
+                                    vro.get("sell_pct", 40),
+                                    f"Velocity Roll-Over (score -{score_drop:.0f}, {velocity:+.1f}/min)",
+                                    mode,
+                                    price_usd=price, mcap=mcap or 0
+                                )
+                                if sold:
+                                    vro["triggered"] = True
+                                    cfg["partial_profit_taken"] = True
+                                    changed = True
+                                    if exit_logic.tighten_trailing_after_partial(cfg, current_price=price):
+                                        changed = True
+                                    continue
 
             # ── Trailing stop-loss ────────────────────────────────────────────
             ts = cfg.get("trailing_stop", {})
@@ -2083,7 +2240,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
 
 # ─── Auto-buy execution ────────────────────────────────────────────────────────
 
-async def execute_auto_buy(bot, uid: int, result: dict):
+async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
     """
     Attempt an auto-buy for uid based on a scanner alert result.
     Handles both paper and live modes. Sends a DM with outcome.
@@ -2106,6 +2263,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
     entry_txns_5m = result.get("txns_5m", 0) or 0
     entry_wallet_signal = result.get("wallet_signal", result.get("wallet_boost", 0)) or 0
     entry_archetype = result.get("archetype")
+    entry_strategy = result.get("strategy_profile")
     entry_confidence = result.get("archetype_conf")
     entry_tier = _score_tier_label(entry_score_effective)
 
@@ -2188,7 +2346,28 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — already bought today", flush=True)
         return  # already bought this token today
 
-    sol_amount  = cfg.get("sol_amount", 0.1)
+    if decision is not None:
+        sizing = position_sizing.SizingDecision(
+            confidence=float(getattr(decision, "confidence", 0.0) or 0.0),
+            sol_amount=float(getattr(decision, "sol_amount", 0.0) or 0.0),
+            size_multiplier=float(getattr(decision, "size_multiplier", 1.0) or 1.0),
+            narrative=position_sizing.resolve_narrative(result),
+            archetype=position_sizing.resolve_archetype(result),
+            strategy_profile=getattr(decision, "strategy_profile", result.get("strategy_profile", "")),
+            block_reason="",
+        )
+    else:
+        sizing = position_sizing.resolve_position_size(
+            cfg,
+            result,
+            exposure=_db.get_open_position_exposure(uid),
+        )
+        if sizing.block_reason:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — {sizing.block_reason}", flush=True)
+            return
+
+    sol_amount = sizing.sol_amount or cfg.get("sol_amount", 0.1)
+    entry_confidence = sizing.confidence or entry_confidence
     daily_limit = cfg.get("daily_limit_sol", 1.0)
     spent_today = cfg.get("spent_today", 0.0)
 
@@ -2257,7 +2436,11 @@ async def execute_auto_buy(bot, uid: int, result: dict):
         print(f"[AUTOBUY] uid={uid} fresh data re-fetch failed for {symbol}: {_fe} — proceeding", flush=True)
 
     mode = get_mode(uid)
-    print(f"[AUTOBUY] uid={uid} proceeding with {symbol} in {mode} mode — {sol_amount} SOL", flush=True)
+    print(
+        f"[AUTOBUY] uid={uid} proceeding with {symbol} in {mode} mode — "
+        f"{sol_amount} SOL (confidence={entry_confidence:.2f}, x{sizing.size_multiplier:.2f})",
+        flush=True,
+    )
 
     # ── Paper auto-buy ─────────────────────────────────────────────────────────
     if mode == "paper":
@@ -2305,7 +2488,13 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             portfolio["SOL"]  = portfolio.get("SOL", 0) - sol_amount
             portfolio[mint]   = portfolio.get(mint, 0) + out_amount
             update_portfolio(uid, portfolio)
-        setup_auto_sell(uid, mint, symbol, price_usd, out_amount, decimals, sol_amount=sol_amount)
+        setup_auto_sell(
+            uid, mint, symbol, price_usd, out_amount, decimals,
+            sol_amount=sol_amount, name=name,
+            narrative=result.get("matched_narrative"),
+            entry_score_effective=entry_score_effective,
+            strategy_profile=entry_strategy,
+        )
         log_trade(uid, "paper", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_amount,
                   price_usd=price_usd, mcap=mcap, heat_score=score,
@@ -2318,6 +2507,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
                   entry_tier=entry_tier,
                   entry_wallet_signal=entry_wallet_signal,
                   entry_archetype=entry_archetype,
+                  entry_strategy=entry_strategy,
                   entry_source_rank=entry_source_rank,
                   entry_confidence=entry_confidence)
 
@@ -2526,7 +2716,13 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
             portfolio[mint] = portfolio.get(mint, 0) + out_raw
             update_portfolio(uid, portfolio)
-        setup_auto_sell(uid, mint, symbol, price_usd, out_raw, decimals, sol_amount=sol_amount)
+        setup_auto_sell(
+            uid, mint, symbol, price_usd, out_raw, decimals,
+            sol_amount=sol_amount, name=name,
+            narrative=result.get("matched_narrative"),
+            entry_score_effective=entry_score_effective,
+            strategy_profile=entry_strategy,
+        )
         log_trade(uid, "live", "buy", mint, symbol, name=name,
                   sol_amount=sol_amount, token_amount=out_raw,
                   price_usd=price_usd, mcap=mcap, heat_score=score, tx_sig=tx_sig,
@@ -2539,6 +2735,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
                   entry_tier=entry_tier,
                   entry_wallet_signal=entry_wallet_signal,
                   entry_archetype=entry_archetype,
+                  entry_strategy=entry_strategy,
                   entry_source_rank=entry_source_rank,
                   entry_confidence=entry_confidence)
 
@@ -2589,7 +2786,7 @@ async def handle_scanner_autobuy(bot, result: dict, target_uids: list[int] | Non
         try:
             decision = await _ab.evaluate(uid, result)
             if decision.gate_passed:
-                await execute_auto_buy(bot, uid, result)
+                await execute_auto_buy(bot, uid, result, decision=decision)
         except Exception as e:
             print(f"[AUTOBUY] error uid={uid}: {e}", flush=True)
             traceback.print_exc()
@@ -2694,7 +2891,7 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                       sol_amount=amount, token_amount=out_amount,
                       price_usd=price_usd, mcap=mcap)
             # Set up auto-sell monitoring
-            setup_auto_sell(uid, token_mint, symbol, price_usd, out_amount, decimals, sol_amount=amount)
+            setup_auto_sell(uid, token_mint, symbol, price_usd, out_amount, decimals, sol_amount=amount, name=name)
             # Get user's preset targets for display
             user_presets = get_user_as_presets(uid)
             presets_str = format_as_presets(user_presets)
@@ -2723,6 +2920,8 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                 _vtr2 = bc_fallback["virtual_token_reserves"]
                 _vsr2 = bc_fallback["virtual_sol_reserves"]
                 _price_sol_now = (_vsr2 / _vtr2 / 1e9 * 1e6) if _vtr2 else 0
+            as_cfg = _db.get_auto_sell(uid, token_mint) or {}
+            buy_price = as_cfg.get("buy_price_usd") or _get_buy_price(uid, token_mint)
             async with _portfolio_lock(uid):
                 portfolio = get_portfolio(uid)
                 held = portfolio.get(token_mint, 0)
@@ -2743,10 +2942,17 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                     portfolio.pop(token_mint, None)
                     remove_auto_sell(uid, token_mint)
                 update_portfolio(uid, portfolio)
+            exit_metrics = build_exit_trade_metrics(
+                uid,
+                token_mint,
+                price_usd,
+                reason="manual",
+                as_cfg=as_cfg,
+            )
             log_trade(uid, "paper", "sell", token_mint, symbol, name=name,
                       sol_received=sol_received, token_amount=int(amount),
-                      price_usd=price_usd, buy_price_usd=_get_buy_price(uid, token_mint),
-                      mcap=mcap)
+                      price_usd=price_usd, buy_price_usd=buy_price,
+                      mcap=mcap, exit_mcap=mcap, **exit_metrics)
             await msg.edit_text(
                 f"📄 *Paper Sell Done*\n"
                 f"Sold: `{int(amount):,} {symbol}` (raw)\n"
@@ -3388,6 +3594,32 @@ def _format_autosell_config(cfg: dict) -> str:
         lines.append(f"\n*Breakeven Stop:* {be_on}{be_tri}")
         lines.append(f"  Move stop to entry when price hits `{be.get('activate_mult', 2.0)}x`")
 
+    fro = cfg.get("first_risk_off", {})
+    if fro:
+        fro_on = "🟢 ON" if fro.get("enabled") else "🔴 OFF"
+        fro_tri = " ✅ Triggered" if fro.get("triggered") else ""
+        lines.append(f"\n*First Risk-Off:* {fro_on}{fro_tri}")
+        lines.append(
+            f"  At `{fro.get('activate_mult', 1.75)}x` → sell `{fro.get('sell_pct', 30)}%`"
+            + (f" and tighten trailing to `{fro.get('tighten_to_pct', 18)}%`" if fro.get("tighten_trailing", True) else "")
+        )
+
+    vro = cfg.get("velocity_rollover", {})
+    if vro:
+        vro_on = "🟢 ON" if vro.get("enabled") else "🔴 OFF"
+        vro_tri = " ✅ Triggered" if vro.get("triggered") else ""
+        lines.append(f"\n*Velocity Roll-Over:* {vro_on}{vro_tri}")
+        lines.append(
+            f"  After `{vro.get('activate_mult', 1.5)}x`, sell `{vro.get('sell_pct', 40)}%`"
+            f" if score drops `{vro.get('min_score_drop', 10)}`+ and velocity ≤ `{vro.get('min_velocity', -2.0):+.1f}`/min"
+        )
+        if vro.get("peak_score"):
+            lines.append(
+                f"  Score peak `{float(vro.get('peak_score', 0)):.0f}`"
+                f" · last `{float(vro.get('last_score', 0)):.0f}`"
+                f" · vel `{float(vro.get('last_velocity', 0)):+.1f}`/min"
+            )
+
     return "\n".join(lines)
 
 
@@ -3398,6 +3630,9 @@ def _autobuy_status_text(uid: int) -> str:
     cfg             = _ab_reset_day_if_needed(cfg)
     enabled         = cfg.get("enabled", False)
     sol_amount      = cfg.get("sol_amount", 0.1)
+    max_sol_amount  = cfg.get("max_sol_amount", max(sol_amount, 0.10))
+    min_confidence  = cfg.get("min_confidence", 0.35)
+    scale_enabled   = bool(cfg.get("confidence_scale_enabled", True))
     min_score       = cfg.get("min_score", 70)
     max_mcap        = cfg.get("max_mcap", 500_000)
     min_mcap        = cfg.get("min_mcap_usd", 0)
@@ -3405,6 +3640,8 @@ def _autobuy_status_text(uid: int) -> str:
     spent           = cfg.get("spent_today", 0.0)
     bought          = cfg.get("bought", [])
     max_pos         = cfg.get("max_positions", 0)
+    max_narrative   = cfg.get("max_narrative_exposure", 2)
+    max_archetype   = cfg.get("max_archetype_exposure", 0)
     open_pos        = _db.get_open_position_count(uid)
     mode            = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
     buy_tier        = cfg.get("buy_tier", "")
@@ -3455,7 +3692,8 @@ def _autobuy_status_text(uid: int) -> str:
         f"*🤖 Auto-Buy Settings*\n\n"
         f"Status: *{status}*\n"
         f"Mode: *{mode}*\n\n"
-        f"SOL per trade: `{sol_amount} SOL`\n"
+        f"Base SOL per trade: `{sol_amount} SOL`\n"
+        f"Adaptive sizing: `{'On' if scale_enabled else 'Off'}` · Max `{max_sol_amount} SOL` · Min conf `{min_confidence:.2f}`\n"
         f"{score_line}\n"
         f"{mcap_line}\n"
         f"{liq_line}\n"
@@ -3464,6 +3702,7 @@ def _autobuy_status_text(uid: int) -> str:
         f"Daily SOL limit: `{'Unlimited ♾️' if daily_limit == 0 else str(daily_limit) + ' SOL'}`\n"
         f"Spent today: `{spent:.3f} SOL`\n"
         f"Bought today: `{len(bought)}` token(s)\n"
+        f"Narrative cap: `{'Off ♾️' if max_narrative == 0 else str(max_narrative)}` · Archetype cap: `{'Off ♾️' if max_archetype == 0 else str(max_archetype)}`\n"
         f"Max positions: `{'Unlimited ♾️' if max_pos == 0 else str(max_pos)}`\n"
         f"Open positions: `{open_pos}`{'  ⛔ *PAUSED*' if max_pos > 0 and open_pos >= max_pos else ''}\n\n"
         f"_Auto-buys fire when scanner alerts a token meeting your tier/score._"
@@ -3478,6 +3717,8 @@ def _autobuy_kb(uid: int) -> InlineKeyboardMarkup:
         [InlineKeyboardButton(toggle_lbl,               callback_data="autobuy:toggle")],
         [InlineKeyboardButton("💰 SOL Amount",           callback_data="autobuy:set_sol"),
          InlineKeyboardButton("🌡️ Buy Tier",             callback_data="autobuy:set_tier")],
+        [InlineKeyboardButton("📈 Adaptive Sizing",      callback_data="autobuy:set_sizing"),
+         InlineKeyboardButton("🧩 Exposure Caps",        callback_data="autobuy:set_exposure")],
         [InlineKeyboardButton("🏦 MCap Range",           callback_data="autobuy:set_mcap_range"),
          InlineKeyboardButton("💧 Liquidity Filters",    callback_data="autobuy:set_liq")],
         [InlineKeyboardButton("⏱️ Age Filters",          callback_data="autobuy:set_age"),
@@ -3547,6 +3788,158 @@ async def autobuy_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif action == "sol_preset":
         val = float(query.data.split(":")[2])
         cfg["sol_amount"] = val
+        if cfg.get("max_sol_amount", 0) < val:
+            cfg["max_sol_amount"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_sizing":
+        max_sol = float(cfg.get("max_sol_amount", max(cfg.get("sol_amount", 0.03), 0.10)) or max(cfg.get("sol_amount", 0.03), 0.10))
+        min_conf = float(cfg.get("min_confidence", 0.35) or 0.35)
+        scale_enabled = bool(cfg.get("confidence_scale_enabled", True))
+        await query.edit_message_text(
+            "📈 *Adaptive Sizing*\n\n"
+            "Your base SOL amount still sets the normal trade size.\n"
+            "When confidence sizing is ON, strong setups can scale above that base and weak setups shrink below it.\n\n"
+            f"Confidence sizing: `{'On' if scale_enabled else 'Off'}`\n"
+            f"Base size: `{cfg.get('sol_amount', 0.03)} SOL`\n"
+            f"Max size: `{max_sol} SOL`\n"
+            f"Min confidence: `{min_conf:.2f}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🔁 Toggle Sizing", callback_data="autobuy:toggle_scale"),
+                 InlineKeyboardButton("📏 Set Max Size", callback_data="autobuy:set_max_sol")],
+                [InlineKeyboardButton("🎯 Set Min Confidence", callback_data="autobuy:set_min_conf")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "toggle_scale":
+        cfg["confidence_scale_enabled"] = not bool(cfg.get("confidence_scale_enabled", True))
+        set_auto_buy(uid, cfg)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_max_sol":
+        set_state(uid, waiting_for="ab_max_sol_amount")
+        await query.edit_message_text(
+            "📏 *Set maximum SOL size for adaptive auto-buy*\n\n"
+            "Strongest setups will never size above this amount.\n"
+            f"Current: `{cfg.get('max_sol_amount', max(cfg.get('sol_amount', 0.03), 0.10))} SOL`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("0.05", callback_data="autobuy:max_sol_preset:0.05"),
+                    InlineKeyboardButton("0.1", callback_data="autobuy:max_sol_preset:0.1"),
+                    InlineKeyboardButton("0.25", callback_data="autobuy:max_sol_preset:0.25"),
+                    InlineKeyboardButton("0.5", callback_data="autobuy:max_sol_preset:0.5"),
+                ],
+                [
+                    InlineKeyboardButton("1 SOL", callback_data="autobuy:max_sol_preset:1"),
+                    InlineKeyboardButton("2 SOL", callback_data="autobuy:max_sol_preset:2"),
+                    InlineKeyboardButton("5 SOL", callback_data="autobuy:max_sol_preset:5"),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:set_sizing")],
+            ])
+        )
+
+    elif action == "max_sol_preset":
+        val = float(query.data.split(":")[2])
+        cfg["max_sol_amount"] = max(val, float(cfg.get("sol_amount", 0.03) or 0.03))
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_min_conf":
+        set_state(uid, waiting_for="ab_min_confidence")
+        await query.edit_message_text(
+            "🎯 *Set minimum confidence for adaptive auto-buy*\n\n"
+            "Trades below this score are blocked even if heat score is high.\n"
+            f"Current: `{float(cfg.get('min_confidence', 0.35) or 0.35):.2f}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [
+                    InlineKeyboardButton("0.25", callback_data="autobuy:min_conf_preset:0.25"),
+                    InlineKeyboardButton("0.35", callback_data="autobuy:min_conf_preset:0.35"),
+                    InlineKeyboardButton("0.45", callback_data="autobuy:min_conf_preset:0.45"),
+                    InlineKeyboardButton("0.55", callback_data="autobuy:min_conf_preset:0.55"),
+                ],
+                [
+                    InlineKeyboardButton("0.65", callback_data="autobuy:min_conf_preset:0.65"),
+                    InlineKeyboardButton("0.75", callback_data="autobuy:min_conf_preset:0.75"),
+                ],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:set_sizing")],
+            ])
+        )
+
+    elif action == "min_conf_preset":
+        val = float(query.data.split(":")[2])
+        cfg["min_confidence"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_exposure":
+        await query.edit_message_text(
+            "🧩 *Exposure Caps*\n\n"
+            "These caps stop the bot from stacking too many open positions in the same narrative or archetype.\n\n"
+            f"Narrative cap: `{'Off ♾️' if cfg.get('max_narrative_exposure', 2) == 0 else cfg.get('max_narrative_exposure', 2)}`\n"
+            f"Archetype cap: `{'Off ♾️' if cfg.get('max_archetype_exposure', 0) == 0 else cfg.get('max_archetype_exposure', 0)}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🧠 Set Narrative Cap", callback_data="autobuy:set_narr_cap"),
+                 InlineKeyboardButton("🗂️ Set Archetype Cap", callback_data="autobuy:set_arch_cap")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:menu")],
+            ])
+        )
+
+    elif action == "set_narr_cap":
+        set_state(uid, waiting_for="ab_max_narrative_exposure")
+        await query.edit_message_text(
+            "🧠 *Set max open positions per narrative*\n\n"
+            "Example: if set to 2, the bot won't open a third AI token while 2 AI positions are still open.\n"
+            "Set to `0` for no cap.\n\n"
+            f"Current: `{'Off ♾️' if cfg.get('max_narrative_exposure', 2) == 0 else cfg.get('max_narrative_exposure', 2)}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("0", callback_data="autobuy:narr_cap_preset:0"),
+                 InlineKeyboardButton("1", callback_data="autobuy:narr_cap_preset:1"),
+                 InlineKeyboardButton("2", callback_data="autobuy:narr_cap_preset:2"),
+                 InlineKeyboardButton("3", callback_data="autobuy:narr_cap_preset:3")],
+                [InlineKeyboardButton("4", callback_data="autobuy:narr_cap_preset:4"),
+                 InlineKeyboardButton("5", callback_data="autobuy:narr_cap_preset:5")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:set_exposure")],
+            ])
+        )
+
+    elif action == "narr_cap_preset":
+        val = int(query.data.split(":")[2])
+        cfg["max_narrative_exposure"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await _show_autobuy(query.edit_message_text, uid)
+
+    elif action == "set_arch_cap":
+        set_state(uid, waiting_for="ab_max_archetype_exposure")
+        await query.edit_message_text(
+            "🗂️ *Set max open positions per archetype*\n\n"
+            "Set to `0` for no cap.\n\n"
+            f"Current: `{'Off ♾️' if cfg.get('max_archetype_exposure', 0) == 0 else cfg.get('max_archetype_exposure', 0)}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("0", callback_data="autobuy:arch_cap_preset:0"),
+                 InlineKeyboardButton("1", callback_data="autobuy:arch_cap_preset:1"),
+                 InlineKeyboardButton("2", callback_data="autobuy:arch_cap_preset:2"),
+                 InlineKeyboardButton("3", callback_data="autobuy:arch_cap_preset:3")],
+                [InlineKeyboardButton("4", callback_data="autobuy:arch_cap_preset:4"),
+                 InlineKeyboardButton("5", callback_data="autobuy:arch_cap_preset:5")],
+                [InlineKeyboardButton("⬅️ Back", callback_data="autobuy:set_exposure")],
+            ])
+        )
+
+    elif action == "arch_cap_preset":
+        val = int(query.data.split(":")[2])
+        cfg["max_archetype_exposure"] = val
         set_auto_buy(uid, cfg)
         clear_state(uid)
         await _show_autobuy(query.edit_message_text, uid)
@@ -8520,6 +8913,7 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         te = dict(preset["time_exit"])
         te["buy_time"] = buy_time
         cfg["time_exit"] = te
+        exit_logic.ensure_exit_blocks(cfg, narrative=cfg.get("narrative"))
         set_auto_sell(uid, mint, cfg)
         sym = cfg.get("symbol", mint[:6])
         names = {"scalp": "🏃 Scalp", "standard": "📊 Standard", "diamond": "💎 Diamond", "moon": "🌙 Moon Bag"}
@@ -9121,6 +9515,8 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not price_sol:
                 await query.edit_message_text("Could not fetch current price. Try again.", reply_markup=_pct_kb(mint))
                 return
+            as_cfg = _db.get_auto_sell(uid, mint) or {}
+            buy_price = as_cfg.get("buy_price_usd") or _get_buy_price(uid, mint)
             async with _portfolio_lock(uid):
                 portfolio = get_portfolio(uid)
                 raw_held  = portfolio.get(mint, 0)
@@ -9136,6 +9532,17 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     portfolio.pop(mint, None)
                     remove_auto_sell(uid, mint)
                 update_portfolio(uid, portfolio)
+            exit_metrics = build_exit_trade_metrics(
+                uid,
+                mint,
+                price,
+                reason="manual",
+                as_cfg=as_cfg,
+            )
+            log_trade(uid, "paper", "sell", mint, sym,
+                      sol_received=sol_recv, token_amount=sell_raw,
+                      price_usd=price, buy_price_usd=buy_price,
+                      **exit_metrics)
             await query.edit_message_text(
                 f"📄 *Paper Sell — {pct}%*\n\n"
                 f"Token: `${sym}`\n"
@@ -9160,6 +9567,15 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 return
             sig = execute_swap_live(quote, uid)
             sol_recv = int(quote.get("outAmount", 0)) / 1e9
+            as_cfg = _db.get_auto_sell(uid, mint) or {}
+            buy_price = as_cfg.get("buy_price_usd") or _get_buy_price(uid, mint)
+            exit_metrics = build_exit_trade_metrics(
+                uid,
+                mint,
+                price,
+                reason="manual",
+                as_cfg=as_cfg,
+            )
             if "ERROR" not in sig and "error" not in sig.lower():
                 # Update portfolio tracking after live sell
                 async with _portfolio_lock(uid):
@@ -9174,8 +9590,8 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     update_portfolio(uid, _pf)
                 log_trade(uid, "live", "sell", mint, sym,
                           sol_received=sol_recv, token_amount=sell_raw,
-                          price_usd=price, buy_price_usd=_get_buy_price(uid, mint),
-                          tx_sig=sig)
+                          price_usd=price, buy_price_usd=buy_price,
+                          tx_sig=sig, **exit_metrics)
             await query.edit_message_text(
                 f"🔴 *Live Sell — {pct}%*\n\n"
                 f"Token: `${sym}`\n"
@@ -9359,13 +9775,21 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                       mcap=pending.get("mcap", 0),
                       tx_sig=sig)
         else:
+            as_cfg = _db.get_auto_sell(uid, mint) or {}
+            exit_metrics = build_exit_trade_metrics(
+                uid,
+                mint,
+                pending.get("price_usd", 0),
+                reason="manual",
+                as_cfg=as_cfg,
+            )
             log_trade(uid, "live", "sell", mint, pending["symbol"],
                       sol_received=int(pending.get("raw_out", 0)) / 1e9,
                       token_amount=pending.get("sell_amount", 0),
                       price_usd=pending.get("price_usd", 0),
                       buy_price_usd=pending.get("buy_price_usd"),
                       mcap=pending.get("mcap", 0),
-                      tx_sig=sig)
+                      tx_sig=sig, exit_mcap=pending.get("mcap", 0), **exit_metrics)
         _pnl_card = ""
         if action == "sell":
             as_entry = _db.get_all_auto_sells(uid).get(mint, {})
@@ -10516,6 +10940,46 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
 
+    elif state == "ab_max_sol_amount":
+        try:
+            val = float(text)
+            if val <= 0 or val > 10000:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a valid max SOL size (e.g. 0.5).")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["max_sol_amount"] = max(val, float(cfg.get("sol_amount", 0.03) or 0.03))
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Adaptive max SOL size set to `{cfg['max_sol_amount']} SOL`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_min_confidence":
+        try:
+            val = float(text)
+            if val < 0 or val > 1:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a confidence between 0 and 1 (e.g. 0.35).")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["min_confidence"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        await update.message.reply_text(
+            f"✅ Min confidence set to `{val:.2f}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
     elif state == "ab_min_score":
         try:
             val = int(float(text))
@@ -10592,6 +11056,48 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
         label = "Unlimited ♾️" if val == 0 else str(val)
         await update.message.reply_text(
             f"✅ Max positions set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_max_narrative_exposure":
+        try:
+            val = int(text.strip())
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a whole number like `2`, or `0` for no cap.", parse_mode="Markdown")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["max_narrative_exposure"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "Off ♾️" if val == 0 else str(val)
+        await update.message.reply_text(
+            f"✅ Narrative exposure cap set to `{label}`",
+            parse_mode="Markdown",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")
+            ]])
+        )
+
+    elif state == "ab_max_archetype_exposure":
+        try:
+            val = int(text.strip())
+            if val < 0:
+                raise ValueError
+        except ValueError:
+            await update.message.reply_text("Enter a whole number like `2`, or `0` for no cap.", parse_mode="Markdown")
+            return
+        cfg = get_auto_buy(uid)
+        cfg["max_archetype_exposure"] = val
+        set_auto_buy(uid, cfg)
+        clear_state(uid)
+        label = "Off ♾️" if val == 0 else str(val)
+        await update.message.reply_text(
+            f"✅ Archetype exposure cap set to `{label}`",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⚙️ Auto-Buy Settings", callback_data="autobuy:menu")

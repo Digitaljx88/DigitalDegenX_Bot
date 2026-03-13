@@ -279,8 +279,13 @@ class TestEvaluate:
             "min_score": score,
             "max_mcap": mcap,
             "sol_amount": 0.03,
+            "max_sol_amount": 0.09,
+            "min_confidence": 0.35,
+            "confidence_scale_enabled": True,
             "daily_limit_sol": 1.0,
             "max_positions": 5,
+            "max_narrative_exposure": 2,
+            "max_archetype_exposure": 0,
             "buy_tier": "",
         }
         patches = {
@@ -289,6 +294,7 @@ class TestEvaluate:
             "autobuy._db.has_bought": MagicMock(return_value=bought),
             "autobuy._db.get_spent_today": MagicMock(return_value=spent),
             "autobuy._db.get_open_position_count": MagicMock(return_value=positions),
+            "autobuy._db.get_open_position_exposure": MagicMock(return_value={"narrative": {}, "archetype": {}}),
         }
         return patches
 
@@ -307,6 +313,7 @@ class TestEvaluate:
             patch("autobuy._db.has_bought", return_value=False),
             patch("autobuy._db.get_spent_today", return_value=0.0),
             patch("autobuy._db.get_open_position_count", return_value=0),
+            patch("autobuy._db.get_open_position_exposure", return_value={"narrative": {}, "archetype": {}}),
             patch("autobuy.requests.get") as mock_get,
             patch("autobuy.settings_manager", create=True) as mock_sm,
         ):
@@ -327,6 +334,7 @@ class TestEvaluate:
         with (
             patch("autobuy._db.reset_day_if_needed"),
             patch("autobuy._db.get_auto_buy_config", return_value=cfg),
+            patch("autobuy._db.get_open_position_exposure", return_value={"narrative": {}, "archetype": {}}),
             patch("autobuy.settings_manager", create=True),
         ):
             decision = await evaluate(1, self.RESULT)
@@ -340,6 +348,7 @@ class TestEvaluate:
         with (
             patch("autobuy._db.reset_day_if_needed"),
             patch("autobuy._db.get_auto_buy_config", return_value=cfg),
+            patch("autobuy._db.get_open_position_exposure", return_value={"narrative": {}, "archetype": {}}),
             patch("autobuy.settings_manager", create=True) as mock_sm,
         ):
             mock_sm.get_user_settings.return_value = {}
@@ -359,6 +368,7 @@ class TestEvaluate:
             patch("autobuy._db.reset_day_if_needed"),
             patch("autobuy._db.get_auto_buy_config", return_value=cfg),
             patch("autobuy._db.has_bought", return_value=True),
+            patch("autobuy._db.get_open_position_exposure", return_value={"narrative": {}, "archetype": {}}),
             patch("autobuy.settings_manager", create=True) as mock_sm,
         ):
             mock_sm.get_user_settings.return_value = {}
@@ -366,3 +376,62 @@ class TestEvaluate:
 
         assert decision.gate_passed is False
         assert "already bought" in decision.block_reason
+
+    @pytest.mark.asyncio
+    async def test_scales_sol_amount_for_high_confidence_setup(self):
+        cfg = {
+            "enabled": True,
+            "min_score": 55,
+            "max_mcap": 500_000,
+            "sol_amount": 0.03,
+            "max_sol_amount": 0.09,
+            "min_confidence": 0.35,
+            "confidence_scale_enabled": True,
+            "daily_limit_sol": 1.0,
+            "max_positions": 5,
+            "max_narrative_exposure": 2,
+            "max_archetype_exposure": 0,
+            "buy_tier": "",
+        }
+        result = {
+            **self.RESULT,
+            "effective_score": 92,
+            "_source_name": "pumpfun_newest",
+            "_source_rank": 100,
+            "age_mins": 4,
+            "wallet_signal": 7,
+            "liquidity_to_mcap_ratio": 0.12,
+            "txns_per_10k_liq": 12,
+            "buy_ratio_5m": 0.80,
+            "score_slope": 4.5,
+            "score_drop_from_peak": 0,
+            "liquidity_drop_pct": 0,
+            "holder_concentration_delta": 0,
+            "narrative_cluster_count": 0,
+            "matched_narrative": "AI",
+            "archetype": "launch_snipe",
+            "archetype_conf": 90,
+        }
+        fresh_response = {"pairs": [{
+            "chainId": "solana",
+            "volume": {"m5": 500, "h1": 1000},
+            "priceChange": {"h1": 5},
+            "liquidity": {"usd": 10_000},
+        }]}
+        with (
+            patch("autobuy._db.reset_day_if_needed"),
+            patch("autobuy._db.get_auto_buy_config", return_value=cfg),
+            patch("autobuy._db.has_bought", return_value=False),
+            patch("autobuy._db.get_spent_today", return_value=0.0),
+            patch("autobuy._db.get_open_position_count", return_value=0),
+            patch("autobuy._db.get_open_position_exposure", return_value={"narrative": {}, "archetype": {}}),
+            patch("autobuy.requests.get") as mock_get,
+            patch("autobuy.settings_manager", create=True) as mock_sm,
+        ):
+            mock_get.return_value.json.return_value = fresh_response
+            mock_sm.get_user_settings.return_value = {}
+            decision = await evaluate(1, result)
+
+        assert decision.gate_passed is True
+        assert decision.sol_amount == 0.06
+        assert decision.confidence >= 0.85

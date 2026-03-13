@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 import requests
 
 import db as _db
+import position_sizing
 
 
 # ── BuyDecision ───────────────────────────────────────────────────────────────
@@ -31,6 +32,9 @@ class BuyDecision:
     score:        int
     mcap:         float
     sol_amount:   float
+    confidence:   float       = 0.0
+    size_multiplier: float    = 1.0
+    strategy_profile: str     = ""
     gate_passed:  bool        = False
     block_reason: str         = ""
     # resolved by evaluate — forwarded to execute
@@ -194,7 +198,6 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
     # Reset daily spend counter if it's a new UTC day
     _db.reset_day_if_needed(uid)
     cfg = _db.get_auto_buy_config(uid)
-    sol_amount = float(cfg.get("sol_amount", 0.03))
 
     # Lazy import settings_manager to avoid heavy circular-import at module level
     try:
@@ -210,7 +213,6 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
         lambda: gate_score(score, cfg, user_cfg),
         lambda: gate_mcap(mcap, cfg),
         lambda: gate_already_bought(uid, mint),
-        lambda: gate_daily_limit(uid, cfg, sol_amount),
         lambda: gate_position_limit(uid, cfg),
         lambda: gate_momentum(result),
         lambda: gate_entry_quality(result),
@@ -222,9 +224,38 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
             print(f"[AUTOBUY] uid={uid} BLOCKED {symbol}: {reason}", flush=True)
             return BuyDecision(
                 uid=uid, mint=mint, symbol=symbol, name=name,
-                score=score, mcap=mcap, sol_amount=sol_amount,
+                score=score, mcap=mcap, sol_amount=0.0,
                 gate_passed=False, block_reason=reason,
             )
+
+    sizing = position_sizing.resolve_position_size(
+        cfg,
+        result,
+        exposure=_db.get_open_position_exposure(uid),
+    )
+    if sizing.block_reason:
+        print(f"[AUTOBUY] uid={uid} BLOCKED {symbol}: {sizing.block_reason}", flush=True)
+        return BuyDecision(
+            uid=uid, mint=mint, symbol=symbol, name=name,
+            score=score, mcap=mcap, sol_amount=0.0,
+            confidence=sizing.confidence,
+            size_multiplier=sizing.size_multiplier,
+            strategy_profile=sizing.strategy_profile,
+            gate_passed=False, block_reason=sizing.block_reason,
+        )
+
+    sol_amount = sizing.sol_amount
+    passed, reason = gate_daily_limit(uid, cfg, sol_amount)
+    if not passed:
+        print(f"[AUTOBUY] uid={uid} BLOCKED {symbol}: {reason}", flush=True)
+        return BuyDecision(
+            uid=uid, mint=mint, symbol=symbol, name=name,
+            score=score, mcap=mcap, sol_amount=sol_amount,
+            confidence=sizing.confidence,
+            size_multiplier=sizing.size_multiplier,
+            strategy_profile=sizing.strategy_profile,
+            gate_passed=False, block_reason=reason,
+        )
 
     # gate_freshness runs a blocking HTTP call — offload to thread
     loop = asyncio.get_running_loop()
@@ -236,6 +267,9 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
         return BuyDecision(
             uid=uid, mint=mint, symbol=symbol, name=name,
             score=score, mcap=mcap, sol_amount=sol_amount,
+            confidence=sizing.confidence,
+            size_multiplier=sizing.size_multiplier,
+            strategy_profile=sizing.strategy_profile,
             gate_passed=False, block_reason=fresh_reason,
         )
 
@@ -250,6 +284,9 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
     return BuyDecision(
         uid=uid, mint=mint, symbol=symbol, name=name,
         score=score, mcap=mcap, sol_amount=sol_amount,
+        confidence=sizing.confidence,
+        size_multiplier=sizing.size_multiplier,
+        strategy_profile=sizing.strategy_profile,
         gate_passed=True, block_reason="",
         mode=mode,
         fresh_vol_m5=fresh_vol_m5,
@@ -268,4 +305,4 @@ async def execute(bot, decision: BuyDecision, result: dict):
     if not decision.gate_passed:
         return
     import bot as _bot
-    await _bot.execute_auto_buy(bot, decision.uid, result)
+    await _bot.execute_auto_buy(bot, decision.uid, result, decision=decision)

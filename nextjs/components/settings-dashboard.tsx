@@ -8,9 +8,14 @@ import { apiFetch } from "@/lib/api";
 type AutoBuyConfig = {
   enabled?: boolean;
   sol_amount?: number;
+  max_sol_amount?: number;
+  min_confidence?: number;
+  confidence_scale_enabled?: boolean;
   min_score?: number;
   daily_limit_sol?: number;
   max_positions?: number;
+  max_narrative_exposure?: number;
+  max_archetype_exposure?: number;
   buy_tier?: string;
 };
 
@@ -105,12 +110,34 @@ export function SettingsDashboard() {
             />
             Enabled
           </label>
+          <label className="flex items-center gap-3 text-sm text-white">
+            <input
+              type="checkbox"
+              checked={Boolean(autobuy.confidence_scale_enabled ?? true)}
+              onChange={(event) =>
+                setAutobuy((current) => ({ ...current, confidence_scale_enabled: event.target.checked }))
+              }
+            />
+            Confidence-based sizing
+          </label>
           <div className="grid gap-4 md:grid-cols-2">
             <input
               value={String(autobuy.sol_amount ?? 0)}
               onChange={(event) => setAutobuy((current) => ({ ...current, sol_amount: Number(event.target.value || 0) }))}
               className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
-              placeholder="SOL amount"
+              placeholder="Base SOL amount"
+            />
+            <input
+              value={String(autobuy.max_sol_amount ?? 0)}
+              onChange={(event) => setAutobuy((current) => ({ ...current, max_sol_amount: Number(event.target.value || 0) }))}
+              className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
+              placeholder="Max SOL amount"
+            />
+            <input
+              value={String(autobuy.min_confidence ?? 0)}
+              onChange={(event) => setAutobuy((current) => ({ ...current, min_confidence: Number(event.target.value || 0) }))}
+              className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
+              placeholder="Min confidence (0-1)"
             />
             <input
               value={String(autobuy.min_score ?? 0)}
@@ -130,12 +157,34 @@ export function SettingsDashboard() {
               className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
               placeholder="Max positions"
             />
+            <input
+              value={String(autobuy.max_narrative_exposure ?? 0)}
+              onChange={(event) =>
+                setAutobuy((current) => ({ ...current, max_narrative_exposure: Number(event.target.value || 0) }))
+              }
+              className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
+              placeholder="Narrative cap (0 = off)"
+            />
+            <input
+              value={String(autobuy.max_archetype_exposure ?? 0)}
+              onChange={(event) =>
+                setAutobuy((current) => ({ ...current, max_archetype_exposure: Number(event.target.value || 0) }))
+              }
+              className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
+              placeholder="Archetype cap (0 = off)"
+            />
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+            Base size is your normal auto-buy size. Stronger setups can scale up to Max SOL when confidence sizing is on.
+            Min confidence blocks weak trades before they hit daily limits. Exposure caps stop stacking too many open
+            positions in the same narrative or archetype.
           </div>
           <select
             value={autobuy.buy_tier || "hot"}
             onChange={(event) => setAutobuy((current) => ({ ...current, buy_tier: event.target.value }))}
             className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
           >
+            <option value="scouted">Scouted</option>
             <option value="ultra_hot">Ultra Hot</option>
             <option value="hot">Hot</option>
             <option value="warm">Warm</option>

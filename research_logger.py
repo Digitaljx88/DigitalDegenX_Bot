@@ -22,9 +22,9 @@ CSV_FIELDS = [
     "hold_seconds", "mcap_at_entry", "mcap_at_exit",
     "entry_source", "entry_age_mins", "entry_liquidity_usd",
     "entry_txns_5m", "entry_score_raw", "entry_score_effective",
-    "entry_tier", "entry_wallet_signal", "entry_archetype",
+    "entry_tier", "entry_wallet_signal", "entry_archetype", "entry_strategy",
     "entry_source_rank", "entry_confidence", "exit_reason",
-    "exit_trigger",
+    "exit_trigger", "max_unrealized_pnl_pct", "giveback_pct",
 ]
 
 
@@ -121,10 +121,13 @@ def log_trade(
         "entry_tier": extra.get("entry_tier") or "",
         "entry_wallet_signal": extra.get("entry_wallet_signal") or 0.0,
         "entry_archetype": extra.get("entry_archetype") or "",
+        "entry_strategy": extra.get("entry_strategy") or "",
         "entry_source_rank": extra.get("entry_source_rank") or 0,
         "entry_confidence": extra.get("entry_confidence") or 0.0,
         "exit_reason": extra.get("exit_reason") or "",
         "exit_trigger": extra.get("exit_trigger") or "",
+        "max_unrealized_pnl_pct": extra.get("max_unrealized_pnl_pct") or 0.0,
+        "giveback_pct": extra.get("giveback_pct") or 0.0,
     }
     
     # Write to CSV

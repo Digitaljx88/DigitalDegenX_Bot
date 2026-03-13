@@ -15,6 +15,7 @@ import wallet_tracker
 import wallet_fingerprint
 import wallet_cluster
 import launch_predictor
+import strategy_profiles
 import intelligence_tracker
 import birdeye
 import geckoterminal
@@ -452,6 +453,8 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
         "volume_trend":     (factors["volume_trend"]["pts"],     factors["volume_trend"]["reason"]),
     }
 
+    prediction = launch_predictor.predict_launch(token, rc, breakdown)
+
     return {
         "mint":          token.get("mint", ""),
         "name":          token.get("name", ""),
@@ -472,8 +475,10 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
         "risk":          result_v2["risk_level"],
         "red_flags":     [],
         "breakdown":     breakdown,
-        "archetype":     "SCOUT_V2",
-        "archetype_conf": 100,
+        "archetype":     prediction.get("archetype", "NONE"),
+        "archetype_conf": prediction.get("confidence", 0),
+        "prediction_boost": prediction.get("boost", 0),
+        "archetype_label": prediction.get("archetype_label", ""),
         "v2_result":     result_v2,
     }
 
@@ -639,6 +644,9 @@ def build_entry_quality(token: dict, rc: dict, result: dict, narrative: str) -> 
         "liquidity": liquidity,
         "txns_5m": txns_5m,
         "narrative": narrative,
+        "dex": result.get("dex", token.get("dex", "")),
+        "strategy_profile": result.get("strategy_profile"),
+        "strategy_confidence": result.get("strategy_confidence", result.get("archetype_conf", 0)),
     }
 
     _quality_history[mint].append({
@@ -702,6 +710,10 @@ def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum
     if not momentum_alive and effective_score < 85:
         force_scouted.append("momentum no longer alive")
 
+    strategy_flags = strategy_profiles.evaluate_strategy_rules(quality)
+    reasons.extend(strategy_flags["strategy_reasons"])
+    autobuy_only.extend(strategy_flags["strategy_autobuy_only_reasons"])
+
     return {
         "quality_reasons": reasons,
         "force_scouted_reasons": force_scouted,
@@ -710,6 +722,9 @@ def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum
         "autobuy_blocked": bool(reasons or autobuy_only or force_scouted),
         "force_scouted": bool(force_scouted),
         "primary_source": source_name in PRIMARY_DISCOVERY_SOURCES,
+        "strategy_profile": strategy_flags["strategy_profile"],
+        "strategy_exit_preset": strategy_flags["strategy_exit_preset"],
+        "strategy_size_bias": strategy_flags["strategy_size_bias"],
     }
 
 
@@ -1039,6 +1054,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         matched_narrative = next((n for n in NARRATIVES if n.lower() in _narr_lower
                                   or any(k in _narr_lower for k in NARRATIVES[n])), "Other")
         result["matched_narrative"] = matched_narrative
+        result.update(strategy_profiles.annotate_result(result))
         append_log({
             "date":      datetime.now(timezone.utc).strftime("%Y-%m-%d"),
             "timestamp": time.time(),
@@ -1049,6 +1065,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             "mcap":      mcap,
             "narrative": matched_narrative,
             "archetype": result.get("archetype", "NONE"),
+            "strategy_profile": result.get("strategy_profile", "narrative_breakout"),
             "alerted":   False,
             "dq":        result.get("disqualified"),
         })
@@ -1093,6 +1110,9 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         result["entry_quality_force_scouted_reasons"] = quality_flags["force_scouted_reasons"]
         result["entry_quality_autobuy_only_reasons"] = quality_flags["autobuy_only_reasons"]
         result["entry_quality_primary_source"] = quality_flags["primary_source"]
+        result["strategy_profile"] = quality_flags["strategy_profile"]
+        result["strategy_exit_preset"] = quality_flags["strategy_exit_preset"]
+        result["strategy_size_bias"] = quality_flags["strategy_size_bias"]
         if quality_flags["alert_blocked"] or quality_flags["force_scouted"] or quality_flags["autobuy_only_reasons"]:
             print(
                 f"[SCANNER] {result.get('symbol', mint[:6])} quality "

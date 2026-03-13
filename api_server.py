@@ -139,10 +139,15 @@ class MessageRequest(BaseModel):
 class AutoBuyUpdate(BaseModel):
     enabled: Optional[bool] = None
     sol_amount: Optional[float] = None
+    max_sol_amount: Optional[float] = None
+    min_confidence: Optional[float] = None
+    confidence_scale_enabled: Optional[bool] = None
     min_score: Optional[int] = None
     max_mcap: Optional[float] = None
     daily_limit_sol: Optional[float] = None
     max_positions: Optional[int] = None
+    max_narrative_exposure: Optional[int] = None
+    max_archetype_exposure: Optional[int] = None
     buy_tier: Optional[str] = None
 
 
@@ -321,13 +326,24 @@ async def execute_sell(req: SellRequest):
         dec       = int(pair.get("baseToken", {}).get("decimals", 6) or 6)
         ui        = sell_raw / (10 ** dec)
         sol_recv  = price_sol * ui * 0.99
+        as_cfg    = b._db.get_auto_sell(req.uid, req.mint) or {}
+        buy_price = as_cfg.get("buy_price_usd") or b._get_buy_price(req.uid, req.mint)
         portfolio[req.mint] = raw_held - sell_raw
         portfolio["SOL"]    = portfolio.get("SOL", 0) + sol_recv
         if portfolio[req.mint] <= 0:
             portfolio.pop(req.mint, None)
         b.update_portfolio(req.uid, portfolio)
+        exit_metrics = b.build_exit_trade_metrics(
+            req.uid,
+            req.mint,
+            float(pair.get("priceUsd", 0) or 0),
+            reason="manual",
+            as_cfg=as_cfg,
+        )
         b.log_trade(req.uid, "paper", "sell", req.mint, pair["baseToken"]["symbol"],
-                    sol_received=sol_recv, token_amount=sell_raw)
+                    sol_received=sol_recv, token_amount=sell_raw,
+                    price_usd=float(pair.get("priceUsd", 0) or 0),
+                    buy_price_usd=buy_price, **exit_metrics)
         return {"mode": "paper", "pct": pct, "tokens_sold": sell_raw,
                 "sol_received": sol_recv, "new_sol_balance": portfolio["SOL"]}
 
@@ -404,6 +420,21 @@ async def get_trade_stats(uid: int, filter_spec: Optional[str] = None):
         "summary": tc.summarize_trades(filtered, closed),
         "closed_count": len(closed),
         "cohorts": tc.summarize_closed_cohorts(closed),
+    }
+
+
+@app.get("/trades/weekly-report", dependencies=[Depends(verify_key)])
+async def get_trade_weekly_report(uid: int, days: int = 7, filter_spec: Optional[str] = None):
+    """Return a weekly optimization report built from closed trades."""
+    closed = _db.get_closed_trades(uid, limit=10000)
+    if filter_spec:
+        closed = tc.filter_closed_trades(closed, filter_spec)
+    report = tc.build_optimization_report(closed, window_days=max(1, min(days, 30)))
+    return {
+        "uid": uid,
+        "filter": filter_spec or "all",
+        "window_days": max(1, min(days, 30)),
+        **report,
     }
 
 

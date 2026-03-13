@@ -145,17 +145,46 @@ def _age_band(age_mins: float | int | None) -> str:
     return "60m+"
 
 
+def _avg_metric(rows: list[dict], field: str) -> float:
+    values = [float(row.get(field) or 0) for row in rows if row.get(field) is not None]
+    return (sum(values) / len(values)) if values else 0.0
+
+
+def _top_row(rows: list[dict]) -> dict | None:
+    return rows[0] if rows else None
+
+
 def summarize_closed_cohorts(closed: list[dict]) -> dict:
     def _group(rows: list[dict], field: str, default: str = "Unknown") -> list[dict]:
         buckets: dict[str, dict] = {}
         for row in rows:
             key = str(row.get(field) or default)
-            bucket = buckets.setdefault(key, {"label": key, "count": 0, "wins": 0, "realized_pnl_sol": 0.0})
+            bucket = buckets.setdefault(
+                key,
+                {
+                    "label": key,
+                    "count": 0,
+                    "wins": 0,
+                    "realized_pnl_sol": 0.0,
+                    "giveback_sum": 0.0,
+                    "giveback_count": 0,
+                    "peak_sum": 0.0,
+                    "peak_count": 0,
+                },
+            )
             pnl_sol = float(row.get("pnl_sol") or 0)
             bucket["count"] += 1
             bucket["realized_pnl_sol"] += pnl_sol
             if pnl_sol > 0:
                 bucket["wins"] += 1
+            giveback = row.get("giveback_pct")
+            if giveback is not None:
+                bucket["giveback_sum"] += float(giveback or 0)
+                bucket["giveback_count"] += 1
+            peak = row.get("max_unrealized_pnl_pct")
+            if peak is not None:
+                bucket["peak_sum"] += float(peak or 0)
+                bucket["peak_count"] += 1
         result = []
         for bucket in buckets.values():
             count = bucket["count"] or 1
@@ -164,12 +193,24 @@ def summarize_closed_cohorts(closed: list[dict]) -> dict:
                 "count": bucket["count"],
                 "win_rate": bucket["wins"] / count * 100.0,
                 "realized_pnl_sol": bucket["realized_pnl_sol"],
+                "avg_giveback_pct": (
+                    bucket["giveback_sum"] / bucket["giveback_count"]
+                    if bucket["giveback_count"]
+                    else None
+                ),
+                "avg_peak_unrealized_pct": (
+                    bucket["peak_sum"] / bucket["peak_count"]
+                    if bucket["peak_count"]
+                    else None
+                ),
             })
         return sorted(result, key=lambda row: (row["realized_pnl_sol"], row["count"]), reverse=True)
 
     source_rows = _group(closed, "entry_source")
     narrative_rows = _group(closed, "narrative", "Other")
     archetype_rows = _group(closed, "entry_archetype", "NONE")
+    strategy_rows = _group(closed, "entry_strategy", "none")
+    exit_reason_rows = _group(closed, "exit_reason", "manual")
 
     score_rows = _group(
         [{**row, "_score_band": _score_band(row.get("entry_score_effective"))} for row in closed],
@@ -184,8 +225,72 @@ def summarize_closed_cohorts(closed: list[dict]) -> dict:
         "by_source": source_rows,
         "by_narrative": narrative_rows,
         "by_archetype": archetype_rows,
+        "by_strategy": strategy_rows,
+        "by_exit_reason": exit_reason_rows,
         "by_score_band": score_rows,
         "by_age_band": age_rows,
+    }
+
+
+def filter_recent_closed_trades(
+    closed: list[dict],
+    window_days: int = 7,
+    now_ts: float | None = None,
+) -> list[dict]:
+    days = max(1, int(window_days or 7))
+    current = float(now_ts or datetime.now(tz=timezone.utc).timestamp())
+    cutoff = current - (days * 86400)
+    return [row for row in closed if float(row.get("sell_ts") or 0) >= cutoff]
+
+
+def build_optimization_report(
+    closed: list[dict],
+    window_days: int = 7,
+    now_ts: float | None = None,
+) -> dict:
+    recent = filter_recent_closed_trades(closed, window_days=window_days, now_ts=now_ts)
+    cohorts = summarize_closed_cohorts(recent)
+    win_count = sum(1 for row in recent if float(row.get("pnl_sol") or 0) > 0)
+    summary = {
+        "window_days": max(1, int(window_days or 7)),
+        "closed_count": len(recent),
+        "win_rate": (win_count / len(recent) * 100.0) if recent else 0.0,
+        "realized_pnl_sol": sum(float(row.get("pnl_sol") or 0) for row in recent),
+        "avg_giveback_pct": _avg_metric(recent, "giveback_pct"),
+        "avg_peak_unrealized_pct": _avg_metric(recent, "max_unrealized_pnl_pct"),
+    }
+    leaders = {
+        "strategy": _top_row(cohorts["by_strategy"]),
+        "source": _top_row(cohorts["by_source"]),
+        "score_band": _top_row(cohorts["by_score_band"]),
+        "age_band": _top_row(cohorts["by_age_band"]),
+        "exit_reason": _top_row(cohorts["by_exit_reason"]),
+        "narrative": _top_row(cohorts["by_narrative"]),
+        "archetype": _top_row(cohorts["by_archetype"]),
+    }
+
+    insights: list[str] = []
+    insight_specs = (
+        ("strategy", "Best strategy this window"),
+        ("source", "Best discovery source"),
+        ("score_band", "Best entry score band"),
+        ("age_band", "Best freshness band"),
+        ("exit_reason", "Best exit behavior"),
+    )
+    for key, prefix in insight_specs:
+        row = leaders.get(key)
+        if not row:
+            continue
+        insights.append(
+            f"{prefix}: {row['label']} ({row['realized_pnl_sol']:.4f} SOL, {row['count']} trades, {row['win_rate']:.0f}% win rate)"
+        )
+
+    return {
+        "generated_at": float(now_ts or datetime.now(tz=timezone.utc).timestamp()),
+        "summary": summary,
+        "leaders": leaders,
+        "cohorts": cohorts,
+        "insights": insights,
     }
 
 
@@ -231,11 +336,17 @@ def summarize_trades(trades: list[dict], closed: list[dict]) -> dict:
     avg_hold = sum(float(row.get("hold_s") or 0) for row in closed) / len(closed) if closed else 0.0
     source_counts: dict[str, int] = {}
     archetype_counts: dict[str, int] = {}
+    strategy_counts: dict[str, int] = {}
     for row in closed:
         src = str(row.get("entry_source") or "Unknown")
         source_counts[src] = source_counts.get(src, 0) + 1
         arch = str(row.get("entry_archetype") or "NONE")
         archetype_counts[arch] = archetype_counts.get(arch, 0) + 1
+        strategy = str(row.get("entry_strategy") or "none")
+        strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+    cohort_summary = summarize_closed_cohorts(closed) if closed else {}
+    exit_reason_rows = cohort_summary.get("by_exit_reason", [])
+    strategy_rows = cohort_summary.get("by_strategy", [])
     return {
         "total_rows": len(trades),
         "buy_count": sum(1 for t in trades if str(t.get("action", "")).lower() == "buy"),
@@ -246,9 +357,14 @@ def summarize_trades(trades: list[dict], closed: list[dict]) -> dict:
         "win_rate": (sum(1 for row in closed if float(row.get("pnl_sol") or 0) > 0) / len(closed) * 100) if closed else 0.0,
         "realized_pnl_sol": sum(float(row.get("pnl_sol") or 0) for row in closed),
         "avg_hold_s": avg_hold,
+        "avg_giveback_pct": _avg_metric(closed, "giveback_pct"),
+        "avg_peak_unrealized_pct": _avg_metric(closed, "max_unrealized_pnl_pct"),
         "best_trade": best,
         "worst_trade": worst,
         "top_narrative": max(narratives, key=narratives.get) if narratives else "None",
         "top_source": max(source_counts, key=source_counts.get) if source_counts else "None",
         "top_archetype": max(archetype_counts, key=archetype_counts.get) if archetype_counts else "None",
+        "top_strategy": strategy_rows[0]["label"] if strategy_rows else (max(strategy_counts, key=strategy_counts.get) if strategy_counts else "None"),
+        "top_exit_reason": exit_reason_rows[0]["label"] if exit_reason_rows else "None",
+        "best_exit_reason": exit_reason_rows[0]["label"] if exit_reason_rows else "None",
     }

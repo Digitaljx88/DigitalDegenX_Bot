@@ -110,13 +110,16 @@ def init():
                 entry_tier TEXT,
                 entry_wallet_signal REAL,
                 entry_archetype TEXT,
+                entry_strategy TEXT,
                 entry_source_rank INTEGER,
                 entry_confidence REAL,
                 exit_reason TEXT,
                 exit_trigger TEXT,
                 exit_score_effective INTEGER,
                 exit_mcap REAL,
-                hold_seconds REAL
+                hold_seconds REAL,
+                max_unrealized_pnl_pct REAL,
+                giveback_pct REAL
             );
             CREATE INDEX IF NOT EXISTS idx_trades_uid_ts ON trades(uid, ts DESC);
             CREATE INDEX IF NOT EXISTS idx_trades_mint   ON trades(uid, mint);
@@ -148,7 +151,10 @@ def init():
                 entry_score_effective INTEGER,
                 entry_confidence      REAL,
                 entry_archetype       TEXT,
-                exit_reason           TEXT
+                entry_strategy        TEXT,
+                exit_reason           TEXT,
+                max_unrealized_pnl_pct REAL,
+                giveback_pct          REAL
             );
             CREATE INDEX IF NOT EXISTS idx_closed_trades_uid_sell_ts ON closed_trades(uid, sell_ts DESC);
             CREATE INDEX IF NOT EXISTS idx_closed_trades_uid_mint ON closed_trades(uid, mint);
@@ -168,6 +174,9 @@ def init():
                 uid                INTEGER PRIMARY KEY,
                 enabled            INTEGER NOT NULL DEFAULT 0,
                 sol_amount         REAL    NOT NULL DEFAULT 0.03,
+                max_sol_amount     REAL    NOT NULL DEFAULT 0.10,
+                min_confidence     REAL    NOT NULL DEFAULT 0.35,
+                confidence_scale_enabled INTEGER NOT NULL DEFAULT 1,
                 min_score          INTEGER NOT NULL DEFAULT 55,
                 max_mcap           REAL    NOT NULL DEFAULT 500000,
                 min_mcap_usd       REAL    NOT NULL DEFAULT 0,
@@ -175,6 +184,8 @@ def init():
                 spent_today        REAL    NOT NULL DEFAULT 0.0,
                 spent_date         TEXT,
                 max_positions      INTEGER NOT NULL DEFAULT 5,
+                max_narrative_exposure INTEGER NOT NULL DEFAULT 2,
+                max_archetype_exposure INTEGER NOT NULL DEFAULT 0,
                 buy_tier           TEXT    NOT NULL DEFAULT 'warm',
                 min_liquidity_usd  REAL    NOT NULL DEFAULT 0,
                 max_liquidity_usd  REAL    NOT NULL DEFAULT 0,
@@ -246,12 +257,17 @@ def init():
 
     # Migrate existing auto_buy_config tables that predate the new filter columns
     _new_ab_cols = [
+        ("max_sol_amount",     "REAL    NOT NULL DEFAULT 0.10"),
+        ("min_confidence",     "REAL    NOT NULL DEFAULT 0.35"),
+        ("confidence_scale_enabled", "INTEGER NOT NULL DEFAULT 1"),
         ("min_mcap_usd",      "REAL    NOT NULL DEFAULT 0"),
         ("min_liquidity_usd", "REAL    NOT NULL DEFAULT 0"),
         ("max_liquidity_usd", "REAL    NOT NULL DEFAULT 0"),
         ("min_age_mins",      "INTEGER NOT NULL DEFAULT 0"),
         ("max_age_mins",      "INTEGER NOT NULL DEFAULT 0"),
         ("min_txns_5m",       "INTEGER NOT NULL DEFAULT 0"),
+        ("max_narrative_exposure", "INTEGER NOT NULL DEFAULT 2"),
+        ("max_archetype_exposure", "INTEGER NOT NULL DEFAULT 0"),
     ]
     for col, defn in _new_ab_cols:
         try:
@@ -271,6 +287,7 @@ def init():
         ("entry_tier", "TEXT"),
         ("entry_wallet_signal", "REAL"),
         ("entry_archetype", "TEXT"),
+        ("entry_strategy", "TEXT"),
         ("entry_source_rank", "INTEGER"),
         ("entry_confidence", "REAL"),
         ("exit_reason", "TEXT"),
@@ -278,11 +295,25 @@ def init():
         ("exit_score_effective", "INTEGER"),
         ("exit_mcap", "REAL"),
         ("hold_seconds", "REAL"),
+        ("max_unrealized_pnl_pct", "REAL"),
+        ("giveback_pct", "REAL"),
     ]
     for col, defn in _new_trade_cols:
         try:
             with _conn() as c:
                 c.execute(f"ALTER TABLE trades ADD COLUMN {col} {defn}")
+                c.commit()
+        except Exception:
+            pass
+
+    _new_closed_trade_cols = [
+        ("max_unrealized_pnl_pct", "REAL"),
+        ("giveback_pct", "REAL"),
+    ]
+    for col, defn in _new_closed_trade_cols:
+        try:
+            with _conn() as c:
+                c.execute(f"ALTER TABLE closed_trades ADD COLUMN {col} {defn}")
                 c.commit()
         except Exception:
             pass
@@ -361,6 +392,7 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str = "",
         "entry_tier": kwargs.get("entry_tier"),
         "entry_wallet_signal": kwargs.get("entry_wallet_signal"),
         "entry_archetype": kwargs.get("entry_archetype"),
+        "entry_strategy": kwargs.get("entry_strategy"),
         "entry_source_rank": kwargs.get("entry_source_rank"),
         "entry_confidence": kwargs.get("entry_confidence"),
         "exit_reason": kwargs.get("exit_reason"),
@@ -368,6 +400,8 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str = "",
         "exit_score_effective": kwargs.get("exit_score_effective"),
         "exit_mcap": kwargs.get("exit_mcap"),
         "hold_seconds": kwargs.get("hold_seconds"),
+        "max_unrealized_pnl_pct": kwargs.get("max_unrealized_pnl_pct"),
+        "giveback_pct": kwargs.get("giveback_pct"),
     }
     cols = ", ".join(row.keys())
     placeholders = ", ".join("?" * len(row))
@@ -491,8 +525,9 @@ def reconcile_closed_trades(uid: int | None = None) -> int:
                         qty_sold, sol_in, sol_out, pnl_sol, pnl_pct, hold_s,
                         buy_price_usd, sell_price_usd, tx_sig,
                         entry_source, entry_age_mins, entry_score_effective,
-                        entry_confidence, entry_archetype, exit_reason
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                        entry_confidence, entry_archetype, entry_strategy, exit_reason,
+                        max_unrealized_pnl_pct, giveback_pct
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     """,
                     (
                         buy_trade.get("uid"),
@@ -519,7 +554,10 @@ def reconcile_closed_trades(uid: int | None = None) -> int:
                         buy_trade.get("entry_score_effective") or buy_trade.get("heat_score"),
                         buy_trade.get("entry_confidence"),
                         buy_trade.get("entry_archetype"),
+                        buy_trade.get("entry_strategy"),
                         trade.get("exit_reason") or trade.get("exit_trigger"),
+                        trade.get("max_unrealized_pnl_pct"),
+                        trade.get("giveback_pct"),
                     ),
                 )
                 inserted += 1
@@ -595,6 +633,9 @@ def get_all_auto_sells_all_users() -> dict:
 _AB_DEFAULTS = {
     "enabled": False,
     "sol_amount": 0.03,
+    "max_sol_amount": 0.10,
+    "min_confidence": 0.35,
+    "confidence_scale_enabled": True,
     "min_score": 55,
     "max_mcap": 500_000,
     "min_mcap_usd": 0,
@@ -602,6 +643,8 @@ _AB_DEFAULTS = {
     "spent_today": 0.0,
     "spent_date": None,
     "max_positions": 5,
+    "max_narrative_exposure": 2,
+    "max_archetype_exposure": 0,
     "buy_tier": "warm",
     "min_liquidity_usd": 0,
     "max_liquidity_usd": 0,
@@ -618,6 +661,7 @@ def get_auto_buy_config(uid: int) -> dict:
         return {"uid": uid, **_AB_DEFAULTS}
     d = dict(row)
     d["enabled"] = bool(d["enabled"])
+    d["confidence_scale_enabled"] = bool(d.get("confidence_scale_enabled", 1))
     return d
 
 
@@ -691,6 +735,61 @@ def get_open_position_count(uid: int) -> int:
         (uid,),
     )
     return row["n"] if row else 0
+
+
+def get_open_position_exposure(uid: int) -> dict:
+    """
+    Count open positions grouped by narrative and archetype.
+
+    Uses auto-sell config metadata when available, then falls back to the most
+    recent buy trade for that mint.
+    """
+    rows = _fetchall(
+        "SELECT asset FROM portfolios WHERE uid=? AND asset!='SOL' AND amount>0",
+        (uid,),
+    )
+    narrative_counts: defaultdict[str, int] = defaultdict(int)
+    archetype_counts: defaultdict[str, int] = defaultdict(int)
+
+    for row in rows:
+        mint = row["asset"]
+        narrative = ""
+        archetype = ""
+
+        cfg_row = _fetchone(
+            "SELECT config_json FROM auto_sell WHERE uid=? AND mint=?",
+            (uid, mint),
+        )
+        if cfg_row:
+            try:
+                cfg = json.loads(cfg_row["config_json"] or "{}")
+            except Exception:
+                cfg = {}
+            narrative = str(cfg.get("narrative") or "")
+            archetype = str(cfg.get("entry_archetype") or cfg.get("archetype") or "")
+
+        if not narrative or not archetype:
+            trade_row = _fetchone(
+                "SELECT narrative, entry_archetype FROM trades "
+                "WHERE uid=? AND mint=? AND action='buy' "
+                "ORDER BY ts DESC LIMIT 1",
+                (uid, mint),
+            )
+            if trade_row:
+                if not narrative:
+                    narrative = str(trade_row["narrative"] or "")
+                if not archetype:
+                    archetype = str(trade_row["entry_archetype"] or "")
+
+        if narrative and narrative != "Other":
+            narrative_counts[narrative] += 1
+        if archetype:
+            archetype_counts[archetype] += 1
+
+    return {
+        "narrative": dict(narrative_counts),
+        "archetype": dict(archetype_counts),
+    }
 
 
 def get_spent_today(uid: int) -> float:
