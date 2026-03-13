@@ -461,7 +461,7 @@ def _get_buy_price(uid: int, mint: str) -> float | None:
 # ── Auto-buy configs ──────────────────────────────────────────────────────────
 
 def get_auto_buy(uid: int) -> dict:
-    """Return auto-buy config for uid. Includes 'bought' list for backwards compat."""
+    """Return auto-buy config for uid. Includes today's bought list for UI compatibility."""
     cfg = _db.get_auto_buy_config(uid)
     cfg["bought"] = _db.get_bought_list(uid)
     return cfg
@@ -2161,7 +2161,7 @@ async def execute_auto_buy(bot, uid: int, result: dict):
 
     max_pos = cfg.get("max_positions", 0)
     if max_pos > 0:
-        open_positions = len(_db.get_all_auto_sells(uid))
+        open_positions = _db.get_open_position_count(uid)
         if open_positions >= max_pos:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — positions {open_positions} >= max {max_pos}", flush=True)
             return
@@ -2264,9 +2264,8 @@ async def execute_auto_buy(bot, uid: int, result: dict):
                   sol_amount=sol_amount, token_amount=out_amount,
                   price_usd=price_usd, mcap=mcap, heat_score=score)
 
-        cfg["bought"].append(mint)
-        cfg["spent_today"] = spent_today + sol_amount
-        set_auto_buy(uid, cfg)
+        _db.record_buy(uid, mint, sol_amount)
+        cfg = get_auto_buy(uid)
 
         try:
             await bot.send_message(
@@ -2475,9 +2474,8 @@ async def execute_auto_buy(bot, uid: int, result: dict):
                   sol_amount=sol_amount, token_amount=out_raw,
                   price_usd=price_usd, mcap=mcap, heat_score=score, tx_sig=tx_sig)
 
-        cfg["bought"].append(mint)
-        cfg["spent_today"] = spent_today + sol_amount
-        set_auto_buy(uid, cfg)
+        _db.record_buy(uid, mint, sol_amount)
+        cfg = get_auto_buy(uid)
 
         try:
             await bot.send_message(
@@ -2512,11 +2510,11 @@ async def execute_auto_buy(bot, uid: int, result: dict):
             pass
 
 
-async def handle_scanner_autobuy(bot, result: dict):
+async def handle_scanner_autobuy(bot, result: dict, target_uids: list[int] | None = None):
     """Called by run_scan when a token hits the alert threshold."""
     import traceback
     import autobuy as _ab
-    chat_ids = _db.get_scan_targets()
+    chat_ids = target_uids if target_uids is not None else _db.get_scan_targets()
     sym = result.get("symbol", "?")
     print(f"[AUTOBUY] scanner alert fired for {sym} — targets={chat_ids}", flush=True)
     for uid in chat_ids:
@@ -3339,7 +3337,7 @@ def _autobuy_status_text(uid: int) -> str:
     spent           = cfg.get("spent_today", 0.0)
     bought          = cfg.get("bought", [])
     max_pos         = cfg.get("max_positions", 0)
-    open_pos        = len(_db.get_all_auto_sells(uid))
+    open_pos        = _db.get_open_position_count(uid)
     mode            = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
     buy_tier        = cfg.get("buy_tier", "")
     min_liq         = cfg.get("min_liquidity_usd", 0)

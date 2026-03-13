@@ -201,6 +201,13 @@ def score_risk_safety(token: dict, rc: dict = None, cfg: dict = None) -> tuple[i
     
     details = {}
     risk_pts = 25  # Start full
+
+    # Mint authority still enabled = issuer can mint more supply at will
+    mint_authority = rc.get("mintAuthority")
+    if mint_authority and mint_authority not in ("", "null", None):
+        details["mint_authority_disqualified"] = True
+        risk_pts = 0
+    details["mint_authority"] = mint_authority
     
     # Dev wallet check
     dev_sold_pct = rc.get("dev_wallet", {}).get("sold_pct", 0) or 0
@@ -251,6 +258,12 @@ def score_risk_safety(token: dict, rc: dict = None, cfg: dict = None) -> tuple[i
         pass  # Already factored into points
     
     details["rugcheck_risk"] = rugcheck_risk
+
+    danger_risks = [r.get("name", "unknown") for r in (rc.get("risks") or []) if r.get("level") == "danger"]
+    if danger_risks:
+        details["danger_risks"] = danger_risks
+        details["danger_disqualified"] = True
+        risk_pts = 0
     
     # Bundle risk from RugCheck
     is_bundled = rc.get("is_bundled", False) or False
@@ -589,6 +602,12 @@ def calculate_heat_score_v2(token: dict, rc: dict = None, cfg: dict = None) -> d
         raw_score = 0
     elif risk_details.get("top_holder_disqualified"):
         disqualified = "Top holder >threshold"
+        raw_score = 0
+    elif risk_details.get("mint_authority_disqualified"):
+        disqualified = "Mint authority active"
+        raw_score = 0
+    elif risk_details.get("danger_disqualified"):
+        disqualified = "RugCheck DANGER"
         raw_score = 0
     else:
         # Calculate raw score (sum of all factors)
