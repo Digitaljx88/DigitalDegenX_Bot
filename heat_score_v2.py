@@ -45,6 +45,12 @@ except ImportError:
     _wallet_cluster = None
 
 
+def _token_mint(token_or_mint) -> str:
+    if isinstance(token_or_mint, dict):
+        return str(token_or_mint.get("mint", "") or "")
+    return str(token_or_mint or "")
+
+
 def score_momentum(token: dict, cfg: dict = None) -> tuple[int, str, dict]:
     """
     Score momentum (0-20 pts) based on price movement, volume growth, and bid/ask spreads.
@@ -320,14 +326,20 @@ def score_social_narrative(token: dict, cfg: dict = None) -> tuple[int, str, dic
     name = (token.get("name", "") or "").lower()
     symbol = (token.get("symbol", "") or "").lower()
     description = (token.get("description", "") or "").lower()
+    lifecycle_narrative = str(token.get("lifecycle_narrative") or token.get("matched_narrative") or "").strip()
     
     hot_narratives = ["ai", "agent", "trump", "maga", "solana", "defi", "nft", "gaming"]
     for narrative in hot_narratives:
         if narrative in name or narrative in symbol or narrative in description:
             narratives.append(narrative)
             social_pts += 2
+
+    if lifecycle_narrative and lifecycle_narrative.lower() != "other":
+        narratives.append(lifecycle_narrative.lower())
+        social_pts += 4
     
-    details["detected_narratives"] = narratives
+    details["detected_narratives"] = sorted(set(narratives))
+    details["lifecycle_narrative"] = lifecycle_narrative or None
     
     final_pts = min(15, max(0, social_pts))
     
@@ -339,7 +351,7 @@ def score_social_narrative(token: dict, cfg: dict = None) -> tuple[int, str, dic
     return final_pts, reason, details
 
 
-def score_wallet_behavior(token_mint: str, cfg: dict = None) -> tuple[int, str, dict]:
+def score_wallet_behavior(token_or_mint, cfg: dict = None) -> tuple[int, str, dict]:
     """
     Score wallet behavior (0-15 pts) based on tracked wallet entries and cluster signals.
     
@@ -354,9 +366,20 @@ def score_wallet_behavior(token_mint: str, cfg: dict = None) -> tuple[int, str, 
     
     details = {}
     wallet_pts = 0
+    token_mint = _token_mint(token_or_mint)
+    token = token_or_mint if isinstance(token_or_mint, dict) else {}
 
     cluster_boost = cfg.get("wallet_cluster_boost_pts", 5)
     seed_boost = cfg.get("wallet_known_seed_boost_pts", 8)
+    wallet_signal = float(token.get("wallet_signal", token.get("wallet_boost", 0)) or 0)
+
+    if wallet_signal >= 8:
+        wallet_pts += 10
+    elif wallet_signal >= 5:
+        wallet_pts += 7
+    elif wallet_signal >= 2:
+        wallet_pts += 3
+    details["wallet_signal"] = wallet_signal
 
     known_seed = False
     if _wallet_tracker and hasattr(_wallet_tracker, "check_seed_wallets"):
@@ -417,10 +440,12 @@ def score_migration_status(token: dict, rc: dict = None, cfg: dict = None) -> tu
         age_hours = 999
     
     details["age_hours"] = age_hours
+    lifecycle_state = str(token.get("lifecycle_state") or "").lower()
+    details["lifecycle_state"] = lifecycle_state or None
     
     # New token boost (under 1 hour)
     new_boost = cfg.get("migration_new_boost_pts", 8)
-    if age_hours < 1:
+    if lifecycle_state in {"launched", "pump_active"} or age_hours < 1:
         migr_pts = new_boost
         details["status"] = "NEW"
     else:
@@ -428,6 +453,8 @@ def score_migration_status(token: dict, rc: dict = None, cfg: dict = None) -> tu
     
     # Graduated from pump.fun bonus
     is_graduated = rc.get("is_graduated_pump_fun", False) or False
+    if lifecycle_state == "migration_pending":
+        is_graduated = True
     grad_boost = cfg.get("migration_grad_boost_pts", 6)
     
     if is_graduated:
@@ -436,6 +463,8 @@ def score_migration_status(token: dict, rc: dict = None, cfg: dict = None) -> tu
     
     # Migrated token penalty (already on Raydium/other DEX)
     is_migrated = rc.get("is_migrated", False) or False
+    if lifecycle_state in {"raydium_live", "dex_indexed"}:
+        is_migrated = True
     migrated_penalty = cfg.get("migration_migrated_penalty_pts", 2)
     
     if is_migrated and not is_graduated:
@@ -449,7 +478,7 @@ def score_migration_status(token: dict, rc: dict = None, cfg: dict = None) -> tu
     return final_pts, reason, details
 
 
-def score_directional_bias(token_mint: str, cfg: dict = None) -> tuple[int, str, dict]:
+def score_directional_bias(token_or_mint, cfg: dict = None) -> tuple[int, str, dict]:
     """
     Score directional buy/sell bias (0-10 pts) using Birdeye buy/sell pressure.
     
@@ -463,10 +492,24 @@ def score_directional_bias(token_mint: str, cfg: dict = None) -> tuple[int, str,
         cfg = {}
     
     details = {}
+    token = token_or_mint if isinstance(token_or_mint, dict) else {}
+    token_mint = _token_mint(token_or_mint)
 
     buy_ratio = 0.5  # Default neutral
     buy_count = 0
     sell_count = 0
+
+    if token:
+        buy_count = int(token.get("txns_m5_buys", 0) or 0)
+        sell_count = int(token.get("txns_m5_sells", 0) or 0)
+        total = buy_count + sell_count
+        if total > 0:
+            buy_ratio = buy_count / total
+        if token.get("buy_ratio_5m") is not None:
+            try:
+                buy_ratio = float(token.get("buy_ratio_5m") or buy_ratio)
+            except Exception:
+                pass
 
     if _birdeye:
         try:
@@ -590,9 +633,9 @@ def calculate_heat_score_v2(token: dict, rc: dict = None, cfg: dict = None) -> d
     liq_pts,  liq_reason,  liq_details  = score_liquidity(token, rc, cfg)
     risk_pts, risk_reason, risk_details = score_risk_safety(token, rc, cfg)
     social_pts, social_reason, social_details = score_social_narrative(token, cfg)
-    wallet_pts, wallet_reason, wallet_details = score_wallet_behavior(token.get("mint", ""), cfg)
+    wallet_pts, wallet_reason, wallet_details = score_wallet_behavior(token, cfg)
     migr_pts, migr_reason, migr_details = score_migration_status(token, rc, cfg)
-    bias_pts, bias_reason, bias_details = score_directional_bias(token.get("mint", ""), cfg)
+    bias_pts, bias_reason, bias_details = score_directional_bias(token, cfg)
     trend_pts, trend_reason, trend_details = score_volume_trend(token.get("mint", ""), cfg)
     
     # Check for instant disqualification

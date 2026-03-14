@@ -1,5 +1,6 @@
 "use client";
 
+import Link from "next/link";
 import { useEffect, useEffectEvent, useMemo, useState } from "react";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
@@ -12,6 +13,12 @@ type ScannerFeedItem = {
   score?: number;
   mcap?: number;
   narrative?: string;
+  source_primary?: string;
+  strategy_profile?: string;
+  state?: string;
+  confidence?: number;
+  age_mins?: number;
+  buy_ratio_5m?: number;
   alerted?: number;
   dq?: string;
   ts?: number;
@@ -32,6 +39,18 @@ function formatMcap(value?: number) {
   if (value >= 1_000_000) return `$${(value / 1_000_000).toFixed(2)}M`;
   if (value >= 1_000) return `$${(value / 1_000).toFixed(1)}K`;
   return `$${value.toFixed(0)}`;
+}
+
+function formatAgeMins(value?: number) {
+  if (!value || value < 0) return "new";
+  if (value < 1) return "<1m";
+  if (value >= 60) return `${(value / 60).toFixed(1)}h`;
+  return `${Math.round(value)}m`;
+}
+
+function formatPct(value?: number) {
+  if (value === undefined || value === null) return "n/a";
+  return `${Math.round(value * 100)}%`;
 }
 
 export function ScannerDashboard() {
@@ -138,7 +157,7 @@ export function ScannerDashboard() {
                 <th className="px-4 py-3">Token</th>
                 <th className="px-4 py-3">Score</th>
                 <th className="px-4 py-3">MCap</th>
-                <th className="px-4 py-3">Narrative</th>
+                <th className="px-4 py-3">Setup</th>
                 <th className="px-4 py-3">Status</th>
                 <th className="px-4 py-3">Action</th>
               </tr>
@@ -147,26 +166,49 @@ export function ScannerDashboard() {
               {newest.map((item) => (
                 <tr key={`${item.mint}-${item.ts}`} className="bg-black/10">
                   <td className="px-4 py-3">
-                    <div className="font-medium text-white">{item.symbol || item.name || item.mint.slice(0, 6)}</div>
+                    <div className="font-medium text-white">
+                      <Link href={`/token/${item.mint}`} className="hover:text-[var(--accent)]">
+                        {item.symbol || item.name || item.mint.slice(0, 6)}
+                      </Link>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-[10px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
+                      <span>{item.source_primary || "scanner"}</span>
+                      <span>{formatAgeMins(item.age_mins)}</span>
+                      {item.state ? <span>{item.state.replaceAll("_", " ")}</span> : null}
+                    </div>
                     <div className="text-xs text-[var(--muted-foreground)]">{item.mint}</div>
                   </td>
                   <td className="px-4 py-3 text-white">{item.score ?? 0}</td>
                   <td className="px-4 py-3 text-white">{formatMcap(item.mcap)}</td>
-                  <td className="px-4 py-3 text-[var(--muted-foreground)]">{item.narrative || "Other"}</td>
+                  <td className="px-4 py-3 text-[var(--muted-foreground)]">
+                    <div>{item.narrative || "Other"}</div>
+                    <div className="text-xs text-white/60">{item.strategy_profile || "unprofiled"}</div>
+                    <div className="text-xs text-white/40">
+                      conf {item.confidence ? item.confidence.toFixed(2) : "0.00"} · buy {formatPct(item.buy_ratio_5m)}
+                    </div>
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`rounded-full px-3 py-1 text-xs font-medium ${item.dq ? "bg-red-500/20 text-red-200" : item.alerted ? "bg-emerald-500/20 text-emerald-200" : "bg-amber-500/20 text-amber-100"}`}>
                       {item.dq ? "Disqualified" : item.alerted ? "Alerted" : "Tracked"}
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    <button
-                      type="button"
-                      onClick={() => quickBuy(item.mint)}
-                      disabled={!uid || !!item.dq || submittingMint === item.mint}
-                      className="rounded-full bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-foreground)] disabled:opacity-50"
-                    >
-                      {submittingMint === item.mint ? "Buying..." : tradeMode === "paper" ? "Paper Buy" : "Live Buy"}
-                    </button>
+                    <div className="flex items-center gap-2">
+                      <Link
+                        href={`/token/${item.mint}`}
+                        className="rounded-full border border-white/10 px-3 py-1.5 text-xs font-medium text-white/80 hover:bg-white/8"
+                      >
+                        View
+                      </Link>
+                      <button
+                        type="button"
+                        onClick={() => quickBuy(item.mint)}
+                        disabled={!uid || !!item.dq || submittingMint === item.mint}
+                        className="rounded-full bg-[var(--accent)] px-3 py-1.5 text-xs font-medium text-[var(--accent-foreground)] disabled:opacity-50"
+                      >
+                        {submittingMint === item.mint ? "Buying..." : tradeMode === "paper" ? "Paper Buy" : "Live Buy"}
+                      </button>
+                    </div>
                   </td>
                 </tr>
               ))}

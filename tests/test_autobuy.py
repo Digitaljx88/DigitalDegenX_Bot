@@ -6,6 +6,7 @@ Each gate is tested independently with mocked db and network calls.
 """
 from __future__ import annotations
 
+import time
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -25,7 +26,9 @@ from autobuy import (
     gate_freshness,
     BuyDecision,
     evaluate,
+    evaluate_lifecycle_snapshot,
 )
+from services.lifecycle.models import TokenEnrichment, TokenLifecycle, TokenSnapshot, TokenTradeMetrics
 
 
 # ── gate_enabled ──────────────────────────────────────────────────────────────
@@ -435,3 +438,81 @@ class TestEvaluate:
         assert decision.gate_passed is True
         assert decision.sol_amount == 0.06
         assert decision.confidence >= 0.85
+
+    @pytest.mark.asyncio
+    async def test_evaluate_lifecycle_snapshot_uses_normalized_pipeline(self):
+        cfg = {
+            "enabled": True,
+            "min_score": 35,
+            "max_mcap": 500_000,
+            "sol_amount": 0.03,
+            "max_sol_amount": 0.09,
+            "min_confidence": 0.2,
+            "confidence_scale_enabled": True,
+            "daily_limit_sol": 1.0,
+            "max_positions": 5,
+            "max_narrative_exposure": 2,
+            "max_archetype_exposure": 0,
+            "buy_tier": "",
+        }
+        snapshot = TokenSnapshot(
+            mint="LifecycleMint111",
+            lifecycle=TokenLifecycle(
+                mint="LifecycleMint111",
+                symbol="LIFE",
+                name="Lifecycle Token",
+                state="pump_active",
+                launch_ts=time.time(),
+                source_primary="pumpfun_newest",
+                source_rank=100,
+            ),
+            metrics=TokenTradeMetrics(
+                mint="LifecycleMint111",
+                buys_5m=9,
+                sells_5m=2,
+                volume_usd_5m=2_000,
+                liquidity_usd=15_000,
+            ),
+            enrichment=TokenEnrichment(
+                mint="LifecycleMint111",
+                dex={
+                    "marketCap": 45_000,
+                    "pairCreatedAt": int(time.time() * 1000),
+                    "priceUsd": 0.00012,
+                    "volume": {"m5": 2_000, "h1": 6_000},
+                    "txns": {"m5": {"buys": 9, "sells": 2}},
+                    "priceChange": {"h1": 6, "h24": 6},
+                    "liquidity": {"usd": 15_000},
+                    "dexId": "pumpfun",
+                },
+                rugcheck={},
+                pump={"description": "fresh launch"},
+                wallet={},
+            ),
+            events=[],
+        )
+        with (
+            patch("autobuy._db.reset_day_if_needed"),
+            patch("autobuy._db.get_auto_buy_config", return_value=cfg),
+            patch("autobuy._db.has_bought", return_value=False),
+            patch("autobuy._db.get_spent_today", return_value=0.0),
+            patch("autobuy._db.get_open_position_count", return_value=0),
+            patch("autobuy._db.get_open_position_exposure", return_value={"narrative": {}, "archetype": {}}),
+            patch("autobuy.requests.get") as mock_get,
+            patch("autobuy.settings_manager", create=True) as mock_sm,
+        ):
+            mock_get.return_value.json.return_value = {
+                "pairs": [{
+                    "chainId": "solana",
+                    "volume": {"m5": 2_000, "h1": 6_000},
+                    "priceChange": {"h1": 6},
+                    "txns": {"m5": {"buys": 9, "sells": 2}},
+                    "liquidity": {"usd": 15_000},
+                }]
+            }
+            mock_sm.get_user_settings.return_value = {}
+            decision = await evaluate_lifecycle_snapshot(1, snapshot)
+
+        assert decision.gate_passed is True
+        assert decision.symbol == "LIFE"
+        assert decision.mcap == 45_000

@@ -14,8 +14,12 @@ import logging
 import time
 import requests
 import websockets
+from services.lifecycle import store as lifecycle_store
 
 logger = logging.getLogger(__name__)
+
+LAUNCH_SOURCE_RANK = 100
+MIGRATION_SOURCE_RANK = 90
 
 # ── Program addresses ─────────────────────────────────────────────────────────
 
@@ -169,6 +173,14 @@ class HeliusWatcher:
         if not mint or mint in self._seen_mints:
             return
 
+        lifecycle_store.record_launch_event(
+            mint,
+            launch_ts=time.time(),
+            source_primary="pump_launch",
+            source_rank=LAUNCH_SOURCE_RANK,
+            payload={"signature": sig, "logs": logs},
+        )
+
         cfg = self.fd.load_feed_config()
         if not cfg.get("launch_enabled") or not cfg.get("launch_channel"):
             return
@@ -184,6 +196,19 @@ class HeliusWatcher:
 
         self._seen_mints.add(mint)
         token = self._pair_to_token(pair, mint)
+        lifecycle_store.upsert_enrichment(mint, dex=pair)
+        lifecycle_store.attach_dex_pair(
+            mint,
+            pair.get("pairAddress") or pair.get("url") or mint,
+            payload=pair,
+        )
+        lifecycle_store.update_score_state(
+            mint,
+            archetype=token.get("archetype"),
+            last_score=0,
+            last_effective_score=0,
+            last_confidence=0,
+        )
         token["total_holders"]     = 0
         token["matched_narrative"] = ""
         await self.fd.maybe_post_launch(self.bot, token, 0, "⚡ LIVE")
@@ -210,6 +235,12 @@ class HeliusWatcher:
         if not mint or mint in self._seen_mints:
             return
 
+        lifecycle_store.record_migration_detected(
+            mint,
+            migration_ts=time.time(),
+            payload={"signature": sig, "logs": logs},
+        )
+
         cfg = self.fd.load_feed_config()
         if not cfg.get("migrate_enabled") or not cfg.get("migrate_channel"):
             return
@@ -225,6 +256,22 @@ class HeliusWatcher:
 
         self._seen_mints.add(mint)
         token = self._pair_to_token(pair, mint)
+        lifecycle_store.update_lifecycle_fields(
+            mint,
+            source_primary="raydium_migration",
+            source_rank=MIGRATION_SOURCE_RANK,
+        )
+        lifecycle_store.upsert_enrichment(mint, dex=pair)
+        lifecycle_store.attach_raydium_pool(
+            mint,
+            pair.get("pairAddress") or pair.get("url") or mint,
+            payload=pair,
+        )
+        lifecycle_store.attach_dex_pair(
+            mint,
+            pair.get("pairAddress") or pair.get("url") or mint,
+            payload=pair,
+        )
         await self.fd.maybe_post_migration(self.bot, token)
         logger.info(f"[Helius] Migration: {token.get('name')} ({mint[:8]}…)")
 

@@ -19,6 +19,7 @@ import requests
 
 import db as _db
 import position_sizing
+from services.trading import build_trading_snapshot
 
 
 # ── BuyDecision ───────────────────────────────────────────────────────────────
@@ -292,6 +293,52 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
         fresh_vol_m5=fresh_vol_m5,
         fresh_price_h1=fresh_price_h1,
     )
+
+
+async def evaluate_lifecycle_snapshot(uid: int, snapshot, *, user_id: int | None = None) -> BuyDecision:
+    """
+    Evaluate autobuy eligibility directly from a lifecycle snapshot by converting it
+    into the same normalized scanner token/result shape used by the scanner.
+    """
+    token = build_trading_snapshot(snapshot, max_age_hours=4)
+    if not token:
+        return BuyDecision(
+            uid=uid,
+            mint=getattr(snapshot, "mint", ""),
+            symbol=getattr(getattr(snapshot, "lifecycle", None), "symbol", "") or "",
+            name=getattr(getattr(snapshot, "lifecycle", None), "name", "") or "",
+            score=0,
+            mcap=0.0,
+            sol_amount=0.0,
+            gate_passed=False,
+            block_reason="snapshot outside fresh scan window",
+        )
+
+    import scanner as _scanner
+
+    result = _scanner.calculate_heat_score_with_settings(token, snapshot.enrichment.rugcheck or {}, user_id=user_id)
+    result["effective_score"] = result.get("total", 0)
+    result["velocity"] = 0.0
+    result["velocity_label"] = "flat"
+    narrative = result.get("matched_narrative") or token.get("lifecycle_narrative") or "Other"
+    result["matched_narrative"] = narrative
+    result.update(_scanner.build_entry_quality(token, snapshot.enrichment.rugcheck or {}, result, narrative))
+    quality_flags = _scanner.apply_entry_quality_rules(
+        result,
+        effective_score=result["effective_score"],
+        momentum_alive=True,
+    )
+    result["entry_quality_reasons"] = quality_flags["quality_reasons"]
+    result["entry_quality_force_scouted"] = quality_flags["force_scouted"]
+    result["entry_quality_alert_blocked"] = quality_flags["alert_blocked"]
+    result["entry_quality_autobuy_blocked"] = quality_flags["autobuy_blocked"]
+    result["entry_quality_force_scouted_reasons"] = quality_flags["force_scouted_reasons"]
+    result["entry_quality_autobuy_only_reasons"] = quality_flags["autobuy_only_reasons"]
+    result["entry_quality_primary_source"] = quality_flags["primary_source"]
+    result["strategy_profile"] = quality_flags["strategy_profile"]
+    result["strategy_exit_preset"] = quality_flags["strategy_exit_preset"]
+    result["strategy_size_bias"] = quality_flags["strategy_size_bias"]
+    return await evaluate(uid, result)
 
 
 # ── execute() ─────────────────────────────────────────────────────────────────

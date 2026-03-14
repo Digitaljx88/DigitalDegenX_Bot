@@ -24,6 +24,8 @@ import settings_manager
 import config as _cfg
 import heat_momentum
 import db as _db
+from services.lifecycle import store as lifecycle_store
+from services.trading import build_trading_snapshot
 from telegram_delivery import send_throttled_message
 
 _rugcheck_executor = concurrent.futures.ThreadPoolExecutor(max_workers=12, thread_name_prefix="rugcheck")
@@ -169,6 +171,8 @@ SOURCE_RANKS = {
     "dex_boosts": 30,
     "dex_search": 20,
 }
+LIFECYCLE_SCAN_STATES = ["launched", "pump_active", "migration_pending", "raydium_live", "dex_indexed"]
+LIFECYCLE_SCAN_LIMIT = 150
 
 
 def _merge_token_entry(tokens: dict, mint: str, incoming: dict, *, source_name: str, source_rank: int):
@@ -408,6 +412,64 @@ def fetch_new_tokens() -> list[dict]:
     return result
 
 
+def fetch_lifecycle_tokens(limit: int = LIFECYCLE_SCAN_LIMIT) -> list[dict]:
+    tokens: list[dict] = []
+    try:
+        snapshots = lifecycle_store.list_recent_snapshots(limit=limit, states=LIFECYCLE_SCAN_STATES)
+    except Exception:
+        return []
+
+    for snapshot in snapshots:
+        token = build_trading_snapshot(snapshot, max_age_hours=MAX_TOKEN_AGE_HOURS)
+        if token:
+            tokens.append(token)
+
+    tokens.sort(key=lambda t: (t.get("pair_created", 0), t.get("_source_rank", 0)), reverse=True)
+    return tokens
+
+
+def collect_scan_tokens() -> list[dict]:
+    """
+    Prefer lifecycle-backed tokens first, but keep the legacy fetch path as fallback
+    until the scanner is fully migrated.
+    """
+    merged: dict[str, dict] = {}
+    for token in fetch_lifecycle_tokens():
+        mint = token.get("mint", "")
+        if mint:
+            _merge_token_entry(
+                merged,
+                mint,
+                token,
+                source_name=token.get("_source_name", "lifecycle"),
+                source_rank=int(token.get("_source_rank", 0) or 0),
+            )
+
+    for token in fetch_new_tokens():
+        mint = token.get("mint", "")
+        if mint:
+            _merge_token_entry(
+                merged,
+                mint,
+                token,
+                source_name=token.get("_source_name", "legacy_fetch"),
+                source_rank=int(token.get("_source_rank", 0) or 0),
+            )
+
+    result = [
+        token for token in merged.values()
+        if token.get("name")
+        and MCAP_MIN <= token.get("mcap", 0) <= MCAP_MAX
+        and (token.get("pair_created", 0) or 0) >= ((time.time() - MAX_TOKEN_AGE_HOURS * 3600) * 1000)
+        and not (
+            token.get("liquidity", 0) < LIQUIDITY_MIN_USD
+            and token.get("dex", "pumpfun") not in ("pumpfun", "")
+        )
+    ]
+    result.sort(key=lambda t: (t.get("pair_created", 0), t.get("_source_rank", 0)), reverse=True)
+    return result
+
+
 def fetch_rugcheck(mint: str) -> dict:
     try:
         r = requests.get(RUGCHECK_REPORT.format(mint=mint), timeout=10)
@@ -469,6 +531,12 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
 
     prediction = launch_predictor.predict_launch(token, rc, breakdown)
 
+    tx_buys = int(token.get("txns_m5_buys", 0) or 0)
+    tx_sells = int(token.get("txns_m5_sells", 0) or 0)
+    buy_ratio_5m = float(token.get("buy_ratio_5m", _buy_ratio(tx_buys, tx_sells)) or 0.5)
+    snapshot_conf = token.get("snapshot_confidence")
+    strategy_confidence = float(snapshot_conf * 100.0) if isinstance(snapshot_conf, (int, float)) and snapshot_conf <= 1 else float(snapshot_conf or 0)
+
     return {
         "mint":          token.get("mint", ""),
         "name":          token.get("name", ""),
@@ -481,8 +549,25 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
         "liquidity":     token.get("liquidity", 0),
         "total_holders": rc.get("totalHolders", 0),
         "pair_created":  token.get("pair_created", 0),
+        "age_mins":      float(token.get("age_mins", age_mins(token.get("pair_created", 0))) or 0),
         "txns_5m":       token.get("txns_m5_buys", 0) + token.get("txns_m5_sells", 0),
+        "buy_ratio_5m":  buy_ratio_5m,
         "dex":           token.get("dex", ""),
+        "_source_name":  token.get("_source_name", token.get("source_primary", "")),
+        "_source_rank":  token.get("_source_rank", token.get("source_rank", 0)),
+        "source_primary": token.get("source_primary", token.get("_source_name", "")),
+        "source_rank":   token.get("source_rank", token.get("_source_rank", 0)),
+        "wallet_signal": float(token.get("wallet_signal", 0) or 0),
+        "lifecycle_state": token.get("lifecycle_state", ""),
+        "holder_concentration": float(token.get("holder_concentration", _max_holder_pct(rc)) or 0),
+        "liquidity_delta_pct": float(token.get("liquidity_delta_pct", 0) or 0),
+        "score_slope":   float(token.get("score_slope", 0) or 0),
+        "score_acceleration": float(token.get("score_acceleration", 0) or 0),
+        "peak_score":    float(token.get("peak_score", result_v2["score"]) or 0),
+        "time_since_peak_s": float(token.get("time_since_peak_s", 0) or 0),
+        "unique_buyers_5m": int(token.get("unique_buyers_5m", 0) or 0),
+        "dev_activity_score": float(token.get("dev_activity_score", 0) or 0),
+        "bonding_curve_fill_pct": float(token.get("bonding_curve_fill_pct", 0) or 0),
         "raw_total":     result_v2["raw_score"],
         "total":         score,
         "disqualified":  result_v2["disqualified"],
@@ -493,6 +578,9 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
         "archetype_conf": prediction.get("confidence", 0),
         "prediction_boost": prediction.get("boost", 0),
         "archetype_label": prediction.get("archetype_label", ""),
+        "matched_narrative": token.get("lifecycle_narrative") or "Other",
+        "strategy_profile": token.get("strategy_profile") or token.get("lifecycle_strategy_profile") or "",
+        "strategy_confidence": strategy_confidence,
         "v2_result":     result_v2,
     }
 
@@ -593,12 +681,27 @@ def _recent_narrative_alert_count(narrative: str, now_ts: float | None = None) -
 
 
 def build_entry_quality(token: dict, rc: dict, result: dict, narrative: str) -> dict:
+    def _present(mapping: dict, key: str):
+        return mapping.get(key) if key in mapping and mapping.get(key) is not None else None
+
     now_ts = time.time()
     _prune_quality_state(now_ts)
 
     mint = result.get("mint") or token.get("mint") or ""
-    source_name = token.get("_source_name") or result.get("_source_name") or ""
-    source_rank = token.get("_source_rank", result.get("_source_rank", 0)) or 0
+    source_name = (
+        _present(result, "source_primary")
+        or _present(result, "_source_name")
+        or _present(token, "source_primary")
+        or _present(token, "_source_name")
+        or ""
+    )
+    source_rank = (
+        _present(result, "source_rank")
+        if _present(result, "source_rank") is not None
+        else _present(result, "_source_rank")
+    )
+    if source_rank is None:
+        source_rank = token.get("source_rank", token.get("_source_rank", 0)) or 0
     price_h1 = float(result.get("price_h1", token.get("price_h1", 0)) or 0)
     volume_m5 = float(result.get("volume_m5", token.get("volume_m5", 0)) or 0)
     volume_h1 = float(result.get("volume_h1", token.get("volume_h1", 0)) or 0)
@@ -607,26 +710,49 @@ def build_entry_quality(token: dict, rc: dict, result: dict, narrative: str) -> 
     tx_buys = int(token.get("txns_m5_buys", 0) or 0)
     tx_sells = int(token.get("txns_m5_sells", 0) or 0)
     txns_5m = int(result.get("txns_5m", tx_buys + tx_sells) or 0)
-    buy_ratio_5m = _buy_ratio(tx_buys, tx_sells)
-    age_now = age_mins(result.get("pair_created", token.get("pair_created", 0) or 0))
-    holder_pct = _max_holder_pct(rc)
+    buy_ratio_5m = float(
+        _present(result, "buy_ratio_5m")
+        if _present(result, "buy_ratio_5m") is not None
+        else token.get("buy_ratio_5m", _buy_ratio(tx_buys, tx_sells))
+    )
+    age_now = float(
+        _present(result, "age_mins")
+        if _present(result, "age_mins") is not None
+        else token.get("age_mins", age_mins(result.get("pair_created", token.get("pair_created", 0) or 0)))
+    )
+    holder_pct = float(
+        _present(result, "holder_concentration")
+        if _present(result, "holder_concentration") is not None
+        else token.get("holder_concentration", _max_holder_pct(rc))
+    )
     wallet_signal = float(result.get("wallet_signal", result.get("wallet_boost", 0)) or 0)
     effective_score = float(result.get("effective_score", result.get("total", 0)) or 0)
 
     prior_rows = _quality_history.get(mint, [])
     prev = prior_rows[-1] if prior_rows else None
-    score_peak = max([effective_score] + [float(row.get("effective_score", 0) or 0) for row in prior_rows])
+    snapshot_peak = float(_present(result, "peak_score") if _present(result, "peak_score") is not None else token.get("peak_score", 0) or 0)
+    score_peak = max([effective_score, snapshot_peak] + [float(row.get("effective_score", 0) or 0) for row in prior_rows])
     score_drop_from_peak = max(0.0, score_peak - effective_score)
-    score_slope = 0.0
-    liquidity_drop_pct = 0.0
+    score_slope = float(
+        _present(result, "score_slope")
+        if _present(result, "score_slope") is not None
+        else token.get("score_slope", 0)
+    )
+    liquidity_drop_pct = float(
+        _present(result, "liquidity_delta_pct")
+        if _present(result, "liquidity_delta_pct") is not None
+        else token.get("liquidity_delta_pct", 0)
+    )
     buy_ratio_delta = 0.0
     holder_concentration_delta = 0.0
     if prev:
         elapsed_mins = max(0.001, (now_ts - float(prev.get("ts", now_ts))) / 60.0)
-        score_slope = (effective_score - float(prev.get("effective_score", effective_score) or effective_score)) / elapsed_mins
-        prev_liq = float(prev.get("liquidity", 0) or 0)
-        if prev_liq > 0:
-            liquidity_drop_pct = (liquidity - prev_liq) / prev_liq * 100.0
+        if _present(result, "score_slope") is None and "score_slope" not in token:
+            score_slope = (effective_score - float(prev.get("effective_score", effective_score) or effective_score)) / elapsed_mins
+        if _present(result, "liquidity_delta_pct") is None and "liquidity_delta_pct" not in token:
+            prev_liq = float(prev.get("liquidity", 0) or 0)
+            if prev_liq > 0:
+                liquidity_drop_pct = (liquidity - prev_liq) / prev_liq * 100.0
         buy_ratio_delta = buy_ratio_5m - float(prev.get("buy_ratio_5m", buy_ratio_5m) or buy_ratio_5m)
         holder_concentration_delta = holder_pct - float(prev.get("holder_concentration_pct", holder_pct) or holder_pct)
 
@@ -994,7 +1120,10 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
     CH_HOT_THR     = _ch_cfg.get("alert_hot_threshold", 70)
 
     t_fetch_start = time.time()
-    tokens = fetch_new_tokens()
+    lifecycle_tokens = fetch_lifecycle_tokens()
+    tokens = collect_scan_tokens()
+    if lifecycle_tokens:
+        print(f"[SCANNER] Lifecycle supplied {len(lifecycle_tokens)} recent tokens", flush=True)
     print(f"[SCANNER] Fetched {len(tokens)} tokens after filters", flush=True)
     if not tokens:
         print(f"[SCANNER] No tokens passed fetch filters (mcap {MCAP_MIN}-{MCAP_MAX}, age <{MAX_TOKEN_AGE_HOURS}h)", flush=True)

@@ -75,6 +75,15 @@ def is_valid_solana_address(address: str) -> bool:
     return all(ch in _SOLANA_ADDRESS_ALPHABET for ch in addr)
 
 
+def _decode_json_value(value, default):
+    if value in (None, ""):
+        return default
+    try:
+        return json.loads(value)
+    except Exception:
+        return default
+
+
 # ── Schema init ────────────────────────────────────────────────────────────────
 
 def init():
@@ -260,6 +269,76 @@ def init():
                 wallet TEXT    NOT NULL,
                 label  TEXT,
                 PRIMARY KEY (uid, wallet)
+            );
+
+            -- Token lifecycle spine: launch -> pump trades -> migration -> Raydium -> Dex
+            CREATE TABLE IF NOT EXISTS token_lifecycle (
+                mint                TEXT PRIMARY KEY,
+                symbol              TEXT,
+                name                TEXT,
+                state               TEXT NOT NULL DEFAULT 'launched',
+                launch_ts           REAL,
+                last_trade_ts       REAL,
+                migration_ts        REAL,
+                raydium_pool        TEXT,
+                dex_pair            TEXT,
+                dev_wallet          TEXT,
+                source_primary      TEXT,
+                source_rank         INTEGER,
+                narrative           TEXT,
+                archetype           TEXT,
+                strategy_profile    TEXT,
+                last_score          REAL,
+                last_effective_score REAL,
+                last_confidence     REAL,
+                last_updated_ts     REAL NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_lifecycle_updated
+                ON token_lifecycle(last_updated_ts DESC);
+            CREATE INDEX IF NOT EXISTS idx_token_lifecycle_state
+                ON token_lifecycle(state, last_updated_ts DESC);
+
+            CREATE TABLE IF NOT EXISTS token_trade_metrics (
+                mint                   TEXT PRIMARY KEY,
+                buys_1m                INTEGER NOT NULL DEFAULT 0,
+                sells_1m               INTEGER NOT NULL DEFAULT 0,
+                buys_5m                INTEGER NOT NULL DEFAULT 0,
+                sells_5m               INTEGER NOT NULL DEFAULT 0,
+                volume_usd_1m          REAL    NOT NULL DEFAULT 0,
+                volume_usd_5m          REAL    NOT NULL DEFAULT 0,
+                buy_ratio_5m           REAL    NOT NULL DEFAULT 0,
+                unique_buyers_5m       INTEGER NOT NULL DEFAULT 0,
+                holder_concentration   REAL    NOT NULL DEFAULT 0,
+                dev_activity_score     REAL    NOT NULL DEFAULT 0,
+                liquidity_usd          REAL    NOT NULL DEFAULT 0,
+                liquidity_delta_pct    REAL    NOT NULL DEFAULT 0,
+                bonding_curve_fill_pct REAL    NOT NULL DEFAULT 0,
+                score_slope            REAL    NOT NULL DEFAULT 0,
+                score_acceleration     REAL    NOT NULL DEFAULT 0,
+                peak_score             REAL    NOT NULL DEFAULT 0,
+                time_since_peak_s      REAL    NOT NULL DEFAULT 0,
+                updated_ts             REAL    NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_trade_metrics_updated
+                ON token_trade_metrics(updated_ts DESC);
+
+            CREATE TABLE IF NOT EXISTS token_events (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                mint         TEXT NOT NULL,
+                event_type   TEXT NOT NULL,
+                ts           REAL NOT NULL,
+                payload_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_token_events_mint_ts
+                ON token_events(mint, ts DESC);
+
+            CREATE TABLE IF NOT EXISTS token_enrichment (
+                mint         TEXT PRIMARY KEY,
+                rugcheck_json TEXT NOT NULL DEFAULT '{}',
+                dex_json     TEXT NOT NULL DEFAULT '{}',
+                pump_json    TEXT NOT NULL DEFAULT '{}',
+                wallet_json  TEXT NOT NULL DEFAULT '{}',
+                updated_ts   REAL NOT NULL DEFAULT 0
             );
         """)
         c.commit()
@@ -980,6 +1059,189 @@ def mark_scan_log_alerted(mint: str):
         "SELECT MAX(id) FROM scanner_log WHERE mint=?)",
         (mint,),
     )
+
+
+# ── Token lifecycle spine ────────────────────────────────────────────────────
+
+_TOKEN_LIFECYCLE_DEFAULTS = {
+    "symbol": None,
+    "name": None,
+    "state": "launched",
+    "launch_ts": None,
+    "last_trade_ts": None,
+    "migration_ts": None,
+    "raydium_pool": None,
+    "dex_pair": None,
+    "dev_wallet": None,
+    "source_primary": None,
+    "source_rank": None,
+    "narrative": None,
+    "archetype": None,
+    "strategy_profile": None,
+    "last_score": None,
+    "last_effective_score": None,
+    "last_confidence": None,
+    "last_updated_ts": 0.0,
+}
+
+_TOKEN_METRIC_DEFAULTS = {
+    "buys_1m": 0,
+    "sells_1m": 0,
+    "buys_5m": 0,
+    "sells_5m": 0,
+    "volume_usd_1m": 0.0,
+    "volume_usd_5m": 0.0,
+    "buy_ratio_5m": 0.0,
+    "unique_buyers_5m": 0,
+    "holder_concentration": 0.0,
+    "dev_activity_score": 0.0,
+    "liquidity_usd": 0.0,
+    "liquidity_delta_pct": 0.0,
+    "bonding_curve_fill_pct": 0.0,
+    "score_slope": 0.0,
+    "score_acceleration": 0.0,
+    "peak_score": 0.0,
+    "time_since_peak_s": 0.0,
+    "updated_ts": 0.0,
+}
+
+
+def upsert_token_lifecycle(mint: str, **fields):
+    mint = str(mint or "").strip()
+    if not mint:
+        raise ValueError("mint is required")
+    row = {k: v for k, v in fields.items() if k in _TOKEN_LIFECYCLE_DEFAULTS}
+    row.setdefault("last_updated_ts", time.time())
+    cols = ["mint"] + list(row.keys())
+    values = [mint] + [row[col] for col in row]
+    update_cols = list(row.keys())
+    _exec(
+        f"INSERT INTO token_lifecycle({', '.join(cols)}) VALUES({', '.join('?' * len(cols))}) "
+        f"ON CONFLICT(mint) DO UPDATE SET "
+        + ", ".join(f"{col}=excluded.{col}" for col in update_cols),
+        tuple(values),
+    )
+
+
+def upsert_token_trade_metrics(mint: str, **fields):
+    mint = str(mint or "").strip()
+    if not mint:
+        raise ValueError("mint is required")
+    row = {k: v for k, v in fields.items() if k in _TOKEN_METRIC_DEFAULTS}
+    row.setdefault("updated_ts", time.time())
+    cols = ["mint"] + list(row.keys())
+    values = [mint] + [row[col] for col in row]
+    _exec(
+        f"INSERT INTO token_trade_metrics({', '.join(cols)}) VALUES({', '.join('?' * len(cols))}) "
+        f"ON CONFLICT(mint) DO UPDATE SET "
+        + ", ".join(f"{col}=excluded.{col}" for col in row.keys()),
+        tuple(values),
+    )
+
+
+def append_token_event(mint: str, event_type: str, payload: dict | None = None, ts: float | None = None):
+    mint = str(mint or "").strip()
+    if not mint:
+        raise ValueError("mint is required")
+    _exec(
+        "INSERT INTO token_events(mint, event_type, ts, payload_json) VALUES(?,?,?,?)",
+        (mint, str(event_type or "").strip(), ts or time.time(), json.dumps(payload or {})),
+    )
+
+
+def upsert_token_enrichment(mint: str, **fields):
+    mint = str(mint or "").strip()
+    if not mint:
+        raise ValueError("mint is required")
+    row = {
+        "rugcheck_json": json.dumps(fields.get("rugcheck", {})),
+        "dex_json": json.dumps(fields.get("dex", {})),
+        "pump_json": json.dumps(fields.get("pump", {})),
+        "wallet_json": json.dumps(fields.get("wallet", {})),
+        "updated_ts": fields.get("updated_ts", time.time()),
+    }
+    cols = ["mint"] + list(row.keys())
+    values = [mint] + [row[col] for col in row]
+    _exec(
+        f"INSERT INTO token_enrichment({', '.join(cols)}) VALUES({', '.join('?' * len(cols))}) "
+        f"ON CONFLICT(mint) DO UPDATE SET "
+        + ", ".join(f"{col}=excluded.{col}" for col in row.keys()),
+        tuple(values),
+    )
+
+
+def get_token_lifecycle(mint: str) -> dict | None:
+    row = _fetchone("SELECT * FROM token_lifecycle WHERE mint=?", (mint,))
+    return dict(row) if row else None
+
+
+def get_token_trade_metrics(mint: str) -> dict | None:
+    row = _fetchone("SELECT * FROM token_trade_metrics WHERE mint=?", (mint,))
+    return dict(row) if row else None
+
+
+def get_token_enrichment(mint: str) -> dict | None:
+    row = _fetchone("SELECT * FROM token_enrichment WHERE mint=?", (mint,))
+    if not row:
+        return None
+    data = dict(row)
+    return {
+        "mint": data["mint"],
+        "rugcheck": _decode_json_value(data.get("rugcheck_json"), {}),
+        "dex": _decode_json_value(data.get("dex_json"), {}),
+        "pump": _decode_json_value(data.get("pump_json"), {}),
+        "wallet": _decode_json_value(data.get("wallet_json"), {}),
+        "updated_ts": data.get("updated_ts"),
+    }
+
+
+def get_token_events(mint: str, limit: int = 50) -> list[dict]:
+    rows = _fetchall(
+        "SELECT * FROM token_events WHERE mint=? ORDER BY ts DESC, id DESC LIMIT ?",
+        (mint, max(1, min(limit, 500))),
+    )
+    items = []
+    for row in rows:
+        data = dict(row)
+        data["payload"] = _decode_json_value(data.pop("payload_json", "{}"), {})
+        items.append(data)
+    return items
+
+
+def get_token_snapshot(mint: str) -> dict | None:
+    lifecycle = get_token_lifecycle(mint)
+    if not lifecycle:
+        return None
+    return {
+        "mint": mint,
+        "lifecycle": lifecycle,
+        "metrics": get_token_trade_metrics(mint) or {},
+        "enrichment": get_token_enrichment(mint) or {
+            "mint": mint,
+            "rugcheck": {},
+            "dex": {},
+            "pump": {},
+            "wallet": {},
+            "updated_ts": None,
+        },
+        "events": get_token_events(mint, limit=25),
+    }
+
+
+def list_token_snapshots(limit: int = 50, states: list[str] | None = None) -> list[dict]:
+    where = ""
+    params: list = []
+    if states:
+        placeholders = ", ".join("?" * len(states))
+        where = f"WHERE state IN ({placeholders})"
+        params.extend(states)
+    rows = _fetchall(
+        "SELECT mint FROM token_lifecycle "
+        f"{where} "
+        "ORDER BY COALESCE(last_trade_ts, launch_ts, last_updated_ts) DESC LIMIT ?",
+        tuple(params + [max(1, min(limit, 500))]),
+    )
+    return [snapshot for row in rows if (snapshot := get_token_snapshot(row["mint"]))]
 
 
 # ── Settings (global_settings.json replacement) ───────────────────────────────

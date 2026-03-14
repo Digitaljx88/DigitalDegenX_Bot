@@ -35,6 +35,7 @@ import os
 import time
 import asyncio
 import secrets
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Union
 
@@ -46,6 +47,8 @@ import db as _db
 import settings_manager as sm
 import trade_center as tc
 import research_logger
+from services.lifecycle import store as lifecycle_store
+from services.trading import build_trading_snapshot
 
 # ─── Config ───────────────────────────────────────────────────────────────────
 
@@ -128,9 +131,17 @@ class ThresholdRequest(BaseModel):
     alert_score: Optional[int] = None   # 1–100
 
 class AutoSellUpdate(BaseModel):
-    enabled: Optional[bool]    = None
-    stop_loss_pct: Optional[int] = None
-    targets: Optional[list]    = None   # list of {multiplier, pct}
+    enabled: Optional[bool] = None
+    mult_targets: Optional[list[dict[str, Union[int, float, bool, str]]]] = None
+    custom_targets: Optional[list[dict[str, Union[int, float, bool, str]]]] = None
+    stop_loss: Optional[dict[str, Union[int, float, bool, str]]] = None
+    trailing_stop: Optional[dict[str, Union[int, float, bool, str]]] = None
+    trailing_tp: Optional[dict[str, Union[int, float, bool, str]]] = None
+    time_exit: Optional[dict[str, Union[int, float, bool, str]]] = None
+    breakeven_stop: Optional[dict[str, Union[int, float, bool, str]]] = None
+    first_risk_off: Optional[dict[str, Union[int, float, bool, str]]] = None
+    velocity_rollover: Optional[dict[str, Union[int, float, bool, str]]] = None
+    mcap_alerts: Optional[list[dict[str, Union[int, float, bool, str]]]] = None
 
 class MessageRequest(BaseModel):
     uid: int
@@ -160,6 +171,16 @@ class SettingsUpdate(BaseModel):
 class ModeUpdate(BaseModel):
     uid: int
     mode: str
+
+
+class TradeControlsUpdate(BaseModel):
+    presets_enabled: Optional[bool] = None
+    presets: Optional[list[dict[str, Union[int, float, bool, str]]]] = None
+    global_stop_loss: Optional[dict[str, Union[int, float, bool, str]]] = None
+    global_trailing_stop: Optional[dict[str, Union[int, float, bool, str]]] = None
+    global_trailing_tp: Optional[dict[str, Union[int, float, bool, str]]] = None
+    global_breakeven_stop: Optional[dict[str, Union[int, float, bool, str]]] = None
+    global_time_exit: Optional[dict[str, Union[int, float, bool, str]]] = None
 
 # ─── Bot reference (set from bot.py after startup) ───────────────────────────
 _app_ref = None   # telegram Application instance
@@ -194,6 +215,103 @@ def _safe_float(value, default: float = 0.0) -> float:
         return float(value or 0)
     except Exception:
         return default
+
+
+def _lifecycle_brief(mint: str) -> dict:
+    snapshot = lifecycle_store.get_token_snapshot(mint)
+    if not snapshot:
+        return {}
+    trading_snapshot = build_trading_snapshot(snapshot, max_age_hours=None)
+    if not trading_snapshot:
+        return {}
+    return {
+        "state": trading_snapshot.get("lifecycle_state"),
+        "source_primary": trading_snapshot.get("source_primary"),
+        "strategy_profile": trading_snapshot.get("strategy_profile"),
+        "confidence": _safe_float(trading_snapshot.get("snapshot_confidence")),
+        "age_mins": _safe_float(trading_snapshot.get("age_mins")),
+        "buy_ratio_5m": _safe_float(trading_snapshot.get("buy_ratio_5m")),
+        "holder_concentration": _safe_float(trading_snapshot.get("holder_concentration")),
+    }
+
+
+def _enrich_token_rows(rows: list[dict]) -> list[dict]:
+    enriched: list[dict] = []
+    for row in rows:
+        item = dict(row)
+        mint = str(item.get("mint") or "").strip()
+        if mint:
+            item.update(_lifecycle_brief(mint))
+        enriched.append(item)
+    return enriched
+
+
+def _normalize_mult_targets(targets: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for target in targets or []:
+        try:
+            mult = float(target.get("mult") or target.get("multiplier") or 0)
+            sell_pct = int(float(target.get("sell_pct") or target.get("pct") or 0))
+        except Exception:
+            continue
+        if mult <= 0 or sell_pct <= 0:
+            continue
+        normalized.append(
+            {
+                "mult": mult,
+                "sell_pct": sell_pct,
+                "triggered": bool(target.get("triggered", False)),
+                "label": str(target.get("label") or f"{mult:g}x"),
+            }
+        )
+    return normalized
+
+
+def _normalize_presets(presets: list[dict]) -> list[dict]:
+    normalized: list[dict] = []
+    for preset in presets or []:
+        try:
+            mult = float(preset.get("mult") or preset.get("multiplier") or 0)
+            sell_pct = int(float(preset.get("sell_pct") or preset.get("pct") or 0))
+        except Exception:
+            continue
+        if mult <= 0 or sell_pct <= 0:
+            continue
+        normalized.append({"mult": mult, "sell_pct": sell_pct})
+    return normalized
+
+
+def merge_autosell_update(config: dict, update: AutoSellUpdate) -> dict:
+    merged = deepcopy(config or {})
+    payload = update.model_dump(exclude_none=True)
+    if "enabled" in payload:
+        merged["enabled"] = bool(payload["enabled"])
+
+    dict_blocks = {
+        "stop_loss",
+        "trailing_stop",
+        "trailing_tp",
+        "time_exit",
+        "breakeven_stop",
+        "first_risk_off",
+        "velocity_rollover",
+    }
+    list_blocks = {"mult_targets", "custom_targets", "mcap_alerts"}
+
+    for key, value in payload.items():
+        if key == "enabled":
+            continue
+        if key in dict_blocks and isinstance(value, dict):
+            current = deepcopy(merged.get(key) or {})
+            current.update(value)
+            merged[key] = current
+        elif key in list_blocks and isinstance(value, list):
+            if key == "mult_targets":
+                merged[key] = _normalize_mult_targets(value)
+            else:
+                merged[key] = deepcopy(value)
+
+    return merged
 
 
 async def _build_paper_portfolio_view(uid: int) -> dict:
@@ -303,6 +421,14 @@ async def _build_paper_portfolio_view(uid: int) -> dict:
                     "auto_sell_enabled": bool(cfg.get("enabled")),
                     "entry_sol": _safe_float(cfg.get("sol_amount")) or None,
                     "next_target": next_target,
+                    "narrative": cfg.get("narrative") or None,
+                    "strategy_profile": cfg.get("strategy_profile") or None,
+                    "exit_profile": cfg.get("exit_profile") or None,
+                    "purchase_timestamp": _safe_float(cfg.get("purchase_timestamp")) or None,
+                    "target_count": len(cfg.get("mult_targets", []) or []),
+                    "stop_loss_enabled": bool((cfg.get("stop_loss") or {}).get("enabled")),
+                    "trailing_stop_enabled": bool((cfg.get("trailing_stop") or {}).get("enabled")),
+                    "first_risk_off_enabled": bool((cfg.get("first_risk_off") or {}).get("enabled")),
                 }
             )
         except Exception as exc:
@@ -324,6 +450,14 @@ async def _build_paper_portfolio_view(uid: int) -> dict:
                     "auto_sell_enabled": False,
                     "entry_sol": None,
                     "next_target": None,
+                    "narrative": None,
+                    "strategy_profile": None,
+                    "exit_profile": None,
+                    "purchase_timestamp": None,
+                    "target_count": 0,
+                    "stop_loss_enabled": False,
+                    "trailing_stop_enabled": False,
+                    "first_risk_off_enabled": False,
                     "error": str(exc),
                 }
             )
@@ -412,7 +546,7 @@ async def scanner_top(limit: int = 10):
     sc      = _sc()
     alerts  = sc.get_todays_alerts() or []
     alerts  = sorted(alerts, key=lambda x: -x.get("score", 0))[:limit]
-    return {"count": len(alerts), "alerts": alerts}
+    return {"count": len(alerts), "alerts": _enrich_token_rows(alerts)}
 
 
 @app.get("/scanner/watchlist", dependencies=[Depends(verify_key)])
@@ -421,7 +555,7 @@ async def scanner_watchlist():
     sc = _sc()
     wl = sc.get_watchlist() or {}
     items = sorted(wl.values(), key=lambda x: -x.get("score", 0))
-    return {"count": len(items), "tokens": items}
+    return {"count": len(items), "tokens": _enrich_token_rows(items)}
 
 
 @app.get("/research-log", dependencies=[Depends(verify_key)])
@@ -449,9 +583,43 @@ async def get_history(uid: int, limit: int = 50, mode: Optional[str] = None):
 @app.get("/scanner/feed", dependencies=[Depends(verify_key)])
 async def scanner_feed(limit: int = 50):
     """Return the rolling scanner feed, newest first."""
-    raw_items = _db.get_scan_log(limit=max(1, min(limit * 5, 500)))
-    seen_mints: set[str] = set()
     items: list[dict] = []
+    seen_mints: set[str] = set()
+    has_lifecycle = False
+    lifecycle_items = lifecycle_store.list_recent_snapshots(limit=max(1, min(limit, 100)))
+    for snapshot in lifecycle_items:
+        token = build_trading_snapshot(snapshot, max_age_hours=4)
+        if not token:
+            continue
+        mint = token["mint"]
+        if mint in seen_mints:
+            continue
+        has_lifecycle = True
+        items.append({
+            "id": None,
+            "date": None,
+            "ts": snapshot.lifecycle.last_trade_ts or snapshot.lifecycle.launch_ts or snapshot.lifecycle.last_updated_ts,
+            "mint": mint,
+            "name": token.get("name"),
+            "symbol": token.get("symbol"),
+            "score": int(token.get("snapshot_score_effective") or token.get("snapshot_score_raw") or 0),
+            "mcap": float(token.get("mcap") or 0),
+            "narrative": token.get("lifecycle_narrative"),
+            "archetype": token.get("lifecycle_archetype"),
+            "alerted": 0,
+            "dq": None,
+            "state": token.get("lifecycle_state"),
+            "source_primary": token.get("source_primary"),
+            "strategy_profile": token.get("strategy_profile"),
+            "confidence": float(token.get("snapshot_confidence") or 0),
+            "age_mins": float(token.get("age_mins") or 0),
+            "buy_ratio_5m": float(token.get("buy_ratio_5m") or 0),
+        })
+        seen_mints.add(mint)
+        if len(items) >= limit:
+            return {"count": len(items), "items": items, "source": "lifecycle+scanner_log"}
+
+    raw_items = _db.get_scan_log(limit=max(1, min(limit * 5, 500)))
     for item in raw_items:
         mint = str(item.get("mint") or "").strip()
         if not mint or mint in seen_mints:
@@ -460,7 +628,66 @@ async def scanner_feed(limit: int = 50):
         items.append(item)
         if len(items) >= limit:
             break
-    return {"count": len(items), "items": items}
+    return {
+        "count": len(items),
+        "items": items,
+        "source": "lifecycle+scanner_log" if has_lifecycle else "scanner_log",
+    }
+
+
+@app.get("/token/{mint}/snapshot", dependencies=[Depends(verify_key)])
+async def token_snapshot(mint: str):
+    """Return the normalized lifecycle snapshot for a token."""
+    snapshot = lifecycle_store.get_token_snapshot(mint)
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Lifecycle snapshot not found")
+    payload = snapshot.as_dict()
+    trading_snapshot = build_trading_snapshot(snapshot, max_age_hours=None)
+    payload["trading_snapshot"] = trading_snapshot
+    payload["analysis"] = None
+
+    if trading_snapshot:
+        try:
+            scanner = _sc()
+            rc = snapshot.enrichment.rugcheck or {}
+            result = scanner.calculate_heat_score_with_settings(trading_snapshot, rc)
+            effective_score = result.get("effective_score", result.get("total", 0))
+            narrative = (
+                result.get("matched_narrative")
+                or trading_snapshot.get("lifecycle_narrative")
+                or "Other"
+            )
+            quality = scanner.build_entry_quality(trading_snapshot, rc, result, narrative)
+            quality_flags = scanner.apply_entry_quality_rules(
+                quality,
+                effective_score=float(effective_score or 0),
+                momentum_alive=True,
+            )
+            payload["analysis"] = {
+                "effective_score": effective_score,
+                "raw_score": result.get("raw_total", result.get("total", 0)),
+                "risk": result.get("risk"),
+                "matched_narrative": narrative,
+                "strategy_profile": quality_flags.get("strategy_profile") or result.get("strategy_profile"),
+                "strategy_exit_preset": quality_flags.get("strategy_exit_preset") or result.get("strategy_exit_preset"),
+                "strategy_size_bias": quality_flags.get("strategy_size_bias") or result.get("strategy_size_bias"),
+                "strategy_confidence": result.get("strategy_confidence", result.get("archetype_conf", 0)),
+                "archetype": result.get("archetype"),
+                "archetype_label": result.get("archetype_label"),
+                "breakdown": result.get("breakdown", {}),
+                "entry_quality": quality,
+                "quality_flags": quality_flags,
+            }
+        except Exception as exc:
+            payload["analysis"] = {"error": str(exc)}
+    return payload
+
+
+@app.get("/token/{mint}/timeline", dependencies=[Depends(verify_key)])
+async def token_timeline(mint: str, limit: int = 100):
+    """Return lifecycle events for a token, newest first."""
+    timeline = lifecycle_store.get_token_timeline(mint, limit=max(1, min(limit, 500)))
+    return {"mint": mint, "count": len(timeline), "events": timeline}
 
 
 @app.get("/price/{mint}", dependencies=[Depends(verify_key)])
@@ -847,33 +1074,81 @@ async def update_settings(uid: int, update: SettingsUpdate):
     return {"uid": uid, "settings": sm.get_user_settings(uid)}
 
 
+@app.get("/trade-controls/{uid}", dependencies=[Depends(verify_key)])
+async def get_trade_controls(uid: int):
+    """Return dashboard-facing trade controls: presets and global exit blocks."""
+    b = _bot()
+    return {
+        "uid": uid,
+        "presets_enabled": bool(b.get_user_as_presets_enabled(uid)),
+        "presets": b.get_user_as_presets(uid),
+        "global_stop_loss": b.get_global_sl(),
+        "global_trailing_stop": b.get_global_trailing_stop(),
+        "global_trailing_tp": b.get_global_trailing_tp(),
+        "global_breakeven_stop": b.get_global_breakeven_stop(),
+        "global_time_exit": b.get_global_time_exit(),
+    }
+
+
+@app.post("/trade-controls/{uid}", dependencies=[Depends(verify_key)])
+async def update_trade_controls(uid: int, update: TradeControlsUpdate):
+    """Update dashboard-managed preset and global exit controls."""
+    b = _bot()
+    payload = update.model_dump(exclude_none=True)
+    if "presets_enabled" in payload:
+        b.set_user_as_presets_enabled(uid, bool(payload["presets_enabled"]))
+    if "presets" in payload:
+        normalized = _normalize_presets(payload["presets"])
+        if not normalized:
+            raise HTTPException(status_code=400, detail="At least one valid preset is required")
+        b.set_user_as_presets(uid, normalized)
+    if "global_stop_loss" in payload:
+        b.set_global_sl(payload["global_stop_loss"])
+    if "global_trailing_stop" in payload:
+        b.set_global_trailing_stop(payload["global_trailing_stop"])
+    if "global_trailing_tp" in payload:
+        b.set_global_trailing_tp(payload["global_trailing_tp"])
+    if "global_breakeven_stop" in payload:
+        b.set_global_breakeven_stop(payload["global_breakeven_stop"])
+    if "global_time_exit" in payload:
+        b.set_global_time_exit(payload["global_time_exit"])
+    return await get_trade_controls(uid)
+
+
 @app.get("/autosell/{mint}", dependencies=[Depends(verify_key)])
 async def get_autosell(mint: str, uid: int):
     """Return auto-sell config for a token."""
-    b   = _bot()
-    cfg = b.load_auto_sell().get(str(uid), {}).get(mint)
+    b = _bot()
+    cfg = b.get_auto_sell(uid, mint)
     if not cfg:
         raise HTTPException(status_code=404, detail="No auto-sell config for this token")
-    return cfg
+    return {
+        "uid": uid,
+        "mint": mint,
+        "config": cfg,
+    }
 
 
 @app.post("/autosell/{mint}", dependencies=[Depends(verify_key)])
 async def update_autosell(mint: str, uid: int, update: AutoSellUpdate):
     """Update auto-sell config for a token (partial update)."""
-    b    = _bot()
-    data = b.load_auto_sell()
-    cfg  = data.get(str(uid), {}).get(mint)
+    b = _bot()
+    cfg = b.get_auto_sell(uid, mint)
     if not cfg:
         raise HTTPException(status_code=404, detail="No auto-sell config for this token")
-    if update.enabled is not None:
-        cfg["enabled"] = update.enabled
-    if update.stop_loss_pct is not None:
-        cfg["stop_loss_pct"] = update.stop_loss_pct
-    if update.targets is not None:
-        cfg["targets"] = update.targets
-    data.setdefault(str(uid), {})[mint] = cfg
-    b.save_auto_sell(data)
-    return {"mint": mint, "uid": uid, "updated": cfg}
+    merged = merge_autosell_update(cfg, update)
+    try:
+        import exit_logic
+
+        exit_logic.ensure_exit_blocks(
+            merged,
+            narrative=merged.get("narrative"),
+            entry_score_effective=merged.get("entry_score_effective"),
+        )
+    except Exception:
+        pass
+    b.set_auto_sell(uid, mint, merged)
+    return {"mint": mint, "uid": uid, "updated": merged}
 
 
 @app.post("/message", dependencies=[Depends(verify_key)])

@@ -18,6 +18,8 @@ import websockets
 from telegram import Bot, InlineKeyboardButton, InlineKeyboardMarkup
 from scanner import calculate_heat_score_with_settings, fetch_rugcheck, priority_label
 import wallet_tracker
+import strategy_profiles
+from services.lifecycle import store as lifecycle_store
 
 DATA_DIR   = os.path.join(os.path.dirname(__file__), "data")
 STATE_FILE = os.path.join(DATA_DIR, "pumpfeed_state.json")
@@ -52,6 +54,109 @@ def _build_scanner_token(token: dict, meta: dict, sol_usd: float, dex: str = "")
         "dex":         dex,
         "liquidity":   max(0.0, float(token.get("vSolInBondingCurve", 0) or 0) - VIRT_OFFSET) * sol_usd,
     }
+
+
+def _detect_narrative(name: str, symbol: str, desc: str = "") -> str:
+    narratives = {
+        "AI": ["ai", "agent", "gpt", "robot", "artificial", "neural", "llm", "ml", "agi"],
+        "Political": ["trump", "maga", "biden", "elon", "political", "president", "vote", "patriot"],
+        "Animal": ["dog", "cat", "pepe", "frog", "shib", "inu", "doge", "wolf", "bear", "bull", "ape"],
+        "Gaming": ["game", "play", "nft", "pixel", "arcade", "quest", "rpg", "guild"],
+        "RWA": ["gold", "oil", "real", "estate", "asset", "commodity", "bond", "rwa"],
+    }
+    haystack = f"{name} {symbol} {desc}".lower()
+    for label, keywords in narratives.items():
+        if any(keyword in haystack for keyword in keywords):
+            return label
+    return "Other"
+
+
+def _token_age_mins(token: dict) -> float:
+    created_ts = token.get("created_timestamp") or token.get("blockTime") or 0
+    if not created_ts:
+        return 0.0
+    ts_sec = created_ts / 1000 if created_ts > 1e10 else created_ts
+    return max(0.0, (time.time() - ts_sec) / 60.0)
+
+
+def _record_lifecycle_from_feed(token: dict, meta: dict, sol_usd: float, heat: dict | None, *, dex: str, state: str):
+    mint = str(token.get("mint") or "").strip()
+    if not mint:
+        return
+
+    created_ts = token.get("created_timestamp") or token.get("blockTime") or time.time()
+    ts_sec = created_ts / 1000 if created_ts and created_ts > 1e10 else (created_ts or time.time())
+    narrative = _detect_narrative(token.get("name", ""), token.get("symbol", ""), meta.get("description", ""))
+    source_primary = "pumpfun_newest" if dex == "pumpfun" else "raydium_migration"
+    source_rank = 95 if dex == "pumpfun" else 90
+    liquidity_usd = max(0.0, float(token.get("vSolInBondingCurve", VIRT_OFFSET) or VIRT_OFFSET) - VIRT_OFFSET) * sol_usd
+    volume_usd = float(token.get("solAmount", 0) or 0) * sol_usd
+    buy_ratio = 1.0 if float(token.get("solAmount", 0) or 0) > 0 else 0.5
+    score_total = float((heat or {}).get("total") or 0)
+
+    if state == "pump_active":
+        lifecycle_store.record_launch_event(
+            mint,
+            symbol=token.get("symbol"),
+            name=token.get("name"),
+            launch_ts=ts_sec,
+            dev_wallet=token.get("traderPublicKey"),
+            source_primary=source_primary,
+            source_rank=source_rank,
+            payload={"token": dict(token), "meta": dict(meta), "state": state, "dex": dex},
+        )
+    else:
+        lifecycle_store.update_lifecycle_fields(
+            mint,
+            symbol=token.get("symbol"),
+            name=token.get("name"),
+            state=state,
+            dev_wallet=token.get("traderPublicKey"),
+            source_primary=source_primary,
+            source_rank=source_rank,
+            last_updated_ts=time.time(),
+        )
+    lifecycle_store.record_swap_metrics(
+        mint,
+        buys_1m=1 if volume_usd > 0 else 0,
+        buys_5m=1 if volume_usd > 0 else 0,
+        sells_1m=0,
+        sells_5m=0,
+        volume_usd_1m=volume_usd,
+        volume_usd_5m=volume_usd,
+        buy_ratio_5m=buy_ratio,
+        unique_buyers_5m=1 if volume_usd > 0 else 0,
+        liquidity_usd=liquidity_usd,
+        bonding_curve_fill_pct=max(0.0, min(100.0, (max(0.0, float(token.get("vSolInBondingCurve", 0) or 0) - VIRT_OFFSET) / GRAD_SOL) * 100.0)),
+        updated_ts=time.time(),
+    )
+    lifecycle_store.upsert_enrichment(
+        mint,
+        pump={**dict(token), "meta": dict(meta)},
+        wallet={"creator": token.get("traderPublicKey") or "", "narrative": narrative},
+    )
+
+    strategy_info = strategy_profiles.annotate_result({
+        "matched_narrative": narrative,
+        "source_name": source_primary,
+        "_source_name": source_primary,
+        "age_mins": _token_age_mins(token),
+        "dex": dex,
+        "mcap": float(token.get("marketCapSol", 0) or 0) * sol_usd,
+        "archetype": "MICRO_ROCKETSHIP" if dex == "pumpfun" else "STEALTH_RAYDIUM",
+    })
+    lifecycle_store.update_score_state(
+        mint,
+        narrative=narrative,
+        archetype="MICRO_ROCKETSHIP" if dex == "pumpfun" else "STEALTH_RAYDIUM",
+        strategy_profile=strategy_info["strategy_profile"],
+        last_score=score_total,
+        last_effective_score=score_total,
+        last_confidence=float(strategy_info.get("strategy_confidence", 0) or 0) / 100.0,
+        payload={"heat": heat or {}, "dex": dex, "state": state},
+    )
+    if state == "raydium_live":
+        lifecycle_store.record_migration_detected(mint, migration_ts=time.time(), payload={"token": dict(token), "meta": dict(meta)})
 
 def set_grad_autobuy_fn(fn):
     global _grad_autobuy_fn
@@ -662,6 +767,7 @@ async def _handle_token_inner(bot: Bot, token: dict, mint: str):
             pass
 
     heat = calculate_heat_score_with_settings(_build_scanner_token(token, meta, sol_usd, dex="pumpfun"), rc)
+    _record_lifecycle_from_feed(token, meta, sol_usd, heat, dex="pumpfun", state="pump_active")
     print(f"[NEW TOKEN] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_notification(token, meta, sol_usd, heat)
     kb   = notification_kb(mint)
@@ -1138,6 +1244,7 @@ async def _handle_grad_token_inner(bot: Bot, token: dict, mint: str):
             pass
 
     heat = calculate_heat_score_with_settings(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    _record_lifecycle_from_feed(token, meta, sol_usd, heat, dex="raydium", state="raydium_live")
     print(f"[GRAD WS] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
@@ -1316,6 +1423,7 @@ async def _handle_grad_from_pumpfun(bot: Bot, coin: dict):
             pass
 
     heat = calculate_heat_score_with_settings(_build_scanner_token(token, meta, sol_usd, dex="raydium"), rc)
+    _record_lifecycle_from_feed(token, meta, sol_usd, heat, dex="raydium", state="raydium_live")
     print(f"[GRAD REST] {token.get('symbol','?')} mint={mint} heat={heat['total'] if heat else 'n/a'} active_subs={len(active_subs)}", flush=True)
     text = format_grad_notification(token, meta, sol_usd, heat)
     kb   = grad_notification_kb(mint)
@@ -1570,4 +1678,3 @@ async def run_launch_hunter(bot: Bot):
             print(f"[LAUNCH] Error in detection loop: {e}", flush=True)
         
         await asyncio.sleep(interval)
-

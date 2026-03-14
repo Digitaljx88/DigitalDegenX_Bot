@@ -29,11 +29,49 @@ type ModeResponse = {
   mode: "paper" | "live";
 };
 
+type PresetRow = {
+  mult: number;
+  sell_pct: number;
+};
+
+type TradeControls = {
+  uid: number;
+  presets_enabled: boolean;
+  presets: PresetRow[];
+  global_stop_loss: {
+    enabled?: boolean;
+    pct?: number;
+    sell_pct?: number;
+  };
+  global_trailing_stop: {
+    enabled?: boolean;
+    trail_pct?: number;
+    sell_pct?: number;
+  };
+  global_trailing_tp: {
+    enabled?: boolean;
+    activate_mult?: number;
+    trail_pct?: number;
+    sell_pct?: number;
+  };
+  global_breakeven_stop: {
+    enabled?: boolean;
+    activate_mult?: number;
+  };
+  global_time_exit: {
+    enabled?: boolean;
+    hours?: number;
+    target_mult?: number;
+    sell_pct?: number;
+  };
+};
+
 export function SettingsDashboard() {
   const { uid } = useActiveUid();
   const [autobuy, setAutobuy] = useState<AutoBuyConfig>({});
   const [settings, setSettings] = useState<Record<string, number | string | boolean>>({});
   const [mode, setMode] = useState<"paper" | "live">("paper");
+  const [tradeControls, setTradeControls] = useState<TradeControls | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -42,17 +80,20 @@ export function SettingsDashboard() {
       if (!uid) {
         setAutobuy({});
         setSettings({});
+        setTradeControls(null);
         return;
       }
       try {
-        const [autobuyRes, settingsRes, modeRes] = await Promise.all([
+        const [autobuyRes, settingsRes, modeRes, tradeControlsRes] = await Promise.all([
           apiFetch<AutoBuyConfig>(`/autobuy/${uid}`),
           apiFetch<SettingsResponse>(`/settings/${uid}`),
           apiFetch<ModeResponse>(`/mode`, { query: { uid } }),
+          apiFetch<TradeControls>(`/trade-controls/${uid}`),
         ]);
         setAutobuy(autobuyRes);
         setSettings(settingsRes.settings || {});
         setMode(modeRes.mode || "paper");
+        setTradeControls(tradeControlsRes);
         setError("");
       } catch (err) {
         setError(err instanceof Error ? err.message : "Failed to load settings");
@@ -106,6 +147,31 @@ export function SettingsDashboard() {
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save thresholds");
+    }
+  }
+
+  async function saveTradeControls(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!tradeControls) {
+      return;
+    }
+    try {
+      await apiFetch(`/trade-controls/${uid}`, {
+        method: "POST",
+        body: JSON.stringify({
+          presets_enabled: tradeControls.presets_enabled,
+          presets: tradeControls.presets,
+          global_stop_loss: tradeControls.global_stop_loss,
+          global_trailing_stop: tradeControls.global_trailing_stop,
+          global_trailing_tp: tradeControls.global_trailing_tp,
+          global_breakeven_stop: tradeControls.global_breakeven_stop,
+          global_time_exit: tradeControls.global_time_exit,
+        }),
+      });
+      setMessage("Trade controls saved.");
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to save trade controls");
     }
   }
 
@@ -271,6 +337,248 @@ export function SettingsDashboard() {
         {message ? <div className="mt-4 rounded-2xl border border-emerald-400/30 bg-emerald-500/10 px-4 py-3 text-sm text-emerald-100">{message}</div> : null}
         {error ? <div className="mt-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
       </Panel>
+
+      <Panel title="Trade Controls" subtitle="Manage default multiplier presets and global exit protections from the dashboard.">
+        {tradeControls ? (
+          <form className="space-y-5 xl:col-span-2" onSubmit={saveTradeControls}>
+            <label className="flex items-center gap-3 text-sm text-white">
+              <input
+                type="checkbox"
+                checked={Boolean(tradeControls.presets_enabled)}
+                onChange={(event) =>
+                  setTradeControls((current) =>
+                    current ? { ...current, presets_enabled: event.target.checked } : current,
+                  )
+                }
+              />
+              Apply presets to new buys
+            </label>
+
+            <div className="space-y-3">
+              <div className="text-sm font-medium text-white">Default multiplier presets</div>
+              {(tradeControls.presets || []).map((preset, index) => (
+                <div key={`preset-${index}`} className="grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+                  <input
+                    value={String(preset.mult ?? 0)}
+                    onChange={(event) =>
+                      setTradeControls((current) =>
+                        current
+                          ? {
+                              ...current,
+                              presets: current.presets.map((row, rowIndex) =>
+                                rowIndex === index ? { ...row, mult: Number(event.target.value || 0) } : row,
+                              ),
+                            }
+                          : current,
+                      )
+                    }
+                    className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
+                    placeholder="Multiplier"
+                  />
+                  <input
+                    value={String(preset.sell_pct ?? 0)}
+                    onChange={(event) =>
+                      setTradeControls((current) =>
+                        current
+                          ? {
+                              ...current,
+                              presets: current.presets.map((row, rowIndex) =>
+                                rowIndex === index ? { ...row, sell_pct: Number(event.target.value || 0) } : row,
+                              ),
+                            }
+                          : current,
+                      )
+                    }
+                    className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
+                    placeholder="Sell %"
+                  />
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setTradeControls((current) =>
+                        current
+                          ? { ...current, presets: current.presets.filter((_, rowIndex) => rowIndex !== index) }
+                          : current,
+                      )
+                    }
+                    className="rounded-full border border-white/10 px-4 py-2 text-xs text-[var(--muted-foreground)]"
+                  >
+                    Remove
+                  </button>
+                </div>
+              ))}
+              <button
+                type="button"
+                onClick={() =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, presets: [...current.presets, { mult: 2, sell_pct: 50 }] }
+                      : current,
+                  )
+                }
+                className="rounded-full border border-white/10 px-4 py-2 text-xs text-[var(--muted-foreground)]"
+              >
+                Add preset
+              </button>
+            </div>
+
+            <div className="grid gap-4 lg:grid-cols-2">
+              <GlobalExitBlock
+                title="Global Stop-Loss"
+                enabled={Boolean(tradeControls.global_stop_loss?.enabled)}
+                fields={[
+                  { key: "pct", label: "Drop %", value: Number(tradeControls.global_stop_loss?.pct || 0) },
+                  { key: "sell_pct", label: "Sell %", value: Number(tradeControls.global_stop_loss?.sell_pct || 100) },
+                ]}
+                onToggle={(enabled) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_stop_loss: { ...current.global_stop_loss, enabled } }
+                      : current,
+                  )
+                }
+                onFieldChange={(key, value) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_stop_loss: { ...current.global_stop_loss, [key]: value } }
+                      : current,
+                  )
+                }
+              />
+              <GlobalExitBlock
+                title="Global Trailing Stop"
+                enabled={Boolean(tradeControls.global_trailing_stop?.enabled)}
+                fields={[
+                  { key: "trail_pct", label: "Trail %", value: Number(tradeControls.global_trailing_stop?.trail_pct || 0) },
+                  { key: "sell_pct", label: "Sell %", value: Number(tradeControls.global_trailing_stop?.sell_pct || 100) },
+                ]}
+                onToggle={(enabled) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_trailing_stop: { ...current.global_trailing_stop, enabled } }
+                      : current,
+                  )
+                }
+                onFieldChange={(key, value) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_trailing_stop: { ...current.global_trailing_stop, [key]: value } }
+                      : current,
+                  )
+                }
+              />
+              <GlobalExitBlock
+                title="Global Trailing TP"
+                enabled={Boolean(tradeControls.global_trailing_tp?.enabled)}
+                fields={[
+                  { key: "activate_mult", label: "Activate at x", value: Number(tradeControls.global_trailing_tp?.activate_mult || 0) },
+                  { key: "trail_pct", label: "Trail %", value: Number(tradeControls.global_trailing_tp?.trail_pct || 0) },
+                  { key: "sell_pct", label: "Sell %", value: Number(tradeControls.global_trailing_tp?.sell_pct || 0) },
+                ]}
+                onToggle={(enabled) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_trailing_tp: { ...current.global_trailing_tp, enabled } }
+                      : current,
+                  )
+                }
+                onFieldChange={(key, value) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_trailing_tp: { ...current.global_trailing_tp, [key]: value } }
+                      : current,
+                  )
+                }
+              />
+              <GlobalExitBlock
+                title="Global Breakeven"
+                enabled={Boolean(tradeControls.global_breakeven_stop?.enabled)}
+                fields={[
+                  { key: "activate_mult", label: "Activate at x", value: Number(tradeControls.global_breakeven_stop?.activate_mult || 0) },
+                ]}
+                onToggle={(enabled) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_breakeven_stop: { ...current.global_breakeven_stop, enabled } }
+                      : current,
+                  )
+                }
+                onFieldChange={(key, value) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_breakeven_stop: { ...current.global_breakeven_stop, [key]: value } }
+                      : current,
+                  )
+                }
+              />
+              <GlobalExitBlock
+                title="Global Time Exit"
+                enabled={Boolean(tradeControls.global_time_exit?.enabled)}
+                fields={[
+                  { key: "hours", label: "Hours", value: Number(tradeControls.global_time_exit?.hours || 0) },
+                  { key: "target_mult", label: "Target x", value: Number(tradeControls.global_time_exit?.target_mult || 0) },
+                  { key: "sell_pct", label: "Sell %", value: Number(tradeControls.global_time_exit?.sell_pct || 100) },
+                ]}
+                onToggle={(enabled) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_time_exit: { ...current.global_time_exit, enabled } }
+                      : current,
+                  )
+                }
+                onFieldChange={(key, value) =>
+                  setTradeControls((current) =>
+                    current
+                      ? { ...current, global_time_exit: { ...current.global_time_exit, [key]: value } }
+                      : current,
+                  )
+                }
+              />
+            </div>
+
+            <button type="submit" className="rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--accent-foreground)]">
+              Save Trade Controls
+            </button>
+          </form>
+        ) : (
+          <div className="text-sm text-[var(--muted-foreground)]">Loading trade controls...</div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
+function GlobalExitBlock({
+  title,
+  enabled,
+  fields,
+  onToggle,
+  onFieldChange,
+}: {
+  title: string;
+  enabled: boolean;
+  fields: Array<{ key: string; label: string; value: number }>;
+  onToggle: (enabled: boolean) => void;
+  onFieldChange: (key: string, value: number) => void;
+}) {
+  return (
+    <div className="rounded-2xl border border-white/10 bg-black/20 p-4">
+      <label className="mb-3 flex items-center gap-3 text-sm text-white">
+        <input type="checkbox" checked={enabled} onChange={(event) => onToggle(event.target.checked)} />
+        {title}
+      </label>
+      <div className="grid gap-3 md:grid-cols-2">
+        {fields.map((field) => (
+          <div key={`${title}-${field.key}`} className="space-y-2">
+            <div className="text-xs text-[var(--muted-foreground)]">{field.label}</div>
+            <input
+              value={String(field.value)}
+              onChange={(event) => onFieldChange(field.key, Number(event.target.value || 0))}
+              className="w-full rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-white outline-none"
+            />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

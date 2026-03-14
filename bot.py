@@ -865,7 +865,10 @@ def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton("🏆 Top Scouts",    callback_data="scanner:topalerts")],
         [InlineKeyboardButton("⚙️ Settings",      callback_data="menu:settings"),
          InlineKeyboardButton(f"Mode: {mode}",    callback_data="mode:paper" if get_mode(uid) == "live" else "mode:live")],
-        [InlineKeyboardButton("🌐 Open Dashboard", url=f"{DASHBOARD_URL}/scanner")],
+        [InlineKeyboardButton("🌐 Scanner", url=f"{DASHBOARD_URL}/scanner"),
+         InlineKeyboardButton("💼 Portfolio", url=f"{DASHBOARD_URL}/portfolio")],
+        [InlineKeyboardButton("📈 Trade Center", url=f"{DASHBOARD_URL}/trades"),
+         InlineKeyboardButton("🧠 Intel", url=f"{DASHBOARD_URL}/intel/wallets")],
     ])
 
 
@@ -1085,7 +1088,7 @@ def confirm_trade_kb(action: str, mint: str, symbol: str) -> InlineKeyboardMarku
 
 def price_card_kb(mint: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
+        [InlineKeyboardButton("🟢 Buy",      url=_token_dashboard_link(mint)),
          InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
         [InlineKeyboardButton("📊 DexScreener", url=f"https://dexscreener.com/solana/{mint}"),
          InlineKeyboardButton("🪙 Pump.fun",    url=f"https://pump.fun/{mint}"),
@@ -1656,8 +1659,9 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
             ),
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("👜 Portfolio", callback_data="menu:portfolio")
-            ]])
+                InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
+                InlineKeyboardButton("🔎 Token Page", url=_token_dashboard_link(mint)),
+            ]]),
         )
         return True
     else:
@@ -1703,6 +1707,10 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                     f"[Solscan](https://solscan.io/tx/{sig})"
                 ),
                 parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
+                    InlineKeyboardButton("🔎 Token Page", url=_token_dashboard_link(mint)),
+                ]]),
             )
             return True
 
@@ -2518,7 +2526,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
                 f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⚙️ Auto-Sell", callback_data=f"as:view:{mint}"),
+                    InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
                     InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
                 ]])
             )
@@ -2748,7 +2756,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
                 f"🔗 TX: `{tx_sig[:20]}...`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("⚙️ Auto-Sell", callback_data=f"as:view:{mint}"),
+                    InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
                     InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
                 ]])
             )
@@ -2898,10 +2906,8 @@ async def do_trade_flow(msg, uid: int, context, action: str,
                 f"🎯 MCap alerts: 100K / 500K / 1M",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([
-                    [InlineKeyboardButton("⚙️ Auto-Sell Settings",
-                                         callback_data=f"as:view:{token_mint}")],
-                    [InlineKeyboardButton("🔧 Customize Presets",
-                                         callback_data="as_preset:menu")],
+                    [InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio"))],
+                    [InlineKeyboardButton("⚙️ Dashboard Settings", url=_dashboard_link("/settings"))],
                     [InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
                 ])
             )
@@ -3055,7 +3061,8 @@ async def show_main_menu(target, uid: int, edit=False):
         f"*@DigitalDegenX\\_Bot*\n\n"
         f"Mode: *{mode}*\n\n"
         "Telegram is now optimized for alerts and settings.\n"
-        "Use the dashboard for trading, portfolio, analytics, wallet tools, and research."
+        "Use the dashboard for trading, portfolio, analytics, wallet tools, and research.\n\n"
+        f"Dashboard: {_dashboard_link('/scanner')}"
     )
     if edit:
         await target.edit_message_text(text, parse_mode="Markdown", reply_markup=main_menu_kb(uid))
@@ -3066,6 +3073,10 @@ async def show_main_menu(target, uid: int, edit=False):
 def _dashboard_link(path: str = "/scanner") -> str:
     path = path if path.startswith("/") else f"/{path}"
     return f"{DASHBOARD_URL}{path}"
+
+
+def _token_dashboard_link(mint: str) -> str:
+    return _dashboard_link(f"/token/{mint}")
 
 
 def _dashboard_redirect_kb(path: str = "/scanner") -> InlineKeyboardMarkup:
@@ -3081,6 +3092,33 @@ async def _send_dashboard_redirect(message, title: str, path: str, detail: str):
         f"{title}\n\n{detail}\n\nUse the dashboard for this workflow:\n{_dashboard_link(path)}",
         parse_mode="Markdown",
         reply_markup=_dashboard_redirect_kb(path),
+        disable_web_page_preview=True,
+    )
+
+
+async def _edit_dashboard_redirect(query, title: str, path: str, detail: str):
+    await query.edit_message_text(
+        f"{title}\n\n{detail}\n\nUse the dashboard for this workflow:\n{_dashboard_link(path)}",
+        parse_mode="Markdown",
+        reply_markup=_dashboard_redirect_kb(path),
+        disable_web_page_preview=True,
+    )
+
+
+async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    uid = update.effective_user.id
+    await update.message.reply_text(
+        "*🌐 Dashboard*\n\nUse the web dashboard for trading, portfolio, analytics, research, and intelligence.",
+        parse_mode="Markdown",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🔎 Scanner", url=_dashboard_link("/scanner")),
+             InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio"))],
+            [InlineKeyboardButton("📈 Trade Center", url=_dashboard_link("/trades")),
+             InlineKeyboardButton("🧠 Intel", url=_dashboard_link("/intel/wallets"))],
+            [InlineKeyboardButton("⚙️ Telegram Settings", callback_data="menu:settings"),
+             InlineKeyboardButton(f"Mode: {'📄 Paper' if get_mode(uid) == 'paper' else '🔴 Live'}",
+                                  callback_data="mode:paper" if get_mode(uid) == "live" else "mode:live")],
+        ]),
         disable_web_page_preview=True,
     )
 
@@ -3560,9 +3598,8 @@ async def _show_autosell(send_fn, uid: int):
             f"You can pre-configure default sell presets for future buys.",
             parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("🔧 Configure Default Presets", callback_data="as_preset:menu")],
-                [InlineKeyboardButton(f"🌍 Global Stop-Loss: {gsl_status}", callback_data="gsl:menu")],
-                [InlineKeyboardButton("💰 Trade", callback_data="menu:trade")],
+                [InlineKeyboardButton("🌐 Dashboard Settings", url=_dashboard_link("/settings"))],
+                [InlineKeyboardButton("🌐 Dashboard Scanner", url=_dashboard_link("/scanner"))],
                 [InlineKeyboardButton("⬅️ Back",  callback_data="menu:main")],
             ])
         )
@@ -7412,29 +7449,40 @@ async def menu_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         clear_state(uid)
         await show_main_menu(query, uid, edit=True)
     elif action == "market":
-        await query.edit_message_text("*📊 Market*\n\nChoose:", parse_mode="Markdown",
-                                       reply_markup=market_kb())
+        await _edit_dashboard_redirect(
+            query,
+            "*📊 Market tools moved to the dashboard.*",
+            "/top-alerts",
+            "Top scouts, token lookup, and market review are now dashboard workflows."
+        )
     elif action in ("trade", "buy"):
-        mode = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
-        await query.edit_message_text(f"*💰 Trade* — {mode}\n\nChoose:",
-                                       parse_mode="Markdown", reply_markup=trade_kb())
+        await _edit_dashboard_redirect(
+            query,
+            "*💰 Trading moved to the dashboard.*",
+            "/scanner",
+            "Use the scanner and portfolio pages for buys, sells, and execution review."
+        )
     elif action == "portfolio":
-        await query.edit_message_text("Loading...")
-        try:
-            await _show_portfolio(query.edit_message_text, uid)
-        except Exception as e:
-            print(f"[PORTFOLIO] menu load error: {e}")
-            await query.edit_message_text(
-                "⚠️ Failed to load portfolio. Try again.",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("🔄 Retry", callback_data="portfolio:refresh"),
-                    InlineKeyboardButton("⬅️ Menu",  callback_data="menu:main"),
-                ]])
-            )
+        await _edit_dashboard_redirect(
+            query,
+            "*💼 Portfolio moved to the dashboard.*",
+            "/portfolio",
+            "Positions, wallet balances, exit configs, and portfolio research now live there."
+        )
     elif action == "autosell":
-        await _show_autosell(query.edit_message_text, uid)
+        await _edit_dashboard_redirect(
+            query,
+            "*🤖 Auto-sell editing moved to the dashboard.*",
+            "/portfolio",
+            "Manage position exits and risk controls from the portfolio page."
+        )
     elif action == "autobuy":
-        await _show_autobuy(query.edit_message_text, uid)
+        await _edit_dashboard_redirect(
+            query,
+            "*🤖 Auto-buy controls moved to the dashboard.*",
+            "/settings",
+            "Scanner automation, sizing, and presets are now managed in dashboard settings."
+        )
     elif action == "settings":
         await query.edit_message_text(
             "*⚙️ Settings*\n\n📄 Paper — virtual 10 SOL\n🔴 Live — real on-chain",
@@ -7478,24 +7526,36 @@ async def market_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if action == "top":
-        await query.edit_message_text("Fetching...")
-        await _show_top(query.edit_message_text)
+        await _edit_dashboard_redirect(
+            query,
+            "*🏆 Top scouts moved to the dashboard.*",
+            "/top-alerts",
+            "Use the Top Alerts and scanner pages for ranked token review."
+        )
     elif action == "lookup":
-        set_state(uid, waiting_for="market_lookup")
-        await query.edit_message_text("🔍 Send a symbol or CA:", parse_mode="Markdown",
-                                       reply_markup=back_kb("menu:market"))
+        await _edit_dashboard_redirect(
+            query,
+            "*🔍 Token lookup moved to the dashboard.*",
+            "/scanner",
+            "Use the scanner and token pages for manual lookup and deeper analysis."
+        )
 
 
 async def trade_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
-    uid    = query.from_user.id
     action = query.data.split(":")[1]
     await query.answer()
-    set_state(uid, waiting_for=f"trade_{action}_token", trade_action=action)
-    await query.edit_message_text(
-        f"{'🟢 Buy' if action == 'buy' else '🔴 Sell'}\n\nSend token symbol or CA:",
-        parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("❌ Cancel", callback_data="cancel")]])
+    path = "/scanner" if action == "buy" else "/portfolio"
+    detail = (
+        "Use the scanner feed and token pages for entries."
+        if action == "buy"
+        else "Use the portfolio page for exits and position management."
+    )
+    await _edit_dashboard_redirect(
+        query,
+        f"*{'🟢 Buy' if action == 'buy' else '🔴 Sell'} moved to the dashboard.*",
+        path,
+        detail,
     )
 
 
@@ -7977,6 +8037,17 @@ async def autosell_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
     mint   = parts[2] if len(parts) > 2 else ""
     await query.answer()
+
+    detail = "Use the portfolio page to manage position exits and the settings page for default presets."
+    if mint:
+        detail = f"Use the dashboard portfolio page to manage exits for `{mint[:8]}` and review the full token timeline."
+    await _edit_dashboard_redirect(
+        query,
+        "*🤖 Auto-sell editing moved to the dashboard.*",
+        "/portfolio",
+        detail,
+    )
+    return
 
     if action == "view":
         cfg = get_auto_sell(uid, mint)
@@ -8995,6 +9066,14 @@ async def as_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     action = parts[1]
     await query.answer()
 
+    await _edit_dashboard_redirect(
+        query,
+        "*⚙️ Exit presets moved to the dashboard.*",
+        "/settings",
+        "Use dashboard settings to manage default targets, trailing controls, and global exit presets.",
+    )
+    return
+
     if action == "menu":
         # Show current presets and options to edit
         user_presets = get_user_as_presets(uid)
@@ -9215,6 +9294,15 @@ async def portfolio_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     query  = update.callback_query
     uid    = query.from_user.id
     action = query.data.split(":")[1] if len(query.data.split(":")) > 1 else "refresh"
+
+    await query.answer()
+    await _edit_dashboard_redirect(
+        query,
+        "*💼 Portfolio management moved to the dashboard.*",
+        "/portfolio",
+        "Use the portfolio page for paper positions, live wallet holdings, quick sells, and exit controls.",
+    )
+    return
 
     if action == "refresh":
         await query.answer("Refreshing...")
@@ -9508,6 +9596,15 @@ async def qt_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid   = query.from_user.id
     mint  = query.data.split(":", 1)[1]
     await query.answer()
+
+    await _edit_dashboard_redirect(
+        query,
+        "*⚡ Quick trade moved to the dashboard.*",
+        "/portfolio",
+        f"Use the dashboard scanner and portfolio pages to trade and manage `{mint[:8]}`.",
+    )
+    return
+
     mode = get_mode(uid)
 
     pair = fetch_sol_pair(mint)
@@ -9555,6 +9652,15 @@ async def qp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     mint   = parts[2]
     pct    = int(parts[3])
     await query.answer(f"Executing {action} {pct}%...")
+
+    await _edit_dashboard_redirect(
+        query,
+        f"*{'🟢 Buy' if action == 'buy' else '🔴 Sell'} moved to the dashboard.*",
+        "/scanner" if action == "buy" else "/portfolio",
+        f"Use the dashboard to execute {action} workflows for `{mint[:8]}`.",
+    )
+    return
+
     mode = get_mode(uid)
 
     pair = fetch_sol_pair(mint)
@@ -9765,6 +9871,16 @@ async def confirm_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
     await query.answer()
 
+    await _edit_dashboard_redirect(
+        query,
+        f"*{action.title()} confirmations moved to the dashboard.*",
+        "/scanner" if action == "buy" else "/portfolio",
+        "Use the dashboard for trade confirmation, execution, and post-trade management.",
+    )
+    context.user_data.pop(f"pending_{action}", None)
+    clear_state(uid)
+    return
+
     pending = context.user_data.get(f"pending_{action}")
     if not pending:
         await query.edit_message_text("No pending trade.", reply_markup=back_kb())
@@ -9890,24 +10006,11 @@ async def quick_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
 
     if action == "buy":
-        set_state(uid, waiting_for="trade_buy_amount", trade_action="buy", trade_token=mint)
-        amounts = get_user_quick_buy_amounts(uid)
-        preset_rows = []
-        row = []
-        for amt in amounts:
-            label = f"{amt} SOL" if amt < 1 else f"{int(amt) if amt == int(amt) else amt} SOL"
-            row.append(InlineKeyboardButton(label, callback_data=f"qb_preset:{mint}:{amt}"))
-            if len(row) == 2:
-                preset_rows.append(row)
-                row = []
-        if row:
-            preset_rows.append(row)
-        preset_rows.append([InlineKeyboardButton("✏️ Custom amount", callback_data=f"qb_preset:{mint}:custom"),
-                            InlineKeyboardButton("❌ Cancel", callback_data="cancel")])
-        await query.edit_message_text(
-            "🟢 *Buy*\n\nHow much SOL to spend?",
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup(preset_rows)
+        await _edit_dashboard_redirect(
+            query,
+            "*🟢 Buying moved to the dashboard.*",
+            "/scanner",
+            f"Use the scanner and token pages to buy `{mint[:8]}` and review execution details.",
         )
     elif action == "alert":
         set_state(uid, waiting_for="alert_direction", alert_token=mint)
@@ -9966,6 +10069,14 @@ async def qb_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
     mint   = parts[1]
     amount = parts[2] if len(parts) > 2 else "custom"
     await query.answer()
+
+    await _edit_dashboard_redirect(
+        query,
+        "*🟢 Quick-buy presets moved to the dashboard.*",
+        "/scanner",
+        f"Use the dashboard scanner to buy `{mint[:8]}` with the current mode, sizing, and safety controls.",
+    )
+    return
 
     if amount == "custom":
         set_state(uid, waiting_for="trade_buy_amount", trade_action="buy", trade_token=mint)
@@ -12919,6 +13030,14 @@ async def gsl_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
     await query.answer()
 
+    await _edit_dashboard_redirect(
+        query,
+        "*🛑 Global stop-loss controls moved to the dashboard.*",
+        "/settings",
+        "Use dashboard settings to manage default stop-loss and global risk controls.",
+    )
+    return
+
     gsl = get_global_sl()
 
     if action == "menu":
@@ -13023,6 +13142,14 @@ async def gts_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
     await query.answer()
 
+    await _edit_dashboard_redirect(
+        query,
+        "*📉 Trailing-stop controls moved to the dashboard.*",
+        "/settings",
+        "Use dashboard settings to manage trailing-stop defaults and global exit behavior.",
+    )
+    return
+
     gts = get_global_trailing_stop()
 
     if action in ("menu", "toggle"):
@@ -13076,6 +13203,14 @@ async def gttp_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts  = query.data.split(":")
     action = parts[1]
     await query.answer()
+
+    await _edit_dashboard_redirect(
+        query,
+        "*🎯 Trailing take-profit controls moved to the dashboard.*",
+        "/settings",
+        "Use dashboard settings to manage trailing take-profit defaults and global exit behavior.",
+    )
+    return
 
     gttp = get_global_trailing_tp()
 
@@ -13147,6 +13282,14 @@ async def gbe_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     action = parts[1]
     await query.answer()
 
+    await _edit_dashboard_redirect(
+        query,
+        "*🛡️ Breakeven controls moved to the dashboard.*",
+        "/settings",
+        "Use dashboard settings to manage breakeven defaults and global exit behavior.",
+    )
+    return
+
     gbe = get_global_breakeven_stop()
 
     if action in ("menu", "toggle"):
@@ -13184,6 +13327,14 @@ async def gte_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     parts  = query.data.split(":")
     action = parts[1]
     await query.answer()
+
+    await _edit_dashboard_redirect(
+        query,
+        "*⏱️ Time-exit controls moved to the dashboard.*",
+        "/settings",
+        "Use dashboard settings to manage time-exit defaults and global exit behavior.",
+    )
+    return
 
     gte = get_global_time_exit()
 
@@ -13402,6 +13553,7 @@ async def post_init(app):
     await app.bot.set_my_commands([
         BotCommand("start",      "Open alert controls and dashboard link"),
         BotCommand("menu",       "Show alert controls and dashboard link"),
+        BotCommand("dashboard",  "Open dashboard shortcuts"),
         BotCommand("settings",   "Telegram settings and scanner controls"),
         BotCommand("mode",       "Switch between paper and live mode"),
         BotCommand("scan",       "Resume live token alerts"),
@@ -13424,6 +13576,7 @@ if __name__ == "__main__":
     # Slash commands
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("menu",       start))
+    app.add_handler(CommandHandler("dashboard",  cmd_dashboard))
     app.add_handler(CommandHandler("mode",       cmd_mode))
     app.add_handler(CommandHandler("scan",       cmd_scan))
     app.add_handler(CommandHandler("stopscan",   cmd_stopscan))

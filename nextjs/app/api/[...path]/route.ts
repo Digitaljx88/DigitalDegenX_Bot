@@ -20,7 +20,7 @@ function routeNeedsUid(path: string[]): boolean {
   if (head === "portfolio" || head === "trades" || head === "history" || head === "research-log" || head === "buy" || head === "sell" || head === "mode") {
     return true;
   }
-  if (head === "autobuy" || head === "settings" || head === "autosell") {
+  if (head === "autobuy" || head === "settings" || head === "autosell" || head === "trade-controls") {
     return true;
   }
   if (head === "scanner" && path[1] === "threshold") {
@@ -34,7 +34,7 @@ function routeNeedsUid(path: string[]): boolean {
 
 function rewritePathUid(path: string[], uid: string): string[] {
   if (!uid) return path;
-  if ((path[0] === "autobuy" || path[0] === "settings") && path[1]) {
+  if ((path[0] === "autobuy" || path[0] === "settings" || path[0] === "trade-controls") && path[1]) {
     return [path[0], uid, ...path.slice(2)];
   }
   return path;

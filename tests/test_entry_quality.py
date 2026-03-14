@@ -99,6 +99,48 @@ def test_apply_entry_quality_rules_block_chop_and_stale_entries():
     assert "outside first-20m auto-buy window" in rules["autobuy_only_reasons"]
 
 
+def test_build_entry_quality_prefers_snapshot_fields():
+    quality = scanner.build_entry_quality(
+        token={
+            "mint": "snapshot-quality",
+            "txns_m5_buys": 2,
+            "txns_m5_sells": 8,
+            "pair_created": 1,
+            "_source_name": "dex_search",
+            "_source_rank": 20,
+        },
+        rc={},
+        result={
+            "mint": "snapshot-quality",
+            "effective_score": 74,
+            "mcap": 180_000,
+            "liquidity": 8_000,
+            "txns_5m": 10,
+            "source_primary": "pumpfun_newest",
+            "source_rank": 100,
+            "age_mins": 6,
+            "buy_ratio_5m": 0.81,
+            "holder_concentration": 11.5,
+            "liquidity_delta_pct": -14.0,
+            "score_slope": -2.5,
+            "peak_score": 83,
+            "wallet_signal": 4,
+            "strategy_profile": "launch_snipe",
+        },
+        narrative="AI",
+    )
+
+    assert quality["source_name"] == "pumpfun_newest"
+    assert quality["source_rank"] == 100
+    assert quality["age_mins"] == 6
+    assert quality["buy_ratio_5m"] == 0.81
+    assert quality["holder_concentration_pct"] == 11.5
+    assert quality["liquidity_drop_pct"] == -14.0
+    assert quality["score_slope"] == -2.5
+    assert quality["score_peak"] == 83
+    assert quality["strategy_profile"] == "launch_snipe"
+
+
 def test_select_newest_alerts_skips_quality_blocked_tokens():
     scored_tokens = [
         {

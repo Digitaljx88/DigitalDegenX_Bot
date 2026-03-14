@@ -1,5 +1,14 @@
 import { IntelDashboard } from "@/components/intel-dashboard";
 
 export default function ClusterIntelPage() {
-  return <IntelDashboard title="Cluster Intelligence" subtitle="Top co-investing wallet pairs and recent cluster events." endpoint="/intel/clusters" collectionKey="top_pairs" />;
+  return (
+    <IntelDashboard
+      title="Cluster Intelligence"
+      subtitle="Top co-investing wallet pairs and recent cluster events."
+      endpoint="/intel/clusters"
+      collectionKey="top_pairs"
+      secondaryCollectionKey="recent_events"
+      secondaryTitle="Recent cluster events"
+    />
+  );
 }
