@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type SnapshotResponse = {
   mint: string;
@@ -11,6 +12,7 @@ type SnapshotResponse = {
   enrichment: Record<string, unknown>;
   trading_snapshot?: Record<string, unknown> | null;
   analysis?: Record<string, unknown> | null;
+  autobuy_preview?: Record<string, unknown> | null;
   events: Array<Record<string, unknown>>;
 };
 
@@ -41,6 +43,7 @@ function metricValue(value: unknown) {
 }
 
 export function TokenTimelineDashboard({ mint }: { mint: string }) {
+  const { uid } = useActiveUid();
   const [snapshot, setSnapshot] = useState<SnapshotResponse | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [error, setError] = useState("");
@@ -49,7 +52,7 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
     async function load() {
       try {
         const [snapshotData, timelineData] = await Promise.all([
-          apiFetch<SnapshotResponse>(`/token/${mint}/snapshot`),
+          apiFetch<SnapshotResponse>(`/token/${mint}/snapshot`, { query: { uid: uid || undefined } }),
           apiFetch<TimelineResponse>(`/token/${mint}/timeline`),
         ]);
         setSnapshot(snapshotData);
@@ -60,7 +63,7 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
       }
     }
     void load();
-  }, [mint]);
+  }, [mint, uid]);
 
   const highlights = useMemo(() => {
     if (!snapshot) return [];
@@ -243,6 +246,39 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
                     </div>
                   </div>
                 </div>
+
+                {snapshot.autobuy_preview ? (
+                  <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
+                    <div className="mb-3 text-sm font-semibold text-white">Auto-Buy Preview</div>
+                    <div className="grid gap-3 md:grid-cols-4">
+                      <div>
+                        <div className="text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">State</div>
+                        <div className="mt-2 text-sm font-semibold text-white">
+                          {Boolean(snapshot.autobuy_preview.eligible) ? "Would buy" : metricValue(snapshot.autobuy_preview.status || "blocked")}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">Confidence</div>
+                        <div className="mt-2 text-sm font-semibold text-white">{metricValue(snapshot.autobuy_preview.confidence ?? "n/a")}</div>
+                      </div>
+                      <div>
+                        <div className="text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">Size</div>
+                        <div className="mt-2 text-sm font-semibold text-white">{metricValue(snapshot.autobuy_preview.sol_amount ?? "n/a")} SOL</div>
+                      </div>
+                      <div>
+                        <div className="text-xs uppercase tracking-[0.16em] text-[var(--muted-foreground)]">Block category</div>
+                        <div className="mt-2 text-sm font-semibold text-white">
+                          {metricValue(snapshot.autobuy_preview.block_category || "eligible")}
+                        </div>
+                      </div>
+                    </div>
+                    {snapshot.autobuy_preview.block_reason ? (
+                      <div className="mt-4 rounded-2xl border border-red-400/20 bg-red-500/10 px-4 py-3 text-sm text-red-100">
+                        {metricValue(snapshot.autobuy_preview.block_reason)}
+                      </div>
+                    ) : null}
+                  </div>
+                ) : null}
 
                 <div className="grid gap-5 lg:grid-cols-2">
                   <div className="rounded-2xl border border-white/8 bg-black/10 p-4">

@@ -210,7 +210,7 @@ def gate_freshness(mint: str) -> tuple[bool, str, float, float]:
 
 # ── evaluate() ────────────────────────────────────────────────────────────────
 
-async def evaluate(uid: int, result: dict) -> BuyDecision:
+async def evaluate(uid: int, result: dict, *, skip_freshness: bool = False) -> BuyDecision:
     """
     Run all 8 gates and return a BuyDecision.
     Async because gate_freshness runs in a thread executor to avoid blocking
@@ -284,21 +284,24 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
             gate_passed=False, block_reason=reason, block_category=classify_block_reason(reason),
         )
 
-    # gate_freshness runs a blocking HTTP call — offload to thread
-    loop = asyncio.get_running_loop()
-    fresh_passed, fresh_reason, fresh_vol_m5, fresh_price_h1 = await loop.run_in_executor(
-        None, gate_freshness, mint
-    )
-    if not fresh_passed:
-        print(f"[AUTOBUY] uid={uid} BLOCKED {symbol}: {fresh_reason}", flush=True)
-        return BuyDecision(
-            uid=uid, mint=mint, symbol=symbol, name=name,
-            score=score, mcap=mcap, sol_amount=sol_amount,
-            confidence=sizing.confidence,
-            size_multiplier=sizing.size_multiplier,
-            strategy_profile=sizing.strategy_profile,
-            gate_passed=False, block_reason=fresh_reason, block_category=classify_block_reason(fresh_reason),
+    fresh_vol_m5 = 0.0
+    fresh_price_h1 = 0.0
+    if not skip_freshness:
+        # gate_freshness runs a blocking HTTP call — offload to thread
+        loop = asyncio.get_running_loop()
+        fresh_passed, fresh_reason, fresh_vol_m5, fresh_price_h1 = await loop.run_in_executor(
+            None, gate_freshness, mint
         )
+        if not fresh_passed:
+            print(f"[AUTOBUY] uid={uid} BLOCKED {symbol}: {fresh_reason}", flush=True)
+            return BuyDecision(
+                uid=uid, mint=mint, symbol=symbol, name=name,
+                score=score, mcap=mcap, sol_amount=sol_amount,
+                confidence=sizing.confidence,
+                size_multiplier=sizing.size_multiplier,
+                strategy_profile=sizing.strategy_profile,
+                gate_passed=False, block_reason=fresh_reason, block_category=classify_block_reason(fresh_reason),
+            )
 
     # All gates passed
     try:
@@ -321,7 +324,13 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
     )
 
 
-async def evaluate_lifecycle_snapshot(uid: int, snapshot, *, user_id: int | None = None) -> BuyDecision:
+async def evaluate_lifecycle_snapshot(
+    uid: int,
+    snapshot,
+    *,
+    user_id: int | None = None,
+    skip_freshness: bool = False,
+) -> BuyDecision:
     """
     Evaluate autobuy eligibility directly from a lifecycle snapshot by converting it
     into the same normalized scanner token/result shape used by the scanner.
@@ -365,7 +374,7 @@ async def evaluate_lifecycle_snapshot(uid: int, snapshot, *, user_id: int | None
     result["strategy_profile"] = quality_flags["strategy_profile"]
     result["strategy_exit_preset"] = quality_flags["strategy_exit_preset"]
     result["strategy_size_bias"] = quality_flags["strategy_size_bias"]
-    return await evaluate(uid, result)
+    return await evaluate(uid, result, skip_freshness=skip_freshness)
 
 
 # ── execute() ─────────────────────────────────────────────────────────────────

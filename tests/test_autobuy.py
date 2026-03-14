@@ -536,3 +536,53 @@ class TestEvaluate:
         assert decision.gate_passed is True
         assert decision.symbol == "LIFE"
         assert decision.mcap == 45_000
+
+    @pytest.mark.asyncio
+    async def test_evaluate_skip_freshness_avoids_http_recheck(self):
+        cfg = {
+            "enabled": True,
+            "min_score": 55,
+            "max_mcap": 500_000,
+            "sol_amount": 0.03,
+            "max_sol_amount": 0.09,
+            "min_confidence": 0.2,
+            "confidence_scale_enabled": True,
+            "daily_limit_sol": 1.0,
+            "max_positions": 5,
+            "max_narrative_exposure": 2,
+            "max_archetype_exposure": 0,
+            "buy_tier": "",
+        }
+        result = {
+            **self.RESULT,
+            "effective_score": 80,
+            "_source_name": "pumpfun_newest",
+            "_source_rank": 100,
+            "age_mins": 3,
+            "wallet_signal": 2,
+            "liquidity_to_mcap_ratio": 0.2,
+            "txns_per_10k_liq": 10,
+            "buy_ratio_5m": 0.75,
+            "score_slope": 3.0,
+            "score_drop_from_peak": 0,
+            "liquidity_drop_pct": 0,
+            "holder_concentration_delta": 0,
+            "narrative_cluster_count": 0,
+            "matched_narrative": "AI",
+            "archetype": "launch_snipe",
+            "archetype_conf": 80,
+        }
+        with (
+            patch("autobuy._db.reset_day_if_needed"),
+            patch("autobuy._db.get_auto_buy_config", return_value=cfg),
+            patch("autobuy._db.has_bought", return_value=False),
+            patch("autobuy._db.get_spent_today", return_value=0.0),
+            patch("autobuy._db.get_open_position_count", return_value=0),
+            patch("autobuy._db.get_open_position_exposure", return_value={"narrative": {}, "archetype": {}}),
+            patch("autobuy.requests.get", side_effect=AssertionError("freshness HTTP should be skipped")),
+            patch("autobuy.settings_manager", create=True) as mock_sm,
+        ):
+            mock_sm.get_user_settings.return_value = {}
+            decision = await evaluate(1, result, skip_freshness=True)
+
+        assert decision.gate_passed is True

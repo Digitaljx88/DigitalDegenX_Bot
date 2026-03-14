@@ -22,6 +22,15 @@ type ScannerFeedItem = {
   alerted?: number;
   dq?: string;
   ts?: number;
+  autobuy_preview?: {
+    eligible?: boolean;
+    status?: string;
+    block_reason?: string;
+    block_category?: string;
+    sol_amount?: number;
+    confidence?: number;
+    strategy_profile?: string;
+  };
 };
 
 type ScannerFeedResponse = {
@@ -65,7 +74,7 @@ export function ScannerDashboard() {
 
   const loadFeed = useEffectEvent(async () => {
     try {
-      const data = await apiFetch<ScannerFeedResponse>("/scanner/feed", { query: { limit: 40 } });
+      const data = await apiFetch<ScannerFeedResponse>("/scanner/feed", { query: { limit: 40, uid: uid || undefined } });
       setFeed(data.items || []);
       setLastUpdated(new Date().toLocaleTimeString());
       setError("");
@@ -78,7 +87,7 @@ export function ScannerDashboard() {
     loadFeed();
     const timer = window.setInterval(() => loadFeed(), 5000);
     return () => window.clearInterval(timer);
-  }, []);
+  }, [uid]);
 
   useEffect(() => {
     async function loadMode() {
@@ -159,6 +168,7 @@ export function ScannerDashboard() {
                 <th className="px-4 py-3">MCap</th>
                 <th className="px-4 py-3">Setup</th>
                 <th className="px-4 py-3">Status</th>
+                <th className="px-4 py-3">Auto-Buy</th>
                 <th className="px-4 py-3">Action</th>
               </tr>
             </thead>
@@ -191,6 +201,33 @@ export function ScannerDashboard() {
                     <span className={`rounded-full px-3 py-1 text-xs font-medium ${item.dq ? "bg-red-500/20 text-red-200" : item.alerted ? "bg-emerald-500/20 text-emerald-200" : "bg-amber-500/20 text-amber-100"}`}>
                       {item.dq ? "Disqualified" : item.alerted ? "Alerted" : "Tracked"}
                     </span>
+                  </td>
+                  <td className="px-4 py-3 text-xs">
+                    {item.autobuy_preview ? (
+                      <div className="space-y-1">
+                        <span
+                          className={`rounded-full px-3 py-1 font-medium ${
+                            item.autobuy_preview.eligible
+                              ? "bg-emerald-500/20 text-emerald-200"
+                              : "bg-amber-500/20 text-amber-100"
+                          }`}
+                        >
+                          {item.autobuy_preview.eligible ? "Would buy" : "Blocked"}
+                        </span>
+                        <div className="text-[var(--muted-foreground)]">
+                          {Number(item.autobuy_preview.confidence || item.confidence || 0).toFixed(2)} ·{" "}
+                          {Number(item.autobuy_preview.sol_amount || 0).toFixed(3)} SOL
+                        </div>
+                        {item.autobuy_preview.block_category ? (
+                          <div className="text-white/60">{item.autobuy_preview.block_category.replaceAll("_", " ")}</div>
+                        ) : null}
+                        {!item.autobuy_preview.eligible && item.autobuy_preview.block_reason ? (
+                          <div className="max-w-xs text-red-100">{item.autobuy_preview.block_reason}</div>
+                        ) : null}
+                      </div>
+                    ) : (
+                      <span className="text-[var(--muted-foreground)]">Set UID to preview</span>
+                    )}
                   </td>
                   <td className="px-4 py-3">
                     <div className="flex items-center gap-2">

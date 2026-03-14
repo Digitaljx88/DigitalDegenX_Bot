@@ -594,8 +594,10 @@ async def get_history(uid: int, limit: int = 50, mode: Optional[str] = None):
 
 
 @app.get("/scanner/feed", dependencies=[Depends(verify_key)])
-async def scanner_feed(limit: int = 50):
+async def scanner_feed(limit: int = 50, uid: int | None = None):
     """Return the rolling scanner feed, newest first."""
+    import autobuy as autobuy_mod
+
     items: list[dict] = []
     seen_mints: set[str] = set()
     has_lifecycle = False
@@ -608,7 +610,7 @@ async def scanner_feed(limit: int = 50):
         if mint in seen_mints:
             continue
         has_lifecycle = True
-        items.append({
+        row = {
             "id": None,
             "date": None,
             "ts": snapshot.lifecycle.last_trade_ts or snapshot.lifecycle.launch_ts or snapshot.lifecycle.last_updated_ts,
@@ -627,7 +629,30 @@ async def scanner_feed(limit: int = 50):
             "confidence": float(token.get("snapshot_confidence") or 0),
             "age_mins": float(token.get("age_mins") or 0),
             "buy_ratio_5m": float(token.get("buy_ratio_5m") or 0),
-        })
+        }
+        if uid:
+            try:
+                preview = await autobuy_mod.evaluate_lifecycle_snapshot(uid, snapshot, skip_freshness=True)
+                row["autobuy_preview"] = {
+                    "eligible": bool(preview.gate_passed),
+                    "status": "eligible" if preview.gate_passed else "blocked",
+                    "block_reason": preview.block_reason,
+                    "block_category": preview.block_category,
+                    "sol_amount": float(preview.sol_amount or 0),
+                    "confidence": float(preview.confidence or 0),
+                    "strategy_profile": preview.strategy_profile or row.get("strategy_profile"),
+                }
+            except Exception as exc:
+                row["autobuy_preview"] = {
+                    "eligible": False,
+                    "status": "error",
+                    "block_reason": str(exc),
+                    "block_category": "preview_error",
+                    "sol_amount": 0.0,
+                    "confidence": float(row.get("confidence") or 0),
+                    "strategy_profile": row.get("strategy_profile"),
+                }
+        items.append(row)
         seen_mints.add(mint)
         if len(items) >= limit:
             return {"count": len(items), "items": items, "source": "lifecycle+scanner_log"}
@@ -649,8 +674,10 @@ async def scanner_feed(limit: int = 50):
 
 
 @app.get("/token/{mint}/snapshot", dependencies=[Depends(verify_key)])
-async def token_snapshot(mint: str):
+async def token_snapshot(mint: str, uid: int | None = None):
     """Return the normalized lifecycle snapshot for a token."""
+    import autobuy as autobuy_mod
+
     snapshot = lifecycle_store.get_token_snapshot(mint)
     if not snapshot:
         raise HTTPException(status_code=404, detail="Lifecycle snapshot not found")
@@ -658,6 +685,7 @@ async def token_snapshot(mint: str):
     trading_snapshot = build_trading_snapshot(snapshot, max_age_hours=None)
     payload["trading_snapshot"] = trading_snapshot
     payload["analysis"] = None
+    payload["autobuy_preview"] = None
 
     if trading_snapshot:
         try:
@@ -693,6 +721,31 @@ async def token_snapshot(mint: str):
             }
         except Exception as exc:
             payload["analysis"] = {"error": str(exc)}
+
+    if uid:
+        try:
+            preview = await autobuy_mod.evaluate_lifecycle_snapshot(uid, snapshot, skip_freshness=True)
+            payload["autobuy_preview"] = {
+                "eligible": bool(preview.gate_passed),
+                "status": "eligible" if preview.gate_passed else "blocked",
+                "block_reason": preview.block_reason,
+                "block_category": preview.block_category,
+                "sol_amount": float(preview.sol_amount or 0),
+                "confidence": float(preview.confidence or 0),
+                "strategy_profile": preview.strategy_profile or "",
+                "mode": preview.mode,
+            }
+        except Exception as exc:
+            payload["autobuy_preview"] = {
+                "eligible": False,
+                "status": "error",
+                "block_reason": str(exc),
+                "block_category": "preview_error",
+                "sol_amount": 0.0,
+                "confidence": 0.0,
+                "strategy_profile": "",
+                "mode": "",
+            }
     return payload
 
 
@@ -1064,10 +1117,12 @@ async def get_autobuy_activity(uid: int, limit: int = 20):
     """Return recent auto-buy decisions for dashboard observability."""
     rows = db.get_auto_buy_activity(uid, limit=limit)
     latest = rows[0] if rows else None
+    summary = db.get_auto_buy_activity_summary(uid, window_hours=24)
     return {
         "uid": uid,
         "count": len(rows),
         "latest": latest,
+        "summary": summary,
         "items": rows,
     }
 
