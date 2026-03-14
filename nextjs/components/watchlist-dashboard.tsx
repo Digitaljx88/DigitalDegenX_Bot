@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Panel } from "@/components/panel";
 import { TokenOperatorPanel } from "@/components/token-operator-panel";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type WatchToken = {
   mint: string;
@@ -35,13 +36,17 @@ function formatMcap(value?: number) {
 }
 
 export function WatchlistDashboard() {
+  const { uid, loading } = useActiveUid();
   const [items, setItems] = useState<WatchToken[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!uid) return;
     async function load() {
       try {
-        const response = await apiFetch<WatchlistResponse>("/scanner/watchlist");
+        const response = await apiFetch<WatchlistResponse>("/scanner/watchlist", {
+          query: { uid: uid || undefined },
+        });
         setItems(response.tokens || []);
         setError("");
       } catch (err) {
@@ -49,7 +54,25 @@ export function WatchlistDashboard() {
       }
     }
     void load();
-  }, []);
+  }, [uid]);
+
+  if (loading) {
+    return (
+      <Panel title="Watchlist" subtitle="Loading the active session watchlist view.">
+        <div className="text-sm text-[var(--muted-foreground)]">Checking the bound Telegram UID for this dashboard session...</div>
+      </Panel>
+    );
+  }
+
+  if (!uid) {
+    return (
+      <Panel title="Watchlist" subtitle="Set your Telegram UID to load the active session watchlist view.">
+        <div className="text-sm text-[var(--muted-foreground)]">
+          Add your Telegram UID in the top bar, then this page will load the watchlist with your session-bound analysis context.
+        </div>
+      </Panel>
+    );
+  }
 
   return (
     <Panel title="Watchlist" subtitle="Scouted tokens that are worth watching but not strong enough for full alerts yet.">

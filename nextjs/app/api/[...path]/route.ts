@@ -23,7 +23,10 @@ function routeNeedsUid(path: string[]): boolean {
   if (head === "autobuy" || head === "settings" || head === "autosell" || head === "trade-controls") {
     return true;
   }
-  if (head === "scanner" && path[1] === "threshold") {
+  if (head === "scanner" && ["feed", "threshold", "top", "watchlist"].includes(path[1] || "")) {
+    return true;
+  }
+  if (head === "token" && path[2] === "snapshot") {
     return true;
   }
   if (head === "message") {

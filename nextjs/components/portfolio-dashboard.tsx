@@ -227,7 +227,7 @@ export function PortfolioDashboard() {
     loadPortfolio();
   }, [uid]);
 
-  async function quickSell(mint: string, pct: number) {
+  async function quickSell(mint: string, pct: number, sellMode: "paper" | "live" = "paper") {
     const activeUid = uid;
     if (!activeUid) {
       setError("Set a Telegram UID before selling.");
@@ -237,7 +237,7 @@ export function PortfolioDashboard() {
     try {
       await apiFetch("/sell", {
         method: "POST",
-        body: JSON.stringify({ uid: activeUid, mint, pct, mode: "paper" }),
+        body: JSON.stringify({ uid: activeUid, mint, pct, mode: sellMode }),
       });
       const [portfolioRes, walletRes, modeRes] = await Promise.all([
         fetchPortfolioFor(activeUid),
@@ -249,7 +249,7 @@ export function PortfolioDashboard() {
       setWallet(walletRes);
       setMode(modeRes.mode || "paper");
       setError("");
-      setMessage(`Sold ${pct}% of ${mint.slice(0, 8)} from paper portfolio.`);
+      setMessage(`Sold ${pct}% of ${mint.slice(0, 8)} from ${sellMode === "live" ? "live wallet" : "paper portfolio"}.`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Sell failed");
     } finally {
@@ -303,7 +303,9 @@ export function PortfolioDashboard() {
     if (!positionSnapshots[mint]) {
       setLoadingSnapshotMint(mint);
       tasks.push(
-        apiFetch<PositionSnapshotResponse>(`/token/${mint}/snapshot`)
+        apiFetch<PositionSnapshotResponse>(`/token/${mint}/snapshot`, {
+          query: { uid: uid || undefined },
+        })
           .then((response) => {
             setPositionSnapshots((current) => ({ ...current, [mint]: response }));
           })
@@ -408,6 +410,9 @@ export function PortfolioDashboard() {
         <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-[var(--muted-foreground)]">
           Current mode: <span className="font-medium text-white">{mode === "paper" ? "Paper Portfolio" : "Live Wallet"}</span>
         </div>
+        <div className="mb-4 rounded-2xl border border-white/10 bg-black/10 px-4 py-3 text-sm text-[var(--muted-foreground)]">
+          Paper position controls below always act on the paper portfolio. Live wallet holdings are shown separately so paper and live state stay visible at the same time.
+        </div>
         <div className="mb-4 flex flex-wrap gap-3">
           <button
             type="button"
@@ -472,11 +477,11 @@ export function PortfolioDashboard() {
                       <button
                         key={pct}
                         type="button"
-                        onClick={() => quickSell(position.mint, pct)}
+                        onClick={() => quickSell(position.mint, pct, "paper")}
                         disabled={sellingMint === `${position.mint}:${pct}`}
                         className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-[var(--muted-foreground)] disabled:opacity-50"
                       >
-                        {sellingMint === `${position.mint}:${pct}` ? "..." : `Sell ${pct}%`}
+                        {sellingMint === `${position.mint}:${pct}` ? "..." : `Paper sell ${pct}%`}
                       </button>
                     ))}
                     <button

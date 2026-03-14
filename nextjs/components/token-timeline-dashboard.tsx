@@ -43,12 +43,13 @@ function metricValue(value: unknown) {
 }
 
 export function TokenTimelineDashboard({ mint }: { mint: string }) {
-  const { uid } = useActiveUid();
+  const { uid, loading } = useActiveUid();
   const [snapshot, setSnapshot] = useState<SnapshotResponse | null>(null);
   const [timeline, setTimeline] = useState<TimelineEvent[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (loading || !uid) return;
     async function load() {
       try {
         const [snapshotData, timelineData] = await Promise.all([
@@ -63,7 +64,7 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
       }
     }
     void load();
-  }, [mint, uid]);
+  }, [loading, mint, uid]);
 
   const highlights = useMemo(() => {
     if (!snapshot) return [];
@@ -169,9 +170,14 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
   return (
     <div className="space-y-6">
       <Panel title="Token Snapshot" subtitle={`Lifecycle state for ${mint}`}>
-        {error ? <div className="rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
-        {!snapshot && !error ? <div className="text-sm text-[var(--muted-foreground)]">Loading token snapshot...</div> : null}
-        {snapshot ? (
+        {!loading && !uid ? (
+          <div className="rounded-2xl border border-white/10 bg-black/10 px-4 py-3 text-sm text-[var(--muted-foreground)]">
+            Set your Telegram UID in the top bar to load the session-bound token analysis view.
+          </div>
+        ) : null}
+        {uid && error ? <div className="rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
+        {loading ? <div className="text-sm text-[var(--muted-foreground)]">Checking dashboard UID...</div> : !uid ? null : !snapshot && !error ? <div className="text-sm text-[var(--muted-foreground)]">Loading token snapshot...</div> : null}
+        {uid && snapshot ? (
           <div className="space-y-5">
             <div className="grid gap-3 md:grid-cols-3">
               {highlights.map((item) => (
@@ -210,7 +216,7 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
       </Panel>
 
       <Panel title="Operator Analysis" subtitle="Lifecycle-backed scoring and quality gating, intended to replace token analysis in Telegram.">
-        {snapshot?.analysis ? (
+        {uid && snapshot?.analysis ? (
           <div className="space-y-5">
             {"error" in snapshot.analysis ? (
               <div className="rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">
@@ -339,13 +345,15 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
               </>
             )}
           </div>
-        ) : (
+        ) : uid ? (
           <div className="text-sm text-[var(--muted-foreground)]">No lifecycle-backed analysis available yet for this token.</div>
-        )}
+        ) : null}
       </Panel>
 
       <Panel title="Score Transitions" subtitle="Score, confidence, and strategy changes recorded for this token over time.">
-        {scoreEvents.length ? (
+        {!uid ? (
+          <div className="text-sm text-[var(--muted-foreground)]">Set your Telegram UID to load session-bound score transitions.</div>
+        ) : scoreEvents.length ? (
           <div className="space-y-5">
             <div className="grid gap-3 md:grid-cols-4">
               <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
@@ -429,7 +437,9 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
       </Panel>
 
       <Panel title="Lifecycle Timeline" subtitle="Launch, trade flow, migration, and scoring events for this mint.">
-        <div className="space-y-3">
+        {!uid ? (
+          <div className="text-sm text-[var(--muted-foreground)]">Set your Telegram UID to load the session-bound lifecycle view.</div>
+        ) : <div className="space-y-3">
           {timeline.length ? timeline.map((event, index) => (
             <div key={`${event.id || event.ts || index}-${event.event_type || index}`} className="rounded-2xl border border-white/8 bg-black/10 p-4">
               <div className="flex flex-col gap-1 md:flex-row md:items-center md:justify-between">
@@ -441,7 +451,7 @@ export function TokenTimelineDashboard({ mint }: { mint: string }) {
               </pre>
             </div>
           )) : <div className="text-sm text-[var(--muted-foreground)]">No timeline events recorded yet for this mint.</div>}
-        </div>
+        </div>}
       </Panel>
     </div>
   );

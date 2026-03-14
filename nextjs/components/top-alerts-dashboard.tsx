@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Panel } from "@/components/panel";
 import { TokenOperatorPanel } from "@/components/token-operator-panel";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type AlertItem = {
   mint: string;
@@ -35,13 +36,17 @@ function formatMcap(value?: number) {
 }
 
 export function TopAlertsDashboard() {
+  const { uid, loading } = useActiveUid();
   const [items, setItems] = useState<AlertItem[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
+    if (!uid) return;
     async function load() {
       try {
-        const response = await apiFetch<TopAlertsResponse>("/scanner/top", { query: { limit: 20 } });
+        const response = await apiFetch<TopAlertsResponse>("/scanner/top", {
+          query: { limit: 20, uid: uid || undefined },
+        });
         setItems(response.alerts || []);
         setError("");
       } catch (err) {
@@ -49,7 +54,25 @@ export function TopAlertsDashboard() {
       }
     }
     void load();
-  }, []);
+  }, [uid]);
+
+  if (loading) {
+    return (
+      <Panel title="Top Alerts" subtitle="Loading the active session alert view.">
+        <div className="text-sm text-[var(--muted-foreground)]">Checking the bound Telegram UID for this dashboard session...</div>
+      </Panel>
+    );
+  }
+
+  if (!uid) {
+    return (
+      <Panel title="Top Alerts" subtitle="Set your Telegram UID to load the active session alert view.">
+        <div className="text-sm text-[var(--muted-foreground)]">
+          Add your Telegram UID in the top bar, then this page will load today&apos;s top alerts with your session-bound analysis context.
+        </div>
+      </Panel>
+    );
+  }
 
   return (
     <Panel title="Top Alerts" subtitle="Best-scoring scanner alerts from today, ranked by current scanner score.">

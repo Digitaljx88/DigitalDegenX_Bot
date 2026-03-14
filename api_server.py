@@ -238,13 +238,48 @@ def _lifecycle_brief(mint: str) -> dict:
     }
 
 
-def _enrich_token_rows(rows: list[dict]) -> list[dict]:
+async def _enrich_token_rows(rows: list[dict], uid: int | None = None) -> list[dict]:
+    autobuy_mod = None
+    if uid:
+        import autobuy as autobuy_mod
+
     enriched: list[dict] = []
     for row in rows:
         item = dict(row)
         mint = str(item.get("mint") or "").strip()
+        snapshot = lifecycle_store.get_token_snapshot(mint) if mint else None
         if mint:
             item.update(_lifecycle_brief(mint))
+        if mint and not _safe_float(item.get("mcap")):
+            trading_snapshot = build_trading_snapshot(snapshot, max_age_hours=None) if snapshot else None
+            if trading_snapshot and _safe_float(trading_snapshot.get("mcap")):
+                item["mcap"] = _safe_float(trading_snapshot.get("mcap"))
+            else:
+                latest_scan_row = _db.get_latest_scan_log_for_mint(mint)
+                if latest_scan_row and latest_scan_row.get("mcap"):
+                    item["mcap"] = _safe_float(latest_scan_row.get("mcap"))
+        if uid and mint and snapshot and autobuy_mod:
+            try:
+                preview = await autobuy_mod.evaluate_lifecycle_snapshot(uid, snapshot, skip_freshness=True)
+                item["autobuy_preview"] = {
+                    "eligible": bool(preview.gate_passed),
+                    "status": "eligible" if preview.gate_passed else "blocked",
+                    "block_reason": preview.block_reason,
+                    "block_category": preview.block_category,
+                    "sol_amount": float(preview.sol_amount or 0),
+                    "confidence": float(preview.confidence or 0),
+                    "strategy_profile": preview.strategy_profile or item.get("strategy_profile"),
+                }
+            except Exception as exc:
+                item["autobuy_preview"] = {
+                    "eligible": False,
+                    "status": "error",
+                    "block_reason": str(exc),
+                    "block_category": "preview_error",
+                    "sol_amount": 0.0,
+                    "confidence": float(item.get("confidence") or 0),
+                    "strategy_profile": item.get("strategy_profile"),
+                }
         enriched.append(item)
     return enriched
 
@@ -554,21 +589,21 @@ async def get_wallet():
 
 
 @app.get("/scanner/top", dependencies=[Depends(verify_key)])
-async def scanner_top(limit: int = 10):
-    """Return top scanner alerts from today, sorted by score."""
+async def scanner_top(limit: int = 10, uid: int | None = None):
+    """Return top scanner alerts from today, sorted by score and enriched for the active UID."""
     sc      = _sc()
     alerts  = sc.get_todays_alerts() or []
     alerts  = sorted(alerts, key=lambda x: -x.get("score", 0))[:limit]
-    return {"count": len(alerts), "alerts": _enrich_token_rows(alerts)}
+    return {"count": len(alerts), "alerts": await _enrich_token_rows(alerts, uid=uid)}
 
 
 @app.get("/scanner/watchlist", dependencies=[Depends(verify_key)])
-async def scanner_watchlist():
-    """Return all tokens currently on the watchlist."""
+async def scanner_watchlist(uid: int | None = None):
+    """Return all tokens currently on the watchlist, enriched for the active UID."""
     sc = _sc()
     wl = sc.get_watchlist() or {}
     items = sorted(wl.values(), key=lambda x: -x.get("score", 0))
-    return {"count": len(items), "tokens": _enrich_token_rows(items)}
+    return {"count": len(items), "tokens": await _enrich_token_rows(items, uid=uid)}
 
 
 @app.get("/research-log", dependencies=[Depends(verify_key)])

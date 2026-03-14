@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api";
+import { useActiveUid } from "@/lib/active-uid";
 
 type SnapshotResponse = {
   mint: string;
@@ -75,6 +76,7 @@ export function TokenOperatorPanel({
   mint: string;
   label?: string;
 }) {
+  const { uid } = useActiveUid();
   const [open, setOpen] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -83,11 +85,15 @@ export function TokenOperatorPanel({
 
   useEffect(() => {
     if (!open || snapshot) return;
+    if (!uid) {
+      setError("Set your Telegram UID to load token analysis.");
+      return;
+    }
     async function load() {
       try {
         setLoading(true);
         const [snapshotData, timelineData] = await Promise.all([
-          apiFetch<SnapshotResponse>(`/token/${mint}/snapshot`),
+          apiFetch<SnapshotResponse>(`/token/${mint}/snapshot`, { query: { uid: uid || undefined } }),
           apiFetch<TimelineResponse>(`/token/${mint}/timeline`),
         ]);
         setSnapshot(snapshotData);
@@ -100,7 +106,7 @@ export function TokenOperatorPanel({
       }
     }
     void load();
-  }, [mint, open, snapshot]);
+  }, [mint, open, snapshot, uid]);
 
   const qualitySummary = useMemo(() => {
     const analysis = snapshot?.analysis || {};
