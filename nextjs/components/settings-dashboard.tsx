@@ -116,6 +116,20 @@ export function SettingsDashboard() {
     }
   }
 
+  async function resetPaperWallet() {
+    if (!uid) return;
+    try {
+      await apiFetch(`/portfolio/reset`, {
+        method: "POST",
+        body: JSON.stringify({ uid }),
+      });
+      setMessage("Paper wallet reset to the starting balance.");
+      setError("");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reset paper wallet");
+    }
+  }
+
   async function saveAutobuy(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     try {
@@ -207,6 +221,16 @@ export function SettingsDashboard() {
             >
               Use Live
             </button>
+            <button
+              type="button"
+              onClick={resetPaperWallet}
+              className="rounded-full border border-red-400/20 bg-red-500/10 px-4 py-2 text-sm text-red-100"
+            >
+              Reset Paper Wallet
+            </button>
+          </div>
+          <div className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+            Enabled auto-buy users now participate in scanner-driven automation even if the old Telegram scout toggle is paused.
           </div>
         </div>
       </Panel>

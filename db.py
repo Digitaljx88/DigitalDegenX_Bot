@@ -753,6 +753,11 @@ def get_auto_buy_config(uid: int) -> dict:
     return d
 
 
+def get_enabled_auto_buy_uids() -> list[int]:
+    rows = _fetchall("SELECT uid FROM auto_buy_config WHERE enabled=1")
+    return [int(row["uid"]) for row in rows]
+
+
 def set_auto_buy_config(uid: int, **fields):
     """Upsert individual fields of the auto-buy config."""
     # Ensure row exists first

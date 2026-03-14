@@ -572,6 +572,14 @@ def set_auto_buy(uid: int, cfg: dict):
         min_txns_5m=cfg.get("min_txns_5m", 0),
     )
 
+
+def get_scanner_dispatch_uids() -> list[int]:
+    """Union alert subscribers with dashboard-first auto-buy users."""
+    uids = set(_db.get_scan_targets())
+    uids.update(_db.get_enabled_auto_buy_uids())
+    return sorted(uids)
+
+
 def _ab_reset_day_if_needed(cfg: dict) -> dict:
     """Reset daily spend counter if date has changed. Updates DB and returns refreshed cfg."""
     _db.reset_day_if_needed(cfg.get("uid", 0) if isinstance(cfg, dict) else 0)
@@ -13667,7 +13675,7 @@ if __name__ == "__main__":
 
     async def safe_run_scanner(ctx):
         try:
-            chat_ids = _db.get_scan_targets()
+            chat_ids = get_scanner_dispatch_uids()
             await sc.run_scan(ctx.bot, chat_ids, on_alert=handle_scanner_autobuy)
         except Exception as e:
             print(f"[SCANNER] Critical error: {e}")
@@ -13677,7 +13685,7 @@ if __name__ == "__main__":
     app.job_queue.run_repeating(safe_check_portfolio_alerts,     interval=ALERT_CHECK_SECS, first=45)
 
     async def run_scanner_job(ctx):
-        chat_ids = _db.get_scan_targets()
+        chat_ids = get_scanner_dispatch_uids()
         await sc.run_scan(ctx.bot, chat_ids, on_alert=handle_scanner_autobuy)
 
     app.job_queue.run_repeating(safe_run_scanner, interval=15, first=5)

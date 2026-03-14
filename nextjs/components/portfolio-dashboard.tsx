@@ -257,6 +257,32 @@ export function PortfolioDashboard() {
     }
   }
 
+  async function resetPaperWallet() {
+    const activeUid = uid;
+    if (!activeUid) {
+      setError("Set a Telegram UID before resetting the paper wallet.");
+      return;
+    }
+    try {
+      const [portfolioRes, walletRes, modeRes] = await Promise.all([
+        apiFetch<PortfolioResponse>("/portfolio/reset", {
+          method: "POST",
+          body: JSON.stringify({ uid: activeUid }),
+        }),
+        apiFetch<WalletResponse>("/wallet"),
+        apiFetch<ModeResponse>("/mode", { query: { uid: activeUid } }),
+      ]);
+      setPortfolio(portfolioRes.portfolio || {});
+      setPaperView(portfolioRes.paper || null);
+      setWallet(walletRes);
+      setMode(modeRes.mode || "paper");
+      setError("");
+      setMessage("Paper wallet reset to the starting balance.");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to reset paper wallet");
+    }
+  }
+
   async function openAutoSellEditor(mint: string) {
     if (expandedMint === mint) {
       setExpandedMint(null);
@@ -381,6 +407,15 @@ export function PortfolioDashboard() {
         ) : null}
         <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-[var(--muted-foreground)]">
           Current mode: <span className="font-medium text-white">{mode === "paper" ? "Paper Portfolio" : "Live Wallet"}</span>
+        </div>
+        <div className="mb-4 flex flex-wrap gap-3">
+          <button
+            type="button"
+            onClick={resetPaperWallet}
+            className="rounded-full border border-red-400/20 bg-red-500/10 px-4 py-2 text-sm text-red-100"
+          >
+            Reset Paper Wallet
+          </button>
         </div>
         {paperView ? (
           <div className="mb-4 grid gap-3 md:grid-cols-3">

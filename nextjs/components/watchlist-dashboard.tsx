@@ -3,6 +3,7 @@
 import Link from "next/link";
 import { useEffect, useState } from "react";
 import { Panel } from "@/components/panel";
+import { TokenOperatorPanel } from "@/components/token-operator-panel";
 import { apiFetch } from "@/lib/api";
 
 type WatchToken = {
@@ -82,7 +83,8 @@ export function WatchlistDashboard() {
               <div>Age: {Number(item.age_mins || 0).toFixed(1)}m</div>
               <div>Buy ratio: {Number(item.buy_ratio_5m || 0).toFixed(2)}</div>
             </div>
-            <div className="mt-4 flex justify-end">
+            <div className="mt-4 flex justify-end gap-2">
+              <TokenOperatorPanel mint={item.mint} label="Inspect" />
               <Link
                 href={`/token/${item.mint}`}
                 className="rounded-full border border-white/10 px-4 py-2 text-xs text-[var(--muted-foreground)] transition hover:border-white/20 hover:text-white"

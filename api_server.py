@@ -118,6 +118,9 @@ class SellRequest(BaseModel):
     pct: int = 100              # % of position to sell (1–100)
     mode: Optional[str] = None
 
+class PortfolioResetRequest(BaseModel):
+    uid: int
+
 class AlertRequest(BaseModel):
     uid: int
     mint: str
@@ -501,6 +504,16 @@ async def get_portfolio(uid: int):
             "error": str(exc),
         }
     return {"uid": uid, "portfolio": portfolio, "paper": paper_view}
+
+
+@app.post("/portfolio/reset", dependencies=[Depends(verify_key)])
+async def reset_paper_portfolio(req: PortfolioResetRequest):
+    """Reset the user's paper wallet and clear paper position tracking."""
+    b = _bot()
+    b.reset_portfolio(req.uid)
+    portfolio = b.get_portfolio(req.uid)
+    paper_view = await _build_paper_portfolio_view(req.uid)
+    return {"uid": req.uid, "portfolio": portfolio, "paper": paper_view}
 
 
 @app.get("/mode", dependencies=[Depends(verify_key)])
@@ -1054,7 +1067,7 @@ async def update_autobuy(uid: int, update: AutoBuyUpdate):
     for field, value in update.model_dump(exclude_none=True).items():
         cfg[field] = value
     b.set_auto_buy(uid, cfg)
-    return {"uid": uid, "autobuy": b.get_auto_buy(uid)}
+    return b.get_auto_buy(uid)
 
 
 @app.get("/settings/{uid}", dependencies=[Depends(verify_key)])
