@@ -66,12 +66,42 @@ type TradeControls = {
   };
 };
 
+type AutoBuyActivityRow = {
+  id: number;
+  ts: number;
+  mint?: string;
+  symbol?: string;
+  name?: string;
+  score?: number;
+  effective_score?: number;
+  mcap?: number;
+  strategy_profile?: string;
+  confidence?: number;
+  sol_amount?: number;
+  size_multiplier?: number;
+  mode?: string;
+  status: "executed" | "blocked" | "failed";
+  block_reason?: string;
+  block_category?: string;
+  source?: string;
+  narrative?: string;
+  archetype?: string;
+};
+
+type AutoBuyActivityResponse = {
+  uid: number;
+  count: number;
+  latest: AutoBuyActivityRow | null;
+  items: AutoBuyActivityRow[];
+};
+
 export function SettingsDashboard() {
   const { uid } = useActiveUid();
   const [autobuy, setAutobuy] = useState<AutoBuyConfig>({});
   const [settings, setSettings] = useState<Record<string, number | string | boolean>>({});
   const [mode, setMode] = useState<"paper" | "live">("paper");
   const [tradeControls, setTradeControls] = useState<TradeControls | null>(null);
+  const [autobuyActivity, setAutobuyActivity] = useState<AutoBuyActivityResponse | null>(null);
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
 
@@ -101,6 +131,24 @@ export function SettingsDashboard() {
     }
     load();
   }, [uid]);
+
+  useEffect(() => {
+    async function loadActivity() {
+      if (!uid) {
+        setAutobuyActivity(null);
+        return;
+      }
+      try {
+        const response = await apiFetch<AutoBuyActivityResponse>(`/autobuy/activity/${uid}`, {
+          query: { limit: 8 },
+        });
+        setAutobuyActivity(response);
+      } catch {
+        setAutobuyActivity(null);
+      }
+    }
+    loadActivity();
+  }, [uid, autobuy, mode]);
 
   async function saveMode(nextMode: "paper" | "live") {
     try {
@@ -328,6 +376,65 @@ export function SettingsDashboard() {
             Save Auto-Buy
           </button>
         </form>
+        <div className="mt-5 space-y-3 rounded-3xl border border-white/10 bg-black/20 p-4">
+          <div>
+            <div className="text-sm font-medium text-white">Recent Auto-Buy Activity</div>
+            <div className="text-xs text-[var(--muted-foreground)]">
+              See the latest decision, confidence, final size, and why attempts were blocked.
+            </div>
+          </div>
+          {autobuyActivity?.latest ? (
+            <div className="rounded-2xl border border-white/10 bg-black/25 p-4 text-sm">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="font-medium text-white">
+                  {autobuyActivity.latest.symbol || autobuyActivity.latest.name || "Unknown token"}
+                </span>
+                <span className="rounded-full border border-white/10 px-2 py-1 text-xs uppercase tracking-wide text-[var(--muted-foreground)]">
+                  {autobuyActivity.latest.status}
+                </span>
+                {autobuyActivity.latest.block_category ? (
+                  <span className="rounded-full border border-amber-400/20 bg-amber-500/10 px-2 py-1 text-xs text-amber-100">
+                    {autobuyActivity.latest.block_category.replaceAll("_", " ")}
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-2 grid gap-2 text-xs text-[var(--muted-foreground)] md:grid-cols-2">
+                <div>Confidence: <span className="text-white">{Number(autobuyActivity.latest.confidence || 0).toFixed(2)}</span></div>
+                <div>Final size: <span className="text-white">{Number(autobuyActivity.latest.sol_amount || 0).toFixed(3)} SOL</span></div>
+                <div>Score: <span className="text-white">{autobuyActivity.latest.effective_score ?? autobuyActivity.latest.score ?? 0}</span></div>
+                <div>Strategy: <span className="text-white">{autobuyActivity.latest.strategy_profile || "n/a"}</span></div>
+              </div>
+              {autobuyActivity.latest.block_reason ? (
+                <div className="mt-3 rounded-2xl border border-red-400/20 bg-red-500/10 px-3 py-2 text-xs text-red-100">
+                  {autobuyActivity.latest.block_reason}
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-sm text-[var(--muted-foreground)]">
+              No recent auto-buy decisions yet.
+            </div>
+          )}
+          {autobuyActivity?.items?.length ? (
+            <div className="grid gap-2">
+              {autobuyActivity.items.map((item) => (
+                <div key={item.id} className="rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="font-medium text-white">{item.symbol || item.name || item.mint || "Unknown token"}</div>
+                    <div>{new Date((item.ts || 0) * 1000).toLocaleString()}</div>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-3">
+                    <span>Status: <span className="text-white">{item.status}</span></span>
+                    <span>Confidence: <span className="text-white">{Number(item.confidence || 0).toFixed(2)}</span></span>
+                    <span>Size: <span className="text-white">{Number(item.sol_amount || 0).toFixed(3)} SOL</span></span>
+                    <span>Reason: <span className="text-white">{item.block_category || "executed"}</span></span>
+                  </div>
+                  {item.block_reason ? <div className="mt-1 text-red-100">{item.block_reason}</div> : null}
+                </div>
+              ))}
+            </div>
+          ) : null}
+        </div>
       </Panel>
 
       <Panel title="Heat Thresholds" subtitle="Adjust the four alert tiers used across scanner and scout alerts.">

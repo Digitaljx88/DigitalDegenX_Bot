@@ -2787,6 +2787,41 @@ async def handle_scanner_autobuy(bot, result: dict, target_uids: list[int] | Non
     """Called by run_scan when a token hits the alert threshold."""
     import traceback
     import autobuy as _ab
+
+    def _record_decision(uid: int, decision, *, status: str, block_reason: str = "", block_category: str = ""):
+        _db.record_auto_buy_activity(
+            uid,
+            mint=str(result.get("mint") or decision.mint or ""),
+            symbol=str(result.get("symbol") or decision.symbol or ""),
+            name=str(result.get("name") or decision.name or ""),
+            score=int(result.get("total") or decision.score or 0),
+            effective_score=int(result.get("effective_score") or result.get("total") or decision.score or 0),
+            mcap=float(result.get("mcap") or decision.mcap or 0),
+            strategy_profile=str(
+                result.get("strategy_profile")
+                or result.get("entry_quality_strategy_profile")
+                or decision.strategy_profile
+                or ""
+            ),
+            confidence=float(decision.confidence or result.get("snapshot_confidence") or 0),
+            sol_amount=float(decision.sol_amount or 0),
+            size_multiplier=float(decision.size_multiplier or 1.0),
+            mode=str(decision.mode or get_mode(uid) or "paper"),
+            status=status,
+            block_reason=block_reason,
+            block_category=block_category,
+            source=str(
+                result.get("entry_quality_primary_source")
+                or result.get("source_primary")
+                or result.get("source")
+                or ""
+            ),
+            narrative=str(result.get("matched_narrative") or result.get("narrative") or ""),
+            archetype=str(result.get("archetype") or result.get("entry_archetype") or ""),
+            fresh_vol_m5=float(decision.fresh_vol_m5 or 0),
+            fresh_price_h1=float(decision.fresh_price_h1 or 0),
+        )
+
     chat_ids = target_uids if target_uids is not None else _db.get_scan_targets()
     sym = result.get("symbol", "?")
     print(f"[AUTOBUY] scanner alert fired for {sym} — targets={chat_ids}", flush=True)
@@ -2794,7 +2829,26 @@ async def handle_scanner_autobuy(bot, result: dict, target_uids: list[int] | Non
         try:
             decision = await _ab.evaluate(uid, result)
             if decision.gate_passed:
-                await execute_auto_buy(bot, uid, result, decision=decision)
+                try:
+                    await execute_auto_buy(bot, uid, result, decision=decision)
+                    _record_decision(uid, decision, status="executed")
+                except Exception as exec_error:
+                    _record_decision(
+                        uid,
+                        decision,
+                        status="failed",
+                        block_reason=str(exec_error),
+                        block_category="execution",
+                    )
+                    raise
+            else:
+                _record_decision(
+                    uid,
+                    decision,
+                    status="blocked",
+                    block_reason=decision.block_reason,
+                    block_category=decision.block_category,
+                )
         except Exception as e:
             print(f"[AUTOBUY] error uid={uid}: {e}", flush=True)
             traceback.print_exc()

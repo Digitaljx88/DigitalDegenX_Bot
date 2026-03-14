@@ -1059,6 +1059,19 @@ async def get_autobuy(uid: int):
     return b.get_auto_buy(uid)
 
 
+@app.get("/autobuy/activity/{uid}", dependencies=[Depends(verify_key)])
+async def get_autobuy_activity(uid: int, limit: int = 20):
+    """Return recent auto-buy decisions for dashboard observability."""
+    rows = db.get_auto_buy_activity(uid, limit=limit)
+    latest = rows[0] if rows else None
+    return {
+        "uid": uid,
+        "count": len(rows),
+        "latest": latest,
+        "items": rows,
+    }
+
+
 @app.post("/autobuy/{uid}", dependencies=[Depends(verify_key)])
 async def update_autobuy(uid: int, update: AutoBuyUpdate):
     """Update auto-buy configuration for a user."""

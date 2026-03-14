@@ -221,6 +221,33 @@ def init():
                 PRIMARY KEY (uid, mint)
             );
 
+            -- Per-user auto-buy decision/activity log for dashboard observability
+            CREATE TABLE IF NOT EXISTS auto_buy_activity (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid               INTEGER NOT NULL,
+                ts                REAL    NOT NULL,
+                mint              TEXT,
+                symbol            TEXT,
+                name              TEXT,
+                score             INTEGER,
+                effective_score   INTEGER,
+                mcap              REAL,
+                strategy_profile  TEXT,
+                confidence        REAL,
+                sol_amount        REAL,
+                size_multiplier   REAL,
+                mode              TEXT,
+                status            TEXT    NOT NULL,
+                block_reason      TEXT,
+                block_category    TEXT,
+                source            TEXT,
+                narrative         TEXT,
+                archetype         TEXT,
+                fresh_vol_m5      REAL,
+                fresh_price_h1    REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_auto_buy_activity_uid_ts ON auto_buy_activity(uid, ts DESC);
+
             -- Scanner: legacy seen-token table retained for compatibility
             CREATE TABLE IF NOT EXISTS scanner_seen (
                 mint    TEXT PRIMARY KEY,
@@ -808,6 +835,72 @@ def record_buy(uid: int, mint: str, sol_spent: float, bought_at: float | None = 
         )
     add_spent_today(uid, sol_spent)
     return True
+
+
+def record_auto_buy_activity(
+    uid: int,
+    *,
+    mint: str = "",
+    symbol: str = "",
+    name: str = "",
+    score: int | None = None,
+    effective_score: int | None = None,
+    mcap: float | None = None,
+    strategy_profile: str = "",
+    confidence: float | None = None,
+    sol_amount: float | None = None,
+    size_multiplier: float | None = None,
+    mode: str = "",
+    status: str = "blocked",
+    block_reason: str = "",
+    block_category: str = "",
+    source: str = "",
+    narrative: str = "",
+    archetype: str = "",
+    fresh_vol_m5: float | None = None,
+    fresh_price_h1: float | None = None,
+    ts: float | None = None,
+) -> int:
+    _exec(
+        "INSERT INTO auto_buy_activity("
+        "uid, ts, mint, symbol, name, score, effective_score, mcap, "
+        "strategy_profile, confidence, sol_amount, size_multiplier, mode, status, "
+        "block_reason, block_category, source, narrative, archetype, fresh_vol_m5, fresh_price_h1"
+        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (
+            uid,
+            float(ts or time.time()),
+            mint or "",
+            symbol or "",
+            name or "",
+            score,
+            effective_score,
+            mcap,
+            strategy_profile or "",
+            confidence,
+            sol_amount,
+            size_multiplier,
+            mode or "",
+            status or "blocked",
+            block_reason or "",
+            block_category or "",
+            source or "",
+            narrative or "",
+            archetype or "",
+            fresh_vol_m5,
+            fresh_price_h1,
+        ),
+    )
+    row = _fetchone("SELECT last_insert_rowid() AS id")
+    return int(row["id"]) if row else 0
+
+
+def get_auto_buy_activity(uid: int, limit: int = 20) -> list[dict]:
+    rows = _fetchall(
+        "SELECT * FROM auto_buy_activity WHERE uid=? ORDER BY ts DESC LIMIT ?",
+        (uid, max(1, min(int(limit), 200))),
+    )
+    return [dict(row) for row in rows]
 
 
 def get_bought_list(uid: int, since_ts: float | None = None) -> list[str]:

@@ -25,6 +25,7 @@ from autobuy import (
     gate_momentum,
     gate_freshness,
     BuyDecision,
+    classify_block_reason,
     evaluate,
     evaluate_lifecycle_snapshot,
 )
@@ -256,6 +257,25 @@ class TestGateFreshness:
     def test_fails_open_on_network_error(self, mock_get):
         passed, reason, vol_m5, price_h1 = gate_freshness("mint123")
         assert passed is True  # fail open
+
+
+# ── classify_block_reason ─────────────────────────────────────────────────────
+
+class TestClassifyBlockReason:
+    def test_classifies_score_blocks(self):
+        assert classify_block_reason("score 52 < min 70") == "score"
+
+    def test_classifies_freshness_blocks(self):
+        assert classify_block_reason("fresh data: buy ratio fading (48%)") == "freshness"
+
+    def test_classifies_daily_cap_blocks(self):
+        assert classify_block_reason("daily limit reached") == "daily_cap"
+
+    def test_classifies_exposure_blocks(self):
+        assert classify_block_reason("narrative exposure cap reached for AI") == "exposure_cap"
+
+    def test_classifies_quality_gate_blocks(self):
+        assert classify_block_reason("entry quality blocked — buy ratio fading") == "quality_gate"
 
 
 # ── evaluate() integration ────────────────────────────────────────────────────

@@ -38,11 +38,37 @@ class BuyDecision:
     strategy_profile: str     = ""
     gate_passed:  bool        = False
     block_reason: str         = ""
+    block_category: str       = ""
     # resolved by evaluate — forwarded to execute
     mode:         str         = "paper"  # "paper" | "live"
     # fresh market data (filled by gate_freshness)
     fresh_vol_m5: float       = 0.0
     fresh_price_h1: float     = 0.0
+
+
+def classify_block_reason(reason: str) -> str:
+    text = str(reason or "").lower()
+    if not text:
+        return ""
+    if "score " in text or "min " in text:
+        return "score"
+    if "fresh data" in text or "fresh scan window" in text or "early entry window" in text:
+        return "freshness"
+    if "daily limit" in text:
+        return "daily_cap"
+    if "narrative exposure" in text or "archetype exposure" in text or "positions " in text:
+        return "exposure_cap"
+    if "entry quality" in text or "outside first-20m" in text or "buy ratio" in text or "liquidity" in text:
+        return "quality_gate"
+    if "already bought" in text:
+        return "duplication"
+    if "mcap" in text:
+        return "mcap"
+    if "momentum" in text:
+        return "momentum"
+    if "not enabled" in text:
+        return "disabled"
+    return "other"
 
 
 # ── Individual gate functions ─────────────────────────────────────────────────
@@ -226,7 +252,7 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
             return BuyDecision(
                 uid=uid, mint=mint, symbol=symbol, name=name,
                 score=score, mcap=mcap, sol_amount=0.0,
-                gate_passed=False, block_reason=reason,
+                gate_passed=False, block_reason=reason, block_category=classify_block_reason(reason),
             )
 
     sizing = position_sizing.resolve_position_size(
@@ -242,7 +268,7 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
             confidence=sizing.confidence,
             size_multiplier=sizing.size_multiplier,
             strategy_profile=sizing.strategy_profile,
-            gate_passed=False, block_reason=sizing.block_reason,
+            gate_passed=False, block_reason=sizing.block_reason, block_category=classify_block_reason(sizing.block_reason),
         )
 
     sol_amount = sizing.sol_amount
@@ -255,7 +281,7 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
             confidence=sizing.confidence,
             size_multiplier=sizing.size_multiplier,
             strategy_profile=sizing.strategy_profile,
-            gate_passed=False, block_reason=reason,
+            gate_passed=False, block_reason=reason, block_category=classify_block_reason(reason),
         )
 
     # gate_freshness runs a blocking HTTP call — offload to thread
@@ -271,7 +297,7 @@ async def evaluate(uid: int, result: dict) -> BuyDecision:
             confidence=sizing.confidence,
             size_multiplier=sizing.size_multiplier,
             strategy_profile=sizing.strategy_profile,
-            gate_passed=False, block_reason=fresh_reason,
+            gate_passed=False, block_reason=fresh_reason, block_category=classify_block_reason(fresh_reason),
         )
 
     # All gates passed
@@ -312,6 +338,7 @@ async def evaluate_lifecycle_snapshot(uid: int, snapshot, *, user_id: int | None
             sol_amount=0.0,
             gate_passed=False,
             block_reason="snapshot outside fresh scan window",
+            block_category="freshness",
         )
 
     import scanner as _scanner

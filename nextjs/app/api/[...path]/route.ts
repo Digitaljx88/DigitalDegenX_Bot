@@ -34,6 +34,9 @@ function routeNeedsUid(path: string[]): boolean {
 
 function rewritePathUid(path: string[], uid: string): string[] {
   if (!uid) return path;
+  if (path[0] === "autobuy" && path[1] === "activity" && path[2]) {
+    return [path[0], path[1], uid, ...path.slice(3)];
+  }
   if ((path[0] === "autobuy" || path[0] === "settings" || path[0] === "trade-controls") && path[1]) {
     return [path[0], uid, ...path.slice(2)];
   }
@@ -54,7 +57,14 @@ async function forward(request: NextRequest, path: string[]) {
     }
     target.searchParams.set(key, value);
   });
-  if (routeNeedsUid(path) && activeUid && !target.searchParams.get("uid") && path[0] !== "autobuy" && path[0] !== "settings") {
+  if (
+    routeNeedsUid(path) &&
+    activeUid &&
+    !target.searchParams.get("uid") &&
+    path[0] !== "autobuy" &&
+    path[0] !== "settings" &&
+    path[0] !== "trade-controls"
+  ) {
     target.searchParams.set("uid", activeUid);
   }
 
