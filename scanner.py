@@ -958,6 +958,47 @@ def select_newest_alerts(
     return selected_users, selected_channel
 
 
+async def select_autobuy_candidates(
+    scored_tokens: list[dict],
+    chat_ids: list[int],
+    user_settings_map: dict[int, dict],
+) -> dict[int, dict]:
+    """
+    Pick the first preview-eligible token per auto-buy-enabled user.
+    If no token preview-passes for a user, fall back to their newest candidate so
+    the autobuy pipeline still records a concrete blocked reason.
+    """
+    import autobuy as _ab
+
+    selected: dict[int, dict] = {}
+    fallback: dict[int, dict] = {}
+    enabled_uids = [uid for uid in chat_ids if _db.get_auto_buy_config(uid).get("enabled")]
+    if not enabled_uids:
+        return {}
+
+    for result in scored_tokens:
+        mcap = result.get("mcap", 0) or 0
+        for uid in enabled_uids:
+            if uid in selected:
+                continue
+            user_cfg = user_settings_map.get(uid, {})
+            user_mcap_min = user_cfg.get("scanner_mcap_min", 15_000)
+            user_mcap_max = user_cfg.get("scanner_mcap_max", 10_000_000)
+            if not (user_mcap_min <= mcap <= user_mcap_max):
+                continue
+            fallback.setdefault(uid, result)
+            preview = await _ab.evaluate(uid, result, skip_freshness=True)
+            if preview.gate_passed:
+                selected[uid] = result
+        if len(selected) == len(enabled_uids):
+            break
+
+    for uid in enabled_uids:
+        if uid not in selected and uid in fallback:
+            selected[uid] = fallback[uid]
+    return selected
+
+
 def format_alert(r: dict) -> str:
     """Format the Telegram alert message per ALERTS.md spec."""
     bd    = r["breakdown"]
@@ -1295,23 +1336,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
         group["uids"].append(uid)
 
     autobuy_targets: dict[str, dict] = {}
-    autobuy_enabled_uids = [uid for uid in chat_ids if _db.get_auto_buy_config(uid).get("enabled")]
-    selected_autobuy: dict[int, dict] = {}
-    if autobuy_enabled_uids:
-        for result in scored_candidates:
-            mcap = result.get("mcap", 0) or 0
-            for uid in autobuy_enabled_uids:
-                if uid in selected_autobuy:
-                    continue
-                user_cfg = user_settings_map.get(uid, {})
-                user_mcap_min = user_cfg.get("scanner_mcap_min", 15_000)
-                user_mcap_max = user_cfg.get("scanner_mcap_max", 10_000_000)
-                if not (user_mcap_min <= mcap <= user_mcap_max):
-                    continue
-                selected_autobuy[uid] = result
-            if len(selected_autobuy) == len(autobuy_enabled_uids):
-                break
-
+    selected_autobuy = await select_autobuy_candidates(scored_candidates, chat_ids, user_settings_map)
     for uid, result in selected_autobuy.items():
         bucket = autobuy_targets.setdefault(result["mint"], {"result": result, "uids": set()})
         bucket["uids"].add(uid)

@@ -92,3 +92,18 @@ def test_build_trading_snapshot_respects_freshness_cutoff():
     snapshot.enrichment.dex["pairCreatedAt"] = int((time.time() - 5 * 3600) * 1000)
 
     assert build_trading_snapshot(snapshot, max_age_hours=4) is None
+
+
+def test_build_trading_snapshot_derives_mcap_from_pump_enrichment():
+    snapshot = _snapshot()
+    snapshot.enrichment.dex = {}
+    snapshot.enrichment.pump = {
+        "marketCapSol": 300,
+        "sol_price_usd": 200,
+        "description": "pump-derived token",
+    }
+
+    token = build_trading_snapshot(snapshot, max_age_hours=4)
+
+    assert token is not None
+    assert token["mcap"] == 60_000

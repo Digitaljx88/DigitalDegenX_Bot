@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import time
+from types import SimpleNamespace
 from unittest.mock import patch
 
+import pytest
 import scanner
 from services.lifecycle import snapshot_to_scanner_token
 from services.lifecycle.models import TokenEnrichment, TokenLifecycle, TokenSnapshot, TokenTradeMetrics
@@ -119,3 +121,23 @@ def test_collect_scan_tokens_prefers_lifecycle_and_dedupes(fetch_lifecycle_token
     lifecycle_token = next(token for token in tokens if token["mint"] == "mint-lifecycle")
     assert lifecycle_token["name"] == "Lifecycle Token"
     assert lifecycle_token["_source_name"] == "pump_launch"
+
+
+@pytest.mark.asyncio
+async def test_select_autobuy_candidates_prefers_first_preview_eligible_token():
+    scored_tokens = [
+        {"mint": "blocked-token", "mcap": 50_000, "pair_created": 200, "symbol": "BLK"},
+        {"mint": "good-token", "mcap": 55_000, "pair_created": 199, "symbol": "GOOD"},
+    ]
+    user_settings_map = {123: {"scanner_mcap_min": 15_000, "scanner_mcap_max": 10_000_000}}
+
+    async def fake_evaluate(uid, result, skip_freshness=False):
+        return SimpleNamespace(gate_passed=result["mint"] == "good-token")
+
+    with (
+        patch("scanner._db.get_auto_buy_config", return_value={"enabled": True}),
+        patch("autobuy.evaluate", side_effect=fake_evaluate),
+    ):
+        selected = await scanner.select_autobuy_candidates(scored_tokens, [123], user_settings_map)
+
+    assert selected[123]["mint"] == "good-token"

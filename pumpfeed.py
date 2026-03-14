@@ -132,7 +132,15 @@ def _record_lifecycle_from_feed(token: dict, meta: dict, sol_usd: float, heat: d
     )
     lifecycle_store.upsert_enrichment(
         mint,
-        pump={**dict(token), "meta": dict(meta)},
+        pump={
+            **dict(token),
+            "meta": dict(meta),
+            "usd_market_cap": float(token.get("marketCapSol", 0) or 0) * sol_usd,
+            "marketCap": float(token.get("marketCapSol", 0) or 0) * sol_usd,
+            "liquidity_usd": liquidity_usd,
+            "volume_5m_usd": volume_usd,
+            "sol_price_usd": sol_usd,
+        },
         wallet={"creator": token.get("traderPublicKey") or "", "narrative": narrative},
     )
 

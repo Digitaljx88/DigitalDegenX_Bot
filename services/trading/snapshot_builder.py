@@ -76,12 +76,33 @@ def build_trading_snapshot(snapshot, *, max_age_hours: int | None = None) -> dic
         (tx_buys / total_txns) if total_txns else 0.0,
     ) or 0.0)
 
+    pump_mcap = _first_non_empty(
+        pump.get("usd_market_cap"),
+        pump.get("market_cap"),
+        pump.get("marketCap"),
+        pump.get("mcap"),
+    )
+    if not pump_mcap:
+        pump_mcap_sol = _first_non_empty(
+            pump.get("marketCapSol"),
+            pump.get("market_cap_sol"),
+        )
+        pump_sol_usd = _first_non_empty(
+            pump.get("sol_price_usd"),
+            dex.get("sol_price_usd"),
+        )
+        if pump_mcap_sol and pump_sol_usd:
+            try:
+                pump_mcap = float(pump_mcap_sol) * float(pump_sol_usd)
+            except Exception:
+                pump_mcap = None
+
     mcap = float(_first_non_empty(
         dex.get("marketCap"),
         dex.get("fdv"),
         dex.get("mcap"),
         dex.get("usd_market_cap"),
-        pump.get("usd_market_cap"),
+        pump_mcap,
     ) or 0)
     price_usd = float(_first_non_empty(
         dex.get("priceUsd"),
