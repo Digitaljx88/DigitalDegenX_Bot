@@ -93,6 +93,14 @@ def _record_lifecycle_from_feed(token: dict, meta: dict, sol_usd: float, heat: d
     volume_usd = float(token.get("solAmount", 0) or 0) * sol_usd
     buy_ratio = 1.0 if float(token.get("solAmount", 0) or 0) > 0 else 0.5
     score_total = float((heat or {}).get("total") or 0)
+    derived_mcap_usd = float(token.get("marketCapSol", 0) or 0) * sol_usd
+    market_cap_usd = float(
+        token.get("usd_market_cap")
+        or token.get("market_cap")
+        or token.get("marketCap")
+        or derived_mcap_usd
+        or 0
+    )
 
     if state == "pump_active":
         lifecycle_store.record_launch_event(
@@ -135,8 +143,9 @@ def _record_lifecycle_from_feed(token: dict, meta: dict, sol_usd: float, heat: d
         pump={
             **dict(token),
             "meta": dict(meta),
-            "usd_market_cap": float(token.get("marketCapSol", 0) or 0) * sol_usd,
-            "marketCap": float(token.get("marketCapSol", 0) or 0) * sol_usd,
+            "usd_market_cap": market_cap_usd,
+            "market_cap": market_cap_usd,
+            "marketCap": market_cap_usd,
             "liquidity_usd": liquidity_usd,
             "volume_5m_usd": volume_usd,
             "sol_price_usd": sol_usd,
