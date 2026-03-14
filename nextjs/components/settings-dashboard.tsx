@@ -1,6 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
+import Link from "next/link";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
 import { useActiveUid } from "@/lib/active-uid";
@@ -92,6 +93,15 @@ type AutoBuyActivityResponse = {
   uid: number;
   count: number;
   latest: AutoBuyActivityRow | null;
+  summary?: {
+    window_hours: number;
+    total: number;
+    status_counts: Record<string, number>;
+    blocked_by_category: Record<string, number>;
+    top_block_category?: string;
+    avg_confidence?: number;
+    avg_size_sol?: number;
+  };
   items: AutoBuyActivityRow[];
 };
 
@@ -382,6 +392,14 @@ export function SettingsDashboard() {
             <div className="text-xs text-[var(--muted-foreground)]">
               See the latest decision, confidence, final size, and why attempts were blocked.
             </div>
+            <div className="mt-2">
+              <Link
+                href="/autobuy"
+                className="rounded-full border border-white/10 px-3 py-1.5 text-xs font-medium text-white/80 hover:bg-white/8"
+              >
+                Open full activity
+              </Link>
+            </div>
           </div>
           {autobuyActivity?.latest ? (
             <div className="rounded-2xl border border-white/10 bg-black/25 p-4 text-sm">
@@ -415,6 +433,51 @@ export function SettingsDashboard() {
               No recent auto-buy decisions yet.
             </div>
           )}
+          {autobuyActivity?.summary?.total ? (
+            <div className="grid gap-3 md:grid-cols-4">
+              <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                Executed
+                <div className="mt-1 text-lg font-semibold text-white">
+                  {autobuyActivity.summary.status_counts.executed || 0}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                Blocked
+                <div className="mt-1 text-lg font-semibold text-white">
+                  {autobuyActivity.summary.status_counts.blocked || 0}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                Top blocker
+                <div className="mt-1 text-sm font-semibold text-white">
+                  {(autobuyActivity.summary.top_block_category || "n/a").replaceAll("_", " ")}
+                </div>
+              </div>
+              <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+                Avg confidence
+                <div className="mt-1 text-lg font-semibold text-white">
+                  {Number(autobuyActivity.summary.avg_confidence || 0).toFixed(2)}
+                </div>
+              </div>
+            </div>
+          ) : null}
+          {autobuyActivity?.summary?.blocked_by_category && Object.keys(autobuyActivity.summary.blocked_by_category).length ? (
+            <div className="rounded-2xl border border-white/10 bg-black/25 px-4 py-3 text-xs text-[var(--muted-foreground)]">
+              <div className="mb-2 text-sm font-medium text-white">Blocked by category (24h)</div>
+              <div className="flex flex-wrap gap-2">
+                {Object.entries(autobuyActivity.summary.blocked_by_category)
+                  .sort((a, b) => b[1] - a[1])
+                  .map(([category, count]) => (
+                    <span
+                      key={category}
+                      className="rounded-full border border-amber-400/20 bg-amber-500/10 px-3 py-1 text-amber-100"
+                    >
+                      {category.replaceAll("_", " ")}: {count}
+                    </span>
+                  ))}
+              </div>
+            </div>
+          ) : null}
           {autobuyActivity?.items?.length ? (
             <div className="grid gap-2">
               {autobuyActivity.items.map((item) => (

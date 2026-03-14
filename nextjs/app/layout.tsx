@@ -18,6 +18,7 @@ function HeaderControls() {
         <NavLink href="/watchlist" label="Watchlist" />
         <NavLink href="/top-alerts" label="Top Alerts" />
         <NavLink href="/trades" label="Trades" />
+        <NavLink href="/autobuy" label="Auto-Buy" />
         <NavLink href="/portfolio" label="Portfolio" />
         <NavLink href="/research" label="Research" />
         <NavLink href="/intel/wallets" label="Intel" />

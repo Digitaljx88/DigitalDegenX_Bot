@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from api_server import AutoSellUpdate, _normalize_presets, merge_autosell_update
+import db
 
 
 def test_merge_autosell_update_preserves_existing_nested_fields():
@@ -56,3 +57,18 @@ def test_normalize_presets_filters_invalid_rows():
         {"mult": 2.0, "sell_pct": 50},
         {"mult": 3.0, "sell_pct": 25},
     ]
+
+
+def test_auto_buy_activity_summary_counts_categories():
+    uid = 991122
+    db.record_auto_buy_activity(uid, symbol="AAA", status="blocked", block_category="score", confidence=0.31, sol_amount=0.03)
+    db.record_auto_buy_activity(uid, symbol="BBB", status="blocked", block_category="score", confidence=0.42, sol_amount=0.04)
+    db.record_auto_buy_activity(uid, symbol="CCC", status="executed", confidence=0.88, sol_amount=0.06)
+
+    summary = db.get_auto_buy_activity_summary(uid, window_hours=24)
+
+    assert summary["total"] >= 3
+    assert summary["status_counts"]["blocked"] >= 2
+    assert summary["status_counts"]["executed"] >= 1
+    assert summary["blocked_by_category"]["score"] >= 2
+    assert summary["top_block_category"] == "score"
