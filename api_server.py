@@ -609,6 +609,8 @@ async def scanner_feed(limit: int = 50, uid: int | None = None):
         mint = token["mint"]
         if mint in seen_mints:
             continue
+        latest_scan_row = _db.get_latest_scan_log_for_mint(mint)
+        mcap = float(token.get("mcap") or (latest_scan_row or {}).get("mcap") or 0)
         has_lifecycle = True
         row = {
             "id": None,
@@ -618,7 +620,7 @@ async def scanner_feed(limit: int = 50, uid: int | None = None):
             "name": token.get("name"),
             "symbol": token.get("symbol"),
             "score": int(token.get("snapshot_score_effective") or token.get("snapshot_score_raw") or 0),
-            "mcap": float(token.get("mcap") or 0),
+            "mcap": mcap,
             "narrative": token.get("lifecycle_narrative"),
             "archetype": token.get("lifecycle_archetype"),
             "alerted": 0,
@@ -683,6 +685,10 @@ async def token_snapshot(mint: str, uid: int | None = None):
         raise HTTPException(status_code=404, detail="Lifecycle snapshot not found")
     payload = snapshot.as_dict()
     trading_snapshot = build_trading_snapshot(snapshot, max_age_hours=None)
+    if trading_snapshot and not float(trading_snapshot.get("mcap") or 0):
+        latest_scan_row = _db.get_latest_scan_log_for_mint(mint)
+        if latest_scan_row and latest_scan_row.get("mcap"):
+            trading_snapshot["mcap"] = float(latest_scan_row.get("mcap") or 0)
     payload["trading_snapshot"] = trading_snapshot
     payload["analysis"] = None
     payload["autobuy_preview"] = None

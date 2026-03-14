@@ -903,6 +903,43 @@ def get_auto_buy_activity(uid: int, limit: int = 20) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def get_auto_buy_activity_summary(uid: int, window_hours: int = 24) -> dict:
+    since_ts = time.time() - (max(1, int(window_hours)) * 3600)
+    rows = _fetchall(
+        "SELECT status, block_category, confidence, sol_amount FROM auto_buy_activity "
+        "WHERE uid=? AND ts>=?",
+        (uid, since_ts),
+    )
+    status_counts: defaultdict[str, int] = defaultdict(int)
+    block_counts: defaultdict[str, int] = defaultdict(int)
+    confidence_values: list[float] = []
+    size_values: list[float] = []
+
+    for row in rows:
+        status = str(row["status"] or "")
+        block_category = str(row["block_category"] or "")
+        status_counts[status] += 1
+        if block_category:
+            block_counts[block_category] += 1
+        conf = row["confidence"]
+        if conf is not None:
+            confidence_values.append(float(conf))
+        sol_amount = row["sol_amount"]
+        if sol_amount is not None:
+            size_values.append(float(sol_amount))
+
+    top_blocked = sorted(block_counts.items(), key=lambda item: (-item[1], item[0]))
+    return {
+        "window_hours": max(1, int(window_hours)),
+        "total": len(rows),
+        "status_counts": dict(status_counts),
+        "blocked_by_category": dict(block_counts),
+        "top_block_category": top_blocked[0][0] if top_blocked else "",
+        "avg_confidence": (sum(confidence_values) / len(confidence_values)) if confidence_values else 0.0,
+        "avg_size_sol": (sum(size_values) / len(size_values)) if size_values else 0.0,
+    }
+
+
 def get_bought_list(uid: int, since_ts: float | None = None) -> list[str]:
     """Return mints bought since since_ts. Defaults to the current UTC day."""
     if since_ts is None:
@@ -1148,6 +1185,14 @@ def get_scan_log(limit: int = 500) -> list[dict]:
         "SELECT * FROM scanner_log ORDER BY id DESC LIMIT ?", (limit,)
     )
     return [dict(r) for r in rows]
+
+
+def get_latest_scan_log_for_mint(mint: str) -> dict | None:
+    row = _fetchone(
+        "SELECT * FROM scanner_log WHERE mint=? ORDER BY id DESC LIMIT 1",
+        (mint,),
+    )
+    return dict(row) if row else None
 
 
 def mark_scan_log_alerted(mint: str):

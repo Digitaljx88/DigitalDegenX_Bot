@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from unittest.mock import patch
 
 import scanner
@@ -8,6 +9,7 @@ from services.lifecycle.models import TokenEnrichment, TokenLifecycle, TokenSnap
 
 
 def _snapshot() -> TokenSnapshot:
+    now = time.time()
     return TokenSnapshot(
         mint="mint-lifecycle",
         lifecycle=TokenLifecycle(
@@ -15,7 +17,7 @@ def _snapshot() -> TokenSnapshot:
             symbol="LIFE",
             name="Lifecycle Token",
             state="pump_active",
-            launch_ts=1_773_429_600.0,
+            launch_ts=now,
             source_primary="pump_launch",
             source_rank=100,
             narrative="AI",
@@ -34,7 +36,7 @@ def _snapshot() -> TokenSnapshot:
             mint="mint-lifecycle",
             dex={
                 "marketCap": 42_000,
-                "pairCreatedAt": 1_773_429_600_000,
+                "pairCreatedAt": int(now * 1000),
                 "priceUsd": 0.00042,
                 "volume": {"m5": 4_500, "h1": 18_000},
                 "txns": {"m5": {"buys": 12, "sells": 3}},

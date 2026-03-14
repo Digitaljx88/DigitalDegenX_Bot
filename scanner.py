@@ -1289,11 +1289,30 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
     )
 
     alert_groups: dict[tuple[str, str], dict] = {}
-    autobuy_targets: dict[str, dict] = {}
     for uid, (tier, result) in selected_user_alerts.items():
         key = (result["mint"], tier)
         group = alert_groups.setdefault(key, {"tier": tier, "result": result, "uids": []})
         group["uids"].append(uid)
+
+    autobuy_targets: dict[str, dict] = {}
+    autobuy_enabled_uids = [uid for uid in chat_ids if _db.get_auto_buy_config(uid).get("enabled")]
+    selected_autobuy: dict[int, dict] = {}
+    if autobuy_enabled_uids:
+        for result in scored_candidates:
+            mcap = result.get("mcap", 0) or 0
+            for uid in autobuy_enabled_uids:
+                if uid in selected_autobuy:
+                    continue
+                user_cfg = user_settings_map.get(uid, {})
+                user_mcap_min = user_cfg.get("scanner_mcap_min", 15_000)
+                user_mcap_max = user_cfg.get("scanner_mcap_max", 10_000_000)
+                if not (user_mcap_min <= mcap <= user_mcap_max):
+                    continue
+                selected_autobuy[uid] = result
+            if len(selected_autobuy) == len(autobuy_enabled_uids):
+                break
+
+    for uid, result in selected_autobuy.items():
         bucket = autobuy_targets.setdefault(result["mint"], {"result": result, "uids": set()})
         bucket["uids"].add(uid)
 
