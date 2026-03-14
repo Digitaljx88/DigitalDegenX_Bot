@@ -153,3 +153,30 @@ def test_scanner_feed_merges_lifecycle_and_scanner_log_without_duplicate_mints(i
     assert feed_item["strategy_profile"] == "launch_snipe"
     assert feed_item["confidence"] == pytest.approx(0.55)
     assert feed_item["buy_ratio_5m"] == pytest.approx(0.9)
+
+
+def test_scanner_feed_skips_malformed_lifecycle_rows(isolated_db, monkeypatch):
+    now = time.time()
+    store.record_launch_event("mint-good", symbol="GOOD", name="Good Token", launch_ts=now)
+    store.record_swap_metrics("mint-good", buys_5m=5, sells_5m=1, buy_ratio_5m=0.83, updated_ts=now + 30)
+    store.update_score_state(
+        "mint-good",
+        narrative="AI",
+        archetype="MICRO_ROCKETSHIP",
+        strategy_profile="launch_snipe",
+        last_score=55,
+        last_effective_score=58,
+        last_confidence=0.5,
+    )
+
+    snapshots = store.list_recent_snapshots(limit=10)
+    bad_snapshot = object()
+    monkeypatch.setattr(store, "list_recent_snapshots", lambda limit=50, states=None: [bad_snapshot, *snapshots])
+
+    client = TestClient(app)
+    response = client.get("/scanner/feed?limit=10", headers={"X-API-Key": API_KEY})
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["count"] >= 1
+    assert any(item["mint"] == "mint-good" for item in payload["items"])

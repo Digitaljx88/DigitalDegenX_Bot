@@ -238,7 +238,7 @@ def _lifecycle_brief(mint: str) -> dict:
     }
 
 
-async def _enrich_token_rows(rows: list[dict], uid: int | None = None) -> list[dict]:
+async def _enrich_token_rows(rows: list[dict], uid: Optional[int] = None) -> list[dict]:
     autobuy_mod = None
     if uid:
         import autobuy as autobuy_mod
@@ -589,7 +589,7 @@ async def get_wallet():
 
 
 @app.get("/scanner/top", dependencies=[Depends(verify_key)])
-async def scanner_top(limit: int = 10, uid: int | None = None):
+async def scanner_top(limit: int = 10, uid: Optional[int] = None):
     """Return top scanner alerts from today, sorted by score and enriched for the active UID."""
     sc      = _sc()
     alerts  = sc.get_todays_alerts() or []
@@ -598,7 +598,7 @@ async def scanner_top(limit: int = 10, uid: int | None = None):
 
 
 @app.get("/scanner/watchlist", dependencies=[Depends(verify_key)])
-async def scanner_watchlist(uid: int | None = None):
+async def scanner_watchlist(uid: Optional[int] = None):
     """Return all tokens currently on the watchlist, enriched for the active UID."""
     sc = _sc()
     wl = sc.get_watchlist() or {}
@@ -629,7 +629,7 @@ async def get_history(uid: int, limit: int = 50, mode: Optional[str] = None):
 
 
 @app.get("/scanner/feed", dependencies=[Depends(verify_key)])
-async def scanner_feed(limit: int = 50, uid: int | None = None):
+async def scanner_feed(limit: int = 50, uid: Optional[int] = None):
     """Return the rolling scanner feed, newest first."""
     import autobuy as autobuy_mod
 
@@ -638,61 +638,64 @@ async def scanner_feed(limit: int = 50, uid: int | None = None):
     has_lifecycle = False
     lifecycle_items = lifecycle_store.list_recent_snapshots(limit=max(1, min(limit, 100)))
     for snapshot in lifecycle_items:
-        token = build_trading_snapshot(snapshot, max_age_hours=4)
-        if not token:
+        try:
+            token = build_trading_snapshot(snapshot, max_age_hours=4)
+            if not token:
+                continue
+            mint = str(token.get("mint") or "").strip()
+            if not mint or mint in seen_mints:
+                continue
+            latest_scan_row = _db.get_latest_scan_log_for_mint(mint)
+            mcap = _safe_float(token.get("mcap")) or _safe_float((latest_scan_row or {}).get("mcap"))
+            has_lifecycle = True
+            row = {
+                "id": None,
+                "date": None,
+                "ts": snapshot.lifecycle.last_trade_ts or snapshot.lifecycle.launch_ts or snapshot.lifecycle.last_updated_ts,
+                "mint": mint,
+                "name": token.get("name"),
+                "symbol": token.get("symbol"),
+                "score": int(_safe_float(token.get("snapshot_score_effective")) or _safe_float(token.get("snapshot_score_raw"))),
+                "mcap": mcap,
+                "narrative": token.get("lifecycle_narrative"),
+                "archetype": token.get("lifecycle_archetype"),
+                "alerted": 0,
+                "dq": None,
+                "state": token.get("lifecycle_state"),
+                "source_primary": token.get("source_primary"),
+                "strategy_profile": token.get("strategy_profile"),
+                "confidence": _safe_float(token.get("snapshot_confidence")),
+                "age_mins": _safe_float(token.get("age_mins")),
+                "buy_ratio_5m": _safe_float(token.get("buy_ratio_5m")),
+            }
+            if uid:
+                try:
+                    preview = await autobuy_mod.evaluate_lifecycle_snapshot(uid, snapshot, skip_freshness=True)
+                    row["autobuy_preview"] = {
+                        "eligible": bool(preview.gate_passed),
+                        "status": "eligible" if preview.gate_passed else "blocked",
+                        "block_reason": preview.block_reason,
+                        "block_category": preview.block_category,
+                        "sol_amount": _safe_float(preview.sol_amount),
+                        "confidence": _safe_float(preview.confidence),
+                        "strategy_profile": preview.strategy_profile or row.get("strategy_profile"),
+                    }
+                except Exception as exc:
+                    row["autobuy_preview"] = {
+                        "eligible": False,
+                        "status": "error",
+                        "block_reason": str(exc),
+                        "block_category": "preview_error",
+                        "sol_amount": 0.0,
+                        "confidence": _safe_float(row.get("confidence")),
+                        "strategy_profile": row.get("strategy_profile"),
+                    }
+            items.append(row)
+            seen_mints.add(mint)
+            if len(items) >= limit:
+                return {"count": len(items), "items": items, "source": "lifecycle+scanner_log"}
+        except Exception:
             continue
-        mint = token["mint"]
-        if mint in seen_mints:
-            continue
-        latest_scan_row = _db.get_latest_scan_log_for_mint(mint)
-        mcap = float(token.get("mcap") or (latest_scan_row or {}).get("mcap") or 0)
-        has_lifecycle = True
-        row = {
-            "id": None,
-            "date": None,
-            "ts": snapshot.lifecycle.last_trade_ts or snapshot.lifecycle.launch_ts or snapshot.lifecycle.last_updated_ts,
-            "mint": mint,
-            "name": token.get("name"),
-            "symbol": token.get("symbol"),
-            "score": int(token.get("snapshot_score_effective") or token.get("snapshot_score_raw") or 0),
-            "mcap": mcap,
-            "narrative": token.get("lifecycle_narrative"),
-            "archetype": token.get("lifecycle_archetype"),
-            "alerted": 0,
-            "dq": None,
-            "state": token.get("lifecycle_state"),
-            "source_primary": token.get("source_primary"),
-            "strategy_profile": token.get("strategy_profile"),
-            "confidence": float(token.get("snapshot_confidence") or 0),
-            "age_mins": float(token.get("age_mins") or 0),
-            "buy_ratio_5m": float(token.get("buy_ratio_5m") or 0),
-        }
-        if uid:
-            try:
-                preview = await autobuy_mod.evaluate_lifecycle_snapshot(uid, snapshot, skip_freshness=True)
-                row["autobuy_preview"] = {
-                    "eligible": bool(preview.gate_passed),
-                    "status": "eligible" if preview.gate_passed else "blocked",
-                    "block_reason": preview.block_reason,
-                    "block_category": preview.block_category,
-                    "sol_amount": float(preview.sol_amount or 0),
-                    "confidence": float(preview.confidence or 0),
-                    "strategy_profile": preview.strategy_profile or row.get("strategy_profile"),
-                }
-            except Exception as exc:
-                row["autobuy_preview"] = {
-                    "eligible": False,
-                    "status": "error",
-                    "block_reason": str(exc),
-                    "block_category": "preview_error",
-                    "sol_amount": 0.0,
-                    "confidence": float(row.get("confidence") or 0),
-                    "strategy_profile": row.get("strategy_profile"),
-                }
-        items.append(row)
-        seen_mints.add(mint)
-        if len(items) >= limit:
-            return {"count": len(items), "items": items, "source": "lifecycle+scanner_log"}
 
     raw_items = _db.get_scan_log(limit=max(1, min(limit * 5, 500)))
     for item in raw_items:
@@ -711,7 +714,7 @@ async def scanner_feed(limit: int = 50, uid: int | None = None):
 
 
 @app.get("/token/{mint}/snapshot", dependencies=[Depends(verify_key)])
-async def token_snapshot(mint: str, uid: int | None = None):
+async def token_snapshot(mint: str, uid: Optional[int] = None):
     """Return the normalized lifecycle snapshot for a token."""
     import autobuy as autobuy_mod
 
