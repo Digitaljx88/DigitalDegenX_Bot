@@ -147,10 +147,12 @@ def update_portfolio(uid: int, portfolio: dict):
             _db.set_asset(uid, asset, float(amount))
 
 def reset_portfolio(uid: int):
-    """Reset paper portfolio to starting balance and clear all auto-sell configs."""
+    """Reset paper portfolio to starting balance and clear all paper trade records."""
     _db.reset_portfolio(uid, PAPER_START_SOL)
     for mint in list(_db.get_all_auto_sells(uid).keys()):
         _db.remove_auto_sell(uid, mint)
+    # Clear auto-buy history so tokens can be re-bought in the fresh paper session
+    _db.clear_auto_buy_history(uid)
 
 
 # ── Wallet key persistence ─────────────────────────────────────────────────────
@@ -641,6 +643,9 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
         if action == "sell" and buy_price_usd and price_usd:
             pnl_usd = (price_usd - buy_price_usd) * token_amount
         
+        # Strip keys that are already passed explicitly to avoid "multiple values" errors
+        _research_extra = {k: v for k, v in extra.items()
+                           if k not in ("hold_seconds", "mcap_at_entry", "mcap_at_exit")}
         research_logger.log_trade(
             timestamp=trade_ts,
             user_id=uid,
@@ -658,7 +663,7 @@ def log_trade(uid: int, mode: str, action: str, mint: str, symbol: str,
             hold_seconds=extra.get("hold_seconds"),
             mcap_at_entry=mcap if action == "buy" else None,
             mcap_at_exit=mcap if action == "sell" else None,
-            **extra,
+            **_research_extra,
         )
     except Exception as e:
         print(f"[log_trade] Research logger error: {e}")
@@ -1656,21 +1661,26 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                   sol_received=sol_received, token_amount=sell_amount,
                   price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
                   mcap=mcap, exit_mcap=mcap, **exit_metrics)
-        await bot.send_message(
-            chat_id=uid,
-            text=(
-                f"🤖 *Auto-Sell Triggered — {reason}*\n\n"
-                f"Token: `${symbol}`\n"
-                f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
-                f"Received: `{sol_received:.4f} SOL`\n"
-                f"📄 Paper mode — simulated"
-            ),
-            parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
-                InlineKeyboardButton("🔎 Token Page", url=_token_dashboard_link(mint)),
-            ]]),
-        )
+        try:
+            await bot.send_message(
+                chat_id=uid,
+                text=(
+                    f"🤖 *Auto-Sell Triggered — {reason}*\n\n"
+                    f"Token: `${symbol}`\n"
+                    f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
+                    f"Received: `{sol_received:.4f} SOL`\n"
+                    f"📄 Paper mode — simulated"
+                ),
+                parse_mode="Markdown",
+                reply_markup=InlineKeyboardMarkup([[
+                    InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
+                    InlineKeyboardButton("🔎 Token Page", url=_token_dashboard_link(mint)),
+                ]]),
+            )
+        except Exception as _e:
+            _es = str(_e)
+            if "Chat not found" not in _es and "chat not found" not in _es and "Forbidden" not in _es:
+                raise
         return True
     else:
         # Live mode — quote and swap outside the lock (slow network calls)
@@ -1704,22 +1714,27 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                       sol_received=sol_received, token_amount=sell_amount,
                       price_usd=price_usd, buy_price_usd=buy_price,
                       mcap=mcap, tx_sig=sig, exit_mcap=mcap, **exit_metrics)
-            await bot.send_message(
-                chat_id=uid,
-                text=(
-                    f"🤖 *Auto-Sell Executed — {reason}*\n\n"
-                    f"Token: `${symbol}`\n"
-                    f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
-                    f"Received: `~{sol_received:.4f} SOL`\n"
-                    f"Tx: `{sig}`\n"
-                    f"[Solscan](https://solscan.io/tx/{sig})"
-                ),
-                parse_mode="Markdown",
-                reply_markup=InlineKeyboardMarkup([[
-                    InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
-                    InlineKeyboardButton("🔎 Token Page", url=_token_dashboard_link(mint)),
-                ]]),
-            )
+            try:
+                await bot.send_message(
+                    chat_id=uid,
+                    text=(
+                        f"🤖 *Auto-Sell Executed — {reason}*\n\n"
+                        f"Token: `${symbol}`\n"
+                        f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
+                        f"Received: `~{sol_received:.4f} SOL`\n"
+                        f"Tx: `{sig}`\n"
+                        f"[Solscan](https://solscan.io/tx/{sig})"
+                    ),
+                    parse_mode="Markdown",
+                    reply_markup=InlineKeyboardMarkup([[
+                        InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
+                        InlineKeyboardButton("🔎 Token Page", url=_token_dashboard_link(mint)),
+                    ]]),
+                )
+            except Exception as _e:
+                _es = str(_e)
+                if "Chat not found" not in _es and "chat not found" not in _es and "Forbidden" not in _es:
+                    raise
             return True
 
 
@@ -1868,6 +1883,8 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                             )
                         except Exception:
                             pass
+                        if changed:
+                            set_auto_sell(uid, mint, cfg)
                         continue
 
             # ── Velocity roll-over: trim when score collapses while momentum flips ──
@@ -1906,6 +1923,8 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                                     changed = True
                                     if exit_logic.tighten_trailing_after_partial(cfg, current_price=price):
                                         changed = True
+                                    if changed:
+                                        set_auto_sell(uid, mint, cfg)
                                     continue
 
             # ── Trailing stop-loss ────────────────────────────────────────────
@@ -1967,7 +1986,9 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
             te = cfg.get("time_exit", {})
             if te.get("enabled") and not te.get("triggered"):
                 buy_time = te.get("buy_time", 0)
-                hours_elapsed = (time.time() - buy_time) / 3600
+                if not buy_time:
+                    buy_time = cfg.get("purchase_timestamp", 0)
+                hours_elapsed = (time.time() - buy_time) / 3600 if buy_time else 0
                 if hours_elapsed >= te.get("hours", 24):
                     if price < buy_price * te.get("target_mult", 2.0):
                         sold = await execute_auto_sell(
@@ -2256,7 +2277,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
     cfg = get_auto_buy(uid)
     if not cfg.get("enabled"):
         print(f"[AUTOBUY] uid={uid} skipped — not enabled", flush=True)
-        return
+        return False
 
     score     = result.get("effective_score", result.get("total", 0))
     mint      = result.get("mint", "")
@@ -2284,7 +2305,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
             + result.get("entry_quality_autobuy_only_reasons", [])
         )
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — quality blocked: {reasons}", flush=True)
-        return
+        return False
 
     # Use auto-buy min_score, but also respect v2 tier thresholds if configured
     min_score = cfg.get("min_score", 55)
@@ -2302,28 +2323,30 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
 
     if not result.get("grad_buy") and score < min_score:
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {min_score}", flush=True)
-        return
+        return False
 
     # ── MCap range filter ────────────────────────────────────────────────────
     max_mcap = cfg.get("max_mcap", 500_000)
     min_mcap = cfg.get("min_mcap_usd", 0)
     if mcap and mcap > max_mcap:
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} > max ${max_mcap:,.0f}", flush=True)
-        return
+        return False
     if min_mcap > 0 and mcap < min_mcap:
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} < min ${min_mcap:,.0f}", flush=True)
-        return
+        return False
 
     # ── Liquidity range filter ───────────────────────────────────────────────
+    # Pump.fun bonding-curve tokens report $0 liquidity (not a DEX pair yet).
+    # Only enforce the min filter when we have a real non-zero liquidity reading.
     liquidity    = entry_liquidity_usd
     min_liq      = cfg.get("min_liquidity_usd", 0)
     max_liq      = cfg.get("max_liquidity_usd", 0)
-    if min_liq > 0 and liquidity < min_liq:
+    if min_liq > 0 and liquidity > 0 and liquidity < min_liq:
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} < min ${min_liq:,.0f}", flush=True)
-        return
+        return False
     if max_liq > 0 and liquidity > max_liq:
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} > max ${max_liq:,.0f}", flush=True)
-        return
+        return False
 
     # ── Age range filter ─────────────────────────────────────────────────────
     import time as _time
@@ -2335,10 +2358,10 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
         max_age = cfg.get("max_age_mins", 0)
         if min_age > 0 and age_mins_now < min_age:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m < min {min_age}m", flush=True)
-            return
+            return False
         if max_age > 0 and age_mins_now > max_age:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m > max {max_age}m", flush=True)
-            return
+            return False
 
     # ── Min 5m transactions filter ───────────────────────────────────────────
     min_txns = cfg.get("min_txns_5m", 0)
@@ -2346,13 +2369,13 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
         txns_5m = entry_txns_5m
         if txns_5m < min_txns:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — txns_5m {txns_5m} < min {min_txns}", flush=True)
-            return
+            return False
 
     cfg = _ab_reset_day_if_needed(cfg)
 
     if mint in cfg.get("bought", []):
         print(f"[AUTOBUY] uid={uid} skipped {symbol} — already bought today", flush=True)
-        return  # already bought this token today
+        return False  # already bought this token today
 
     if decision is not None:
         sizing = position_sizing.SizingDecision(
@@ -2372,7 +2395,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
         )
         if sizing.block_reason:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — {sizing.block_reason}", flush=True)
-            return
+            return False
 
     sol_amount = sizing.sol_amount or cfg.get("sol_amount", 0.1)
     entry_confidence = sizing.confidence or entry_confidence
@@ -2390,14 +2413,14 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
             )
         except Exception:
             pass
-        return
+        return False
 
     max_pos = cfg.get("max_positions", 0)
     if max_pos > 0:
         open_positions = _db.get_open_position_count(uid)
         if open_positions >= max_pos:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — positions {open_positions} >= max {max_pos}", flush=True)
-            return
+            return False
 
     # ── Momentum gate — hard-block dead/post-peak tokens ─────────────────────
     # Mirrors scanner.py momentum check but enforced at buy time, not just alert time.
@@ -2411,7 +2434,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
             f"(h1_price={_h1_price:+.1f}%, m5_pace=${_m5_pace:,.0f} vs h1=${_vol_h1:,.0f})",
             flush=True,
         )
-        return
+        return False
 
     # ── Fresh data check — re-fetch DexScreener to confirm token is still live ─
     # Prevents buying tokens that peaked while waiting in the scanner queue.
@@ -2432,14 +2455,14 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
                     f"(h1_price={_fp_h1:+.1f}%, m5_pace=${_fm5pace:,.0f} vs h1=${_fv_h1:,.0f})",
                     flush=True,
                 )
-                return
+                return False
             if _fv_m5 < 50:
                 print(
                     f"[AUTOBUY] uid={uid} BLOCKED {symbol} — fresh data: zero activity "
                     f"(vol_m5=${_fv_m5:.0f} < $50 floor)",
                     flush=True,
                 )
-                return
+                return False
     except Exception as _fe:
         print(f"[AUTOBUY] uid={uid} fresh data re-fetch failed for {symbol}: {_fe} — proceeding", flush=True)
 
@@ -2465,34 +2488,39 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
                 )
             except Exception:
                 pass
-            return
+            return False
 
         # Get quote outside lock (slow network call)
         lamports = int(sol_amount * 1_000_000_000)
         quote    = jupiter_quote(SOL_MINT, mint, lamports)
         if not quote or "error" in quote:
-            return
+            return False
 
         out_amount = int(quote.get("outAmount", 0))
         if out_amount <= 0:
             print(f"[AUTOBUY] uid={uid} skipped {symbol} — quote returned 0 tokens", flush=True)
-            return
-        price_usd  = result.get("price_usd", 0)
+            return False
         decimals   = 6  # default; DexScreener not re-fetched here
 
-        # Derive buy price from quote when unavailable (e.g. newly graduated tokens)
-        if not price_usd and out_amount > 0:
-            import pumpfun as _pf_mod
-            _sol_usd = (_pf_mod.get_sol_price() or 150.0)
-            ui_tokens = out_amount / (10 ** decimals)
-            if ui_tokens > 0:
-                price_usd = (sol_amount * _sol_usd) / ui_tokens
+        # Derive buy price: pump.fun bonding curve → DexScreener → Jupiter quote fallback.
+        # Never use the stale scanner price_usd — it causes immediate false-profit triggers.
+        _sol_usd = pf.get_sol_price() or 150.0
+        _buy_price_loop = asyncio.get_running_loop()
+        try:
+            _price_live, _ = await _buy_price_loop.run_in_executor(None, fetch_token_price, mint)
+        except Exception:
+            _price_live = None
+        if _price_live:
+            price_usd = _price_live
+        else:
+            _ui_tokens = out_amount / (10 ** decimals)
+            price_usd = (sol_amount * _sol_usd) / _ui_tokens if _ui_tokens > 0 else 0.0
 
         # Atomic portfolio update under lock — re-read fresh state
         async with _portfolio_lock(uid):
             portfolio = get_portfolio(uid)
             if portfolio.get("SOL", 0) < sol_amount:
-                return  # SOL was spent by a concurrent buy between pre-check and lock
+                return False  # SOL was spent by a concurrent buy between pre-check and lock
             portfolio["SOL"]  = portfolio.get("SOL", 0) - sol_amount
             portfolio[mint]   = portfolio.get(mint, 0) + out_amount
             update_portfolio(uid, portfolio)
@@ -2540,11 +2568,11 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
             )
         except Exception:
             pass
-        return
+        return True  # paper buy executed
 
     # ── Live auto-buy ──────────────────────────────────────────────────────────
     if not WALLET_PRIVATE_KEY:
-        return
+        return False
 
     # Check live wallet balance & fetch bonding curve in parallel — saves 3-5s vs sequential
     pubkey = get_wallet_pubkey()
@@ -2712,13 +2740,18 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
             return
 
         # Update portfolio tracking (only after on-chain confirmation)
-        # Derive buy price from quote when unavailable (e.g. newly graduated tokens)
-        if not price_usd and out_raw > 0:
-            import pumpfun as _pf_mod
-            _sol_usd = (_pf_mod.get_sol_price() or 150.0)
-            ui_tokens = out_raw / (10 ** decimals)
-            if ui_tokens > 0:
-                price_usd = (sol_amount * _sol_usd) / ui_tokens
+        # Derive buy price: pump.fun bonding curve → DexScreener → execution output fallback.
+        # Never use the stale scanner price_usd — it causes immediate false-profit triggers.
+        _sol_usd = pf.get_sol_price() or 150.0
+        try:
+            _price_live_exec, _ = await loop.run_in_executor(None, fetch_token_price, mint)
+        except Exception:
+            _price_live_exec = None
+        if _price_live_exec:
+            price_usd = _price_live_exec
+        else:
+            _ui_tokens_live = out_raw / (10 ** decimals)
+            price_usd = (sol_amount * _sol_usd) / _ui_tokens_live if _ui_tokens_live > 0 else 0.0
         async with _portfolio_lock(uid):
             portfolio = get_portfolio(uid)
             portfolio["SOL"] = max(0, portfolio.get("SOL", 0) - sol_amount)
@@ -2770,6 +2803,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
             )
         except Exception:
             pass
+        return True  # live buy executed
     else:
         try:
             await bot.send_message(
@@ -2781,6 +2815,7 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
             )
         except Exception:
             pass
+        return False
 
 
 async def handle_scanner_autobuy(bot, result: dict, target_uids: list[int] | None = None):
@@ -2830,8 +2865,12 @@ async def handle_scanner_autobuy(bot, result: dict, target_uids: list[int] | Non
             decision = await _ab.evaluate(uid, result)
             if decision.gate_passed:
                 try:
-                    await execute_auto_buy(bot, uid, result, decision=decision)
-                    _record_decision(uid, decision, status="executed")
+                    did_execute = await execute_auto_buy(bot, uid, result, decision=decision)
+                    if did_execute:
+                        _record_decision(uid, decision, status="executed")
+                    else:
+                        _record_decision(uid, decision, status="blocked",
+                                         block_reason="skipped by internal filter", block_category="internal_filter")
                 except Exception as exec_error:
                     _record_decision(
                         uid,
@@ -12244,7 +12283,7 @@ def _build_analytics(uid: int, days: int = None) -> tuple:
     lines = [f"📊 *Analytics — {label}*\n"]
 
     lines.append("*💰 Trade Performance*")
-    lines.append(f"Trades: {len(buys)} buys · {len(sells)} sells")
+    lines.append(f"Trades: {len(buys)} tokens")
     if closed:
         lines.append(f"Win Rate: {win_rate:.0f}% ({len(wins)}W / {len(losses)}L)")
         lines.append(f"Avg P&L: {avg_pnl:+.0f}%")
@@ -12385,7 +12424,7 @@ async def _build_pnl(uid: int) -> str:
 
     lines = ["*💰 P&L Summary*\n"]
     lines.append(f"*Mode:* {'📄 Paper' if mode == 'paper' else '🔴 Live'}")
-    lines.append(f"*Total Trades:* {len(buys)} buys · {len(sells)} sells\n")
+    lines.append(f"*Total Trades:* {len(buys)} tokens\n")
 
     lines.append("*Realized*")
     lines.append(f"SOL Spent:    `{sol_spent:.4f}`")

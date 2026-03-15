@@ -100,7 +100,26 @@ async function forward(request: NextRequest, path: string[]) {
     }
   }
 
-  const response = await fetch(target, init);
+  // Retry once on connection refused — the bot may be mid-restart
+  let response: Response;
+  try {
+    response = await fetch(target, init);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes("ECONNREFUSED") || msg.includes("fetch failed")) {
+      await new Promise((r) => setTimeout(r, 1500));
+      try {
+        response = await fetch(target, init);
+      } catch {
+        return new Response(JSON.stringify({ error: "Bot API unavailable — retrying shortly" }), {
+          status: 503,
+          headers: { "content-type": "application/json" },
+        });
+      }
+    } else {
+      throw err;
+    }
+  }
   const body = await response.text();
   return new Response(body, {
     status: response.status,

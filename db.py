@@ -464,8 +464,11 @@ def get_all_portfolios() -> dict:
 
 
 def reset_portfolio(uid: int, starting_sol: float = 10.0):
-    """Delete all holdings for uid and set SOL to starting_sol."""
+    """Delete all holdings for uid and set SOL to starting_sol.
+    Also wipes paper-mode trades and closed_trades so PnL starts fresh."""
     _exec("DELETE FROM portfolios WHERE uid=?", (uid,))
+    _exec("DELETE FROM trades WHERE uid=? AND mode='paper'", (uid,))
+    _exec("DELETE FROM closed_trades WHERE uid=? AND mode='paper'", (uid,))
     set_asset(uid, "SOL", starting_sol)
 
 
@@ -547,7 +550,8 @@ def get_trades(uid: int, limit: int = 200, offset: int = 0,
 
 
 def get_trade_count(uid: int, mode: str | None = None) -> int:
-    where = "uid=?"
+    """Returns number of tokens traded (buy events only — each token = one trade)."""
+    where = "uid=? AND action='buy'"
     params: list = [uid]
     if mode:
         where += " AND mode=?"
@@ -801,6 +805,11 @@ def set_auto_buy_config(uid: int, **fields):
         f"ON CONFLICT(uid) DO UPDATE SET {set_clause}",
         tuple(existing[c] for c in all_cols),
     )
+
+
+def clear_auto_buy_history(uid: int) -> None:
+    """Delete all auto-buy history for a user (called when paper wallet is reset)."""
+    _exec("DELETE FROM auto_buy_history WHERE uid=?", (uid,))
 
 
 def has_bought(uid: int, mint: str, since_ts: float | None = None) -> bool:

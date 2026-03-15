@@ -405,16 +405,32 @@ def get_sol_price() -> float:
     now = time.time()
     if now - _sol_price_cache["ts"] < 60 and _sol_price_cache["price"]:
         return _sol_price_cache["price"]
+    # Source 1: CoinGecko
     try:
         r = requests.get(
             "https://api.coingecko.com/api/v3/simple/price?ids=solana&vs_currencies=usd",
             timeout=5,
         ).json()
         price = float(r["solana"]["usd"])
-        _sol_price_cache.update({"price": price, "ts": now})
-        return price
+        if price > 0:
+            _sol_price_cache.update({"price": price, "ts": now})
+            return price
     except Exception:
-        return _sol_price_cache["price"] or 150.0
+        pass
+    # Source 2: DexScreener SOL/USDC pair (fallback when CoinGecko rate-limits)
+    try:
+        r = requests.get(
+            "https://api.dexscreener.com/latest/dex/pairs/solana/83v8iPyZihDEjDdY8RdZddyZNyUtXngz69Lgo9Kt5d6Q",
+            timeout=5,
+        ).json()
+        price = float(((r.get("pairs") or [{}])[0]).get("priceUsd") or 0)
+        if price > 0:
+            _sol_price_cache.update({"price": price, "ts": now})
+            return price
+    except Exception:
+        pass
+    # Return last known good price; callers use `or <fallback>` for their own defaults
+    return _sol_price_cache["price"] or 0.0
 
 
 # ─── URI metadata ─────────────────────────────────────────────────────────────

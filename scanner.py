@@ -72,6 +72,7 @@ _quality_history: dict[str, list[dict]] = defaultdict(list)
 _narrative_alert_history: dict[str, list[float]] = defaultdict(list)
 QUALITY_HISTORY_SECS = 1800
 NARRATIVE_CLUSTER_WINDOW_SECS = 900
+MAX_HISTORY = 2000  # max keys in _quality_history / _narrative_alert_history before eviction
 NARRATIVE_CLUSTER_LIMIT = 3
 WEAK_DISCOVERY_SOURCES = {"dex_search", "dex_profiles", "dex_boosts"}
 PRIMARY_DISCOVERY_SOURCES = {"pumpfun_newest", "pumpfun_hot", "dex_pairs", "dex_lookup"}
@@ -141,6 +142,13 @@ def mark_seen_token(mint: str):
 
 def get_todays_alerts() -> list:
     return _db.get_todays_alerts()
+
+
+def _evict_oldest(d: dict) -> None:
+    """Drop the oldest key when d has reached MAX_HISTORY entries."""
+    if len(d) >= MAX_HISTORY:
+        oldest = next(iter(d))
+        del d[oldest]
 
 
 def clear_quality_state():
@@ -579,7 +587,7 @@ def calculate_heat_score_with_settings(token: dict, rc: dict, user_id: int = Non
         "prediction_boost": prediction.get("boost", 0),
         "archetype_label": prediction.get("archetype_label", ""),
         "matched_narrative": token.get("lifecycle_narrative") or "Other",
-        "strategy_profile": token.get("strategy_profile") or token.get("lifecycle_strategy_profile") or "",
+        "strategy_profile": "",  # always re-evaluated per current market state by annotate_result
         "strategy_confidence": strategy_confidence,
         "v2_result":     result_v2,
     }
@@ -671,7 +679,10 @@ def _prune_quality_state(now_ts: float | None = None):
 def record_narrative_alert(narrative: str, now_ts: float | None = None):
     now_ts = now_ts or time.time()
     _prune_quality_state(now_ts)
-    _narrative_alert_history[str(narrative or "Other")].append(now_ts)
+    key = str(narrative or "Other")
+    if key not in _narrative_alert_history:
+        _evict_oldest(_narrative_alert_history)
+    _narrative_alert_history[key].append(now_ts)
 
 
 def _recent_narrative_alert_count(narrative: str, now_ts: float | None = None) -> int:
@@ -789,6 +800,8 @@ def build_entry_quality(token: dict, rc: dict, result: dict, narrative: str) -> 
         "strategy_confidence": result.get("strategy_confidence", result.get("archetype_conf", 0)),
     }
 
+    if mint not in _quality_history:
+        _evict_oldest(_quality_history)
     _quality_history[mint].append({
         "ts": now_ts,
         "effective_score": effective_score,
@@ -852,7 +865,11 @@ def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum
 
     strategy_flags = strategy_profiles.evaluate_strategy_rules(quality)
     reasons.extend(strategy_flags["strategy_reasons"])
-    autobuy_only.extend(strategy_flags["strategy_autobuy_only_reasons"])
+    # strategy_autobuy_only_reasons are source/timing *preferences* (e.g. "launch_snipe
+    # wants direct pump.fun discovery", "migration continuation wants Raydium flow").
+    # Adding them to autobuy_only was blocking every DexScreener-sourced token even
+    # when it passed all real quality gates. Hard profile checks (liquidity, txns,
+    # buy-ratio) stay as blocking via strategy_reasons above.
 
     return {
         "quality_reasons": reasons,
@@ -958,6 +975,10 @@ def select_newest_alerts(
     return selected_users, selected_channel
 
 
+_autobuy_fallback_reported: dict[tuple[int, str], float] = {}
+_FALLBACK_REPORT_COOLDOWN = 300  # only re-report the same blocked token once per 5 min
+
+
 async def select_autobuy_candidates(
     scored_tokens: list[dict],
     chat_ids: list[int],
@@ -965,8 +986,10 @@ async def select_autobuy_candidates(
 ) -> dict[int, dict]:
     """
     Pick the first preview-eligible token per auto-buy-enabled user.
-    If no token preview-passes for a user, fall back to their newest candidate so
-    the autobuy pipeline still records a concrete blocked reason.
+    If no token preview-passes, fall back to the newest candidate so the autobuy
+    pipeline can record a concrete blocked reason — but only once per token per
+    user per cooldown window, preventing the same stale token from spamming the
+    activity log every 15 seconds.
     """
     import autobuy as _ab
 
@@ -975,6 +998,12 @@ async def select_autobuy_candidates(
     enabled_uids = [uid for uid in chat_ids if _db.get_auto_buy_config(uid).get("enabled")]
     if not enabled_uids:
         return {}
+
+    now = time.time()
+    # Evict stale cooldown entries to keep the dict small
+    expired = [k for k, t in _autobuy_fallback_reported.items() if now - t > _FALLBACK_REPORT_COOLDOWN]
+    for k in expired:
+        del _autobuy_fallback_reported[k]
 
     for result in scored_tokens:
         mcap = result.get("mcap", 0) or 0
@@ -995,7 +1024,11 @@ async def select_autobuy_candidates(
 
     for uid in enabled_uids:
         if uid not in selected and uid in fallback:
-            selected[uid] = fallback[uid]
+            mint = fallback[uid].get("mint", "")
+            key = (uid, mint)
+            if now - _autobuy_fallback_reported.get(key, 0) >= _FALLBACK_REPORT_COOLDOWN:
+                selected[uid] = fallback[uid]
+                _autobuy_fallback_reported[key] = now
     return selected
 
 
@@ -1413,7 +1446,9 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
                 )
             except Exception as _e1:
                 _e1s = str(_e1)
-                if "Flood control" in _e1s or "Too Many Requests" in _e1s:
+                if "Chat not found" in _e1s or "chat not found" in _e1s or "Forbidden" in _e1s:
+                    pass  # User never started bot or blocked it — silently skip
+                elif "Flood control" in _e1s or "Too Many Requests" in _e1s:
                     import re as _re
                     _wait = int((_re.search(r"Retry in (\d+)", _e1s) or [None, 5])[1])
                     print(f"[SCANNER] flood control — waiting {_wait}s", flush=True)

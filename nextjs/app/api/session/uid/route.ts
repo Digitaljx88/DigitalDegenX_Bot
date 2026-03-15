@@ -30,7 +30,7 @@ export async function POST(request: NextRequest) {
   }
 
   const forcedUid = allowedUid();
-  if (forcedUid && uid != forcedUid) {
+  if (forcedUid && uid !== forcedUid) {
     return NextResponse.json({ error: "UID is not allowed for this dashboard" }, { status: 403 });
   }
 

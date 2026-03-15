@@ -7,6 +7,8 @@
   --muted-foreground: rgba(217, 214, 207, 0.72);
   --accent: #f97316;
   --accent-foreground: #fff8f2;
+  --green: #22c55e;
+  --red: #ef4444;
 }
 
 @theme inline {
@@ -16,6 +18,33 @@
   --font-sans: "Avenir Next", "Segoe UI", sans-serif;
   --font-mono: "SFMono-Regular", "Menlo", "Monaco", monospace;
 }
+
+* {
+  transition-property: color, background-color, border-color, opacity, box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: ease;
+}
+
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+.live-dot { animation: pulse-dot 2s ease-in-out infinite; }
+
+@keyframes ticker-scroll {
+  0%   { transform: translateX(0); }
+  100% { transform: translateX(-50%); }
+}
+.ticker-scroll {
+  animation: ticker-scroll 50s linear infinite;
+  will-change: transform;
+}
+.ticker-scroll:hover { animation-play-state: paused; }
 
 body {
   background: var(--background);

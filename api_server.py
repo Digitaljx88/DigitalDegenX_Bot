@@ -39,7 +39,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Union
 
-from fastapi import FastAPI, HTTPException, Security, Depends
+from fastapi import FastAPI, HTTPException, Security, Depends, Query
 from fastapi.security import APIKeyHeader
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -71,6 +71,12 @@ def _load_api_key() -> str:
 API_KEY    = _load_api_key()
 API_PORT   = 8080
 
+CORS_ALLOWED_ORIGINS: list[str] = [
+    o.strip()
+    for o in os.environ.get("CORS_ALLOWED_ORIGINS", "http://127.0.0.1:3000").split(",")
+    if o.strip()
+]
+
 # ─── App ──────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
@@ -81,20 +87,23 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=CORS_ALLOWED_ORIGINS,
+    allow_methods=["GET", "POST", "DELETE"],
+    allow_headers=["Content-Type", "X-API-Key"],
 )
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=True)
 
 async def verify_key(key: str = Security(api_key_header)):
-    if key != API_KEY:
+    if not secrets.compare_digest(key, API_KEY):
         raise HTTPException(status_code=403, detail="Invalid API key")
     return key
 
 # ─── Lazy imports from bot internals ─────────────────────────────────────────
-# We import lazily so the API can start even before bot.py fully loads.
+# Deferred imports: bot.py/scanner.py take several seconds to initialize.
+# Importing here (rather than at module level) lets the API server start
+# accepting health checks before those modules are ready. Thread-safe via
+# Python's import lock.
 
 def _bot():
     import bot as b
@@ -160,11 +169,17 @@ class AutoBuyUpdate(BaseModel):
     confidence_scale_enabled: Optional[bool] = None
     min_score: Optional[int] = None
     max_mcap: Optional[float] = None
+    min_mcap_usd: Optional[float] = None
     daily_limit_sol: Optional[float] = None
     max_positions: Optional[int] = None
     max_narrative_exposure: Optional[int] = None
     max_archetype_exposure: Optional[int] = None
     buy_tier: Optional[str] = None
+    min_liquidity_usd: Optional[float] = None
+    max_liquidity_usd: Optional[float] = None
+    min_age_mins: Optional[int] = None
+    max_age_mins: Optional[int] = None
+    min_txns_5m: Optional[int] = None
 
 
 class SettingsUpdate(BaseModel):
@@ -622,9 +637,14 @@ async def get_research_log(limit: int = 100, uid: Optional[int] = None):
 
 
 @app.get("/history", dependencies=[Depends(verify_key)])
-async def get_history(uid: int, limit: int = 50, mode: Optional[str] = None):
+async def get_history(
+    uid: int,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+    mode: Optional[str] = None,
+):
     """Return closed-trade history for a user."""
-    rows = _db.get_closed_trades(uid, limit=max(1, min(limit, 500)), mode=mode)
+    rows = _db.get_closed_trades(uid, limit=limit, offset=offset, mode=mode)
     return {"uid": uid, "count": len(rows), "closed_trades": rows}
 
 
@@ -720,7 +740,69 @@ async def token_snapshot(mint: str, uid: Optional[int] = None):
 
     snapshot = lifecycle_store.get_token_snapshot(mint)
     if not snapshot:
-        raise HTTPException(status_code=404, detail="Lifecycle snapshot not found")
+        # Token not in lifecycle DB — fetch live data and return a synthetic snapshot
+        b = _bot()
+        loop = asyncio.get_event_loop()
+        pair = await loop.run_in_executor(None, b.fetch_sol_pair, mint)
+        if not pair:
+            raise HTTPException(status_code=404, detail="Token not found in lifecycle DB or on DexScreener")
+        bt = pair.get("baseToken", {})
+        symbol = bt.get("symbol", "")
+        name = bt.get("name", "") or symbol
+        mcap = float(pair.get("marketCap", 0) or 0)
+        price_usd = float(pair.get("priceUsd", 0) or 0)
+        volume = pair.get("volume") or {}
+        liquidity = pair.get("liquidity") or {}
+        txns = pair.get("txns") or {}
+        age_mins = None
+        if pair.get("pairCreatedAt"):
+            import time as _time
+            age_mins = round((_time.time() - pair["pairCreatedAt"] / 1000) / 60)
+        return {
+            "mint": mint,
+            "source": "live_dexscreener",
+            "lifecycle": {
+                "mint": mint,
+                "symbol": symbol,
+                "name": name,
+                "state": "unknown",
+                "launch_ts": pair.get("pairCreatedAt", 0) and pair["pairCreatedAt"] / 1000,
+                "last_trade_ts": None,
+                "migration_ts": None,
+                "raydium_pool": None,
+                "dex_pair": pair.get("pairAddress"),
+                "dev_wallet": None,
+                "source_primary": pair.get("dexId", ""),
+                "source_rank": None,
+                "narrative": None,
+                "archetype": None,
+                "strategy_profile": None,
+                "last_score": None,
+                "last_effective_score": None,
+                "last_confidence": None,
+                "last_updated_ts": None,
+            },
+            "metrics": {
+                "mint": mint,
+                "price_usd": price_usd,
+                "mcap": mcap,
+                "volume_usd_h1": float(volume.get("h1", 0) or 0),
+                "volume_usd_h6": float(volume.get("h6", 0) or 0),
+                "volume_usd_h24": float(volume.get("h24", 0) or 0),
+                "liquidity_usd": float(liquidity.get("usd", 0) or 0),
+                "age_mins": age_mins,
+                "txns_5m_buys": int((txns.get("m5") or {}).get("buys", 0) or 0),
+                "txns_5m_sells": int((txns.get("m5") or {}).get("sells", 0) or 0),
+                "price_change_h1": float((pair.get("priceChange") or {}).get("h1", 0) or 0),
+                "price_change_h6": float((pair.get("priceChange") or {}).get("h6", 0) or 0),
+                "price_change_h24": float((pair.get("priceChange") or {}).get("h24", 0) or 0),
+            },
+            "enrichment": {"mint": mint, "rugcheck": {}, "dex": {}, "pump": {}, "wallet": {}, "updated_ts": None},
+            "events": [],
+            "trading_snapshot": None,
+            "analysis": None,
+            "autobuy_preview": None,
+        }
     payload = snapshot.as_dict()
     trading_snapshot = build_trading_snapshot(snapshot, max_age_hours=None)
     if trading_snapshot and not float(trading_snapshot.get("mcap") or 0):
@@ -1044,16 +1126,20 @@ async def set_threshold(req: ThresholdRequest):
 @app.get("/trades", dependencies=[Depends(verify_key)])
 async def get_trades(
     uid: int,
-    limit: int = 20,
+    limit: int = Query(100, ge=1, le=500),
+    offset: int = Query(0, ge=0),
     action: Optional[str] = None,
     mode: Optional[str] = None,
     filter_spec: Optional[str] = None,
 ):
     """Return recent trades for a user with optional filters."""
-    trades = _db.get_trades(uid, limit=10000, mode=mode, action=action)
     if filter_spec:
+        # Python-level filter requires fetching a larger set first
+        trades = _db.get_trades(uid, limit=10000, offset=0, mode=mode, action=action)
         trades = tc.filter_trades(trades, filter_spec)
-    trades = sorted(trades, key=lambda t: t.get("ts", 0), reverse=True)[: max(1, min(limit, 500))]
+        trades = trades[offset: offset + limit]
+    else:
+        trades = _db.get_trades(uid, limit=limit, offset=offset, mode=mode, action=action)
     return {"uid": uid, "count": len(trades), "trades": trades}
 
 
@@ -1159,9 +1245,9 @@ async def get_autobuy(uid: int):
 @app.get("/autobuy/activity/{uid}", dependencies=[Depends(verify_key)])
 async def get_autobuy_activity(uid: int, limit: int = 20):
     """Return recent auto-buy decisions for dashboard observability."""
-    rows = db.get_auto_buy_activity(uid, limit=limit)
+    rows = _db.get_auto_buy_activity(uid, limit=limit)
     latest = rows[0] if rows else None
-    summary = db.get_auto_buy_activity_summary(uid, window_hours=24)
+    summary = _db.get_auto_buy_activity_summary(uid, window_hours=24)
     return {
         "uid": uid,
         "count": len(rows),

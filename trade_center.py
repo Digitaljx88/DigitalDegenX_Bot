@@ -353,7 +353,7 @@ def summarize_trades(trades: list[dict], closed: list[dict]) -> dict:
     narrative_rows = cohort_summary.get("by_narrative", [])
     archetype_rows = cohort_summary.get("by_archetype", [])
     return {
-        "total_rows": len(trades),
+        "total_rows": sum(1 for t in trades if str(t.get("action", "")).lower() == "buy"),
         "buy_count": sum(1 for t in trades if str(t.get("action", "")).lower() == "buy"),
         "sell_count": sum(1 for t in trades if str(t.get("action", "")).lower() == "sell"),
         "paper_count": sum(1 for t in trades if str(t.get("mode", "")).lower() == "paper"),

@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { Panel } from "@/components/panel";
+import { Tooltip } from "@/components/tooltip";
 import { apiFetch } from "@/lib/api";
 import { useActiveUid } from "@/lib/active-uid";
 
@@ -106,18 +107,21 @@ function CohortList({
     <Panel title={title} subtitle={subtitle}>
       {rows.length ? (
         <div className="space-y-3">
-          {rows.slice(0, 4).map((row) => (
-            <div key={row.label} className="rounded-2xl border border-white/8 bg-black/10 p-4">
+          {rows.slice(0, 4).map((row, idx) => (
+            <div key={row.label} className={`rounded-2xl border p-4 ${
+              idx === 0 ? "border-[var(--accent)]/30 bg-[var(--accent)]/5" : "border-white/8 bg-black/10"
+            }`}>
               <div className="flex items-center justify-between">
-                <div className="font-medium text-white">{row.label}</div>
+                <div className="font-medium text-white">
+                  {row.label}
+                  {idx === 0 && <span className="ml-2 rounded-full bg-[var(--accent)]/20 px-2 py-0.5 text-[9px] uppercase tracking-wider text-[var(--accent)]">Best</span>}
+                </div>
                 <div className="text-xs text-[var(--muted-foreground)]">{row.count} trades</div>
               </div>
               <div className="mt-2 grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-3">
-                <div>Win Rate: {row.win_rate.toFixed(0)}%</div>
+                <div>Win Rate: <span className={row.win_rate >= 60 ? "text-emerald-300" : row.win_rate >= 45 ? "text-amber-300" : "text-red-300"}>{row.win_rate.toFixed(0)}%</span></div>
                 <div>Realized: {row.realized_pnl_sol.toFixed(4)} SOL</div>
-                <div>
-                  Give-Back: {row.avg_giveback_pct !== null ? `${row.avg_giveback_pct.toFixed(1)}%` : "n/a"}
-                </div>
+                <div>Give-Back: <span className={row.avg_giveback_pct !== null ? (row.avg_giveback_pct <= 20 ? "text-emerald-300" : row.avg_giveback_pct <= 40 ? "text-amber-300" : "text-red-300") : ""}>{row.avg_giveback_pct !== null ? `${row.avg_giveback_pct.toFixed(1)}%` : "n/a"}</span></div>
               </div>
             </div>
           ))}
@@ -129,10 +133,15 @@ function CohortList({
   );
 }
 
+const PAGE_SIZE = 30;
+
 export function TradesDashboard() {
   const { uid } = useActiveUid();
-  const [filter, setFilter] = useState("all");
+  const [filter, setFilter] = useState<string | null>(null); // null = loading, set from mode
   const [trades, setTrades] = useState<TradeRow[]>([]);
+  const [offset, setOffset] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [stats, setStats] = useState<TradeStatsResponse["summary"] | null>(null);
   const [weekly, setWeekly] = useState<WeeklyReportResponse | null>(null);
   const [cohorts, setCohorts] = useState<Cohorts>({
@@ -146,10 +155,24 @@ export function TradesDashboard() {
   });
   const [error, setError] = useState("");
 
+  // On uid change, fetch the user's current trading mode and default the filter to it
   useEffect(() => {
+    if (!uid) {
+      setFilter("paper");
+      return;
+    }
+    apiFetch<{ mode: string }>("/mode", { query: { uid } })
+      .then((r) => setFilter(r.mode === "live" ? "live" : "paper"))
+      .catch(() => setFilter("paper"));
+  }, [uid]);
+
+  useEffect(() => {
+    if (filter === null) return; // wait until mode is resolved
     async function load() {
       if (!uid) {
         setTrades([]);
+        setOffset(0);
+        setHasMore(false);
         setStats(null);
         setWeekly(null);
         setCohorts({
@@ -164,12 +187,15 @@ export function TradesDashboard() {
         return;
       }
       try {
+        const fs = filter ?? undefined;
         const [tradeData, statData, weeklyData] = await Promise.all([
-          apiFetch<TradesResponse>("/trades", { query: { uid, limit: 30, filter_spec: filter } }),
-          apiFetch<TradeStatsResponse>("/trades/stats", { query: { uid, filter_spec: filter } }),
-          apiFetch<WeeklyReportResponse>("/trades/weekly-report", { query: { uid, filter_spec: filter, days: 7 } }),
+          apiFetch<TradesResponse>("/trades", { query: { uid, limit: PAGE_SIZE, offset: 0, filter_spec: fs } }),
+          apiFetch<TradeStatsResponse>("/trades/stats", { query: { uid, filter_spec: fs } }),
+          apiFetch<WeeklyReportResponse>("/trades/weekly-report", { query: { uid, filter_spec: fs, days: 7 } }),
         ]);
         setTrades(tradeData.trades || []);
+        setOffset(PAGE_SIZE);
+        setHasMore((tradeData.trades || []).length === PAGE_SIZE);
         setStats(statData.summary);
         setWeekly(weeklyData);
         setCohorts({
@@ -188,6 +214,24 @@ export function TradesDashboard() {
     }
     load();
   }, [filter, uid]);
+
+  async function loadMore() {
+    if (!uid || loadingMore) return;
+    setLoadingMore(true);
+    try {
+      const tradeData = await apiFetch<TradesResponse>("/trades", {
+        query: { uid, limit: PAGE_SIZE, offset, filter_spec: filter ?? undefined },
+      });
+      const newRows = tradeData.trades || [];
+      setTrades((prev) => [...prev, ...newRows]);
+      setOffset((prev) => prev + PAGE_SIZE);
+      setHasMore(newRows.length === PAGE_SIZE);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load more trades");
+    } finally {
+      setLoadingMore(false);
+    }
+  }
 
   if (!uid) {
     return (
@@ -215,13 +259,19 @@ export function TradesDashboard() {
           <div className="text-3xl font-semibold text-white">{stats?.realized_pnl_sol?.toFixed(4) ?? "0.0000"}</div>
         </Panel>
         <Panel title="Avg Give-Back" subtitle="Peak to exit">
-          <div className="text-3xl font-semibold text-white">
-            {stats ? `${stats.avg_giveback_pct.toFixed(1)}%` : "0.0%"}
+          <div className="flex items-center gap-1">
+            <div className="text-3xl font-semibold text-white">
+              {stats ? `${stats.avg_giveback_pct.toFixed(1)}%` : "0.0%"}
+            </div>
+            <Tooltip text="The percentage of peak unrealized gain that was surrendered before the position closed. Lower is better — means exits were well-timed." />
           </div>
         </Panel>
         <Panel title="Peak Unrealized" subtitle="Before exit">
-          <div className="text-3xl font-semibold text-white">
-            {stats ? `${stats.avg_peak_unrealized_pct.toFixed(1)}%` : "0.0%"}
+          <div className="flex items-center gap-1">
+            <div className="text-3xl font-semibold text-white">
+              {stats ? `${stats.avg_peak_unrealized_pct.toFixed(1)}%` : "0.0%"}
+            </div>
+            <Tooltip text="The highest unrealized gain the position reached before closing. High peak + low give-back = excellent exit timing." />
           </div>
         </Panel>
       </div>
@@ -395,6 +445,18 @@ export function TradesDashboard() {
             </div>
           ))}
         </div>
+        {hasMore && (
+          <div className="mt-4 flex justify-center">
+            <button
+              type="button"
+              onClick={loadMore}
+              disabled={loadingMore}
+              className="rounded-full border border-white/10 px-5 py-2 text-sm text-[var(--muted-foreground)] disabled:opacity-50"
+            >
+              {loadingMore ? "Loading…" : "Load more"}
+            </button>
+          </div>
+        )}
       </Panel>
     </div>
   );

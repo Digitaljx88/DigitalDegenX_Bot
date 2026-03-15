@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
 import { useActiveUid } from "@/lib/active-uid";
+import { ExternalLinks } from "@/components/external-links";
 
 type PortfolioResponse = {
   uid: number;
@@ -225,6 +226,8 @@ export function PortfolioDashboard() {
       }
     }
     loadPortfolio();
+    const t = setInterval(loadPortfolio, 30_000);
+    return () => clearInterval(t);
   }, [uid]);
 
   async function quickSell(mint: string, pct: number, sellMode: "paper" | "live" = "paper") {
@@ -407,16 +410,10 @@ export function PortfolioDashboard() {
             Paper portfolio enrichment hit an issue: {paperView.error}
           </div>
         ) : null}
-        <div className="mb-4 rounded-2xl border border-white/10 bg-black/20 px-4 py-3 text-sm text-[var(--muted-foreground)]">
-          Current mode: <span className="font-medium text-white">{mode === "paper" ? "Paper Portfolio" : "Live Wallet"}</span>
-        </div>
-        <div className="mb-4 rounded-2xl border border-white/10 bg-black/10 px-4 py-3 text-sm text-[var(--muted-foreground)]">
-          Paper position controls below always act on the paper portfolio. Live wallet holdings are shown separately so paper and live state stay visible at the same time.
-        </div>
         <div className="mb-4 flex flex-wrap gap-3">
           <button
             type="button"
-            onClick={resetPaperWallet}
+            onClick={() => { if (window.confirm("Reset paper wallet? This clears all positions and restores the starting balance.")) resetPaperWallet(); }}
             className="rounded-full border border-red-400/20 bg-red-500/10 px-4 py-2 text-sm text-red-100"
           >
             Reset Paper Wallet
@@ -426,7 +423,7 @@ export function PortfolioDashboard() {
           <div className="mb-4 grid gap-3 md:grid-cols-3">
             <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
               <div className="text-sm text-[var(--muted-foreground)]">Paper SOL</div>
-              <div className="mt-2 text-2xl font-semibold text-white">{paperSolBalance.toLocaleString()}</div>
+              <div className="mt-2 text-2xl font-semibold text-white">{paperSolBalance.toFixed(3)}</div>
             </div>
             <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
               <div className="text-sm text-[var(--muted-foreground)]">Paper Value</div>
@@ -443,8 +440,12 @@ export function PortfolioDashboard() {
         ) : null}
         <div className="mb-3 text-sm font-medium text-white">Paper Portfolio</div>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {paperPositions.length > 0
-            ? paperPositions.map((position) => (
+          {paperPositions.length === 0 ? (
+            <div className="py-8 text-center text-sm text-[var(--muted-foreground)]">
+              No open positions yet. Auto-buys appear here once the scanner triggers a purchase.
+            </div>
+          ) : null}
+          {paperPositions.map((position) => (
                 <div key={position.mint} className="rounded-2xl border border-white/8 bg-black/10 p-4">
                   <div className="flex items-start justify-between gap-3">
                     <div>
@@ -457,10 +458,19 @@ export function PortfolioDashboard() {
                       </div>
                     ) : null}
                   </div>
-                  <div className="mt-3 text-2xl font-semibold text-white">
-                    {Number(position.ui_amount || 0).toLocaleString(undefined, { maximumFractionDigits: 4 })}
+                  <div className="mt-3">
+                    {position.pnl_pct != null ? (
+                      <div className={`text-2xl font-bold tabular-nums ${Number(position.pnl_pct) >= 0 ? "text-emerald-400" : "text-red-400"}`}>
+                        {Number(position.pnl_pct) >= 0 ? "+" : ""}{Number(position.pnl_pct).toFixed(1)}%
+                      </div>
+                    ) : position.value_sol != null ? (
+                      <div className="text-2xl font-semibold text-white">{Number(position.value_sol).toFixed(4)} SOL</div>
+                    ) : (
+                      <div className="text-2xl font-semibold text-white/30">—</div>
+                    )}
                   </div>
                   <div className="mt-2 text-xs text-[var(--muted-foreground)]">{position.mint}</div>
+                  <ExternalLinks mint={position.mint} className="mt-1" />
                   <div className="mt-3 flex flex-wrap gap-2 text-xs text-[var(--muted-foreground)]">
                     {position.value_sol ? <span>Value {position.value_sol.toFixed(4)} SOL</span> : null}
                     {position.value_usd ? <span>{formatCompactUsd(position.value_usd)}</span> : null}
@@ -525,12 +535,7 @@ export function PortfolioDashboard() {
                     </div>
                   ) : null}
                 </div>
-              ))
-            : (
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4 text-sm text-[var(--muted-foreground)]">
-                No enriched paper positions available yet. If you recently deployed, refresh after the bot/API restart finishes.
-              </div>
-            )}
+          ))}
         </div>
         <div className="mt-6 mb-3 text-sm font-medium text-white">Live Wallet</div>
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
@@ -546,6 +551,7 @@ export function PortfolioDashboard() {
                 {Number(token.ui_amount || token.amount || 0).toLocaleString()}
               </div>
               <div className="mt-2 text-xs text-[var(--muted-foreground)]">{token.mint}</div>
+              <ExternalLinks mint={token.mint} className="mt-1" />
             </div>
           ))}
         </div>
@@ -762,6 +768,25 @@ function AutoSellEditor({
           }
         />
         <ExitBlock
+          title="Breakeven Stop"
+          enabled={Boolean(config.breakeven_stop?.enabled)}
+          fields={[
+            { key: "activate_mult", label: "Activate at x", value: numberOrZero(config.breakeven_stop?.activate_mult) },
+          ]}
+          onToggle={(enabled) =>
+            onChange((current) => ({
+              ...current,
+              breakeven_stop: { ...(current.breakeven_stop || {}), enabled },
+            }))
+          }
+          onFieldChange={(key, value) =>
+            onChange((current) => ({
+              ...current,
+              breakeven_stop: { ...(current.breakeven_stop || {}), [key]: value },
+            }))
+          }
+        />
+        <ExitBlock
           title="First Risk-Off"
           enabled={Boolean(config.first_risk_off?.enabled)}
           fields={[
@@ -949,6 +974,16 @@ function formatRelativeAge(ts: number) {
   return `${(ageMins / 60).toFixed(1)}h`;
 }
 
+const EXIT_DESCRIPTIONS: Record<string, string> = {
+  "Stop-Loss":            "Sells a fixed % of the position when price drops X% from entry.",
+  "Trailing Stop":        "Locks in gains — sells when price drops X% from the peak it reached.",
+  "Trailing Take Profit": "Activates a trailing exit only after the token reaches a target multiplier.",
+  "Time Exit":            "Force-sells if the position hasn't hit a target multiplier within N hours.",
+  "Breakeven Stop":       "Moves stop-loss to entry price once a multiplier is reached, removing the possibility of a net loss.",
+  "First Risk-Off":       "Sells a partial slice at an early multiplier to take some profit off the table before trailing kicks in.",
+  "Velocity Roll-Over":   "Sells when the heat score drops sharply and momentum flips negative — catches topping patterns.",
+};
+
 function ExitBlock({
   title,
   enabled,
@@ -964,10 +999,15 @@ function ExitBlock({
 }) {
   return (
     <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-      <label className="mb-3 flex items-center gap-3 text-sm text-white">
+      <label className="mb-2 flex items-center gap-3 text-sm text-white">
         <input type="checkbox" checked={enabled} onChange={(event) => onToggle(event.target.checked)} />
         {title}
       </label>
+      {EXIT_DESCRIPTIONS[title] && (
+        <p className="mb-3 text-xs text-[var(--muted-foreground)] leading-relaxed">
+          {EXIT_DESCRIPTIONS[title]}
+        </p>
+      )}
       <div className="grid gap-3 md:grid-cols-2">
         {fields.map((field) => (
           <div key={`${title}-${field.key}`} className="space-y-2">
