@@ -2279,9 +2279,6 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
     Handles both paper and live modes. Sends a DM with outcome.
     """
     cfg = get_auto_buy(uid)
-    if not cfg.get("enabled"):
-        print(f"[AUTOBUY] uid={uid} skipped — not enabled", flush=True)
-        return False
 
     score     = result.get("effective_score", result.get("total", 0))
     mint      = result.get("mint", "")
@@ -2290,96 +2287,150 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
     mcap      = result.get("mcap", 0)
     entry_score_effective = result.get("effective_score", score)
     entry_score_raw = result.get("raw_total", score)
-    entry_source = result.get("_source_name") or result.get("source")
+    entry_source = result.get("_source_name") or result.get("source") or result.get("entry_quality_primary_source") or ""
     entry_source_rank = result.get("_source_rank")
     entry_liquidity_usd = result.get("liquidity", 0) or 0
     entry_txns_5m = result.get("txns_5m", 0) or 0
     entry_wallet_signal = result.get("wallet_signal", result.get("wallet_boost", 0)) or 0
-    entry_archetype = result.get("archetype")
-    entry_strategy = result.get("strategy_profile")
-    entry_confidence = result.get("archetype_conf")
+    entry_archetype = result.get("archetype") or result.get("entry_archetype") or ""
+    entry_strategy = result.get("strategy_profile") or ""
+    entry_confidence = float(result.get("archetype_conf") or result.get("strategy_confidence") or 0)
+    entry_narrative = result.get("matched_narrative") or result.get("narrative") or ""
     entry_tier = _score_tier_label(entry_score_effective)
 
-    print(f"[AUTOBUY] uid={uid} evaluating {symbol} mint={mint[:8]}.. score={score} mcap=${mcap:,.0f}", flush=True)
+    # When called from handle_scanner_autobuy the decision has already passed autobuy.evaluate()
+    # — all gates have already run. Only run them here for direct/pumpfeed calls (decision=None).
+    gates_already_passed = decision is not None and getattr(decision, "gate_passed", False)
 
-    if result.get("entry_quality_autobuy_blocked"):
-        reasons = (
-            result.get("entry_quality_reasons", [])
-            + result.get("entry_quality_force_scouted_reasons", [])
-            + result.get("entry_quality_autobuy_only_reasons", [])
-        )
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — quality blocked: {reasons}", flush=True)
-        return False
+    if not gates_already_passed:
+        if not cfg.get("enabled"):
+            print(f"[AUTOBUY] uid={uid} skipped — not enabled", flush=True)
+            return False
 
-    # Use auto-buy min_score, but also respect v2 tier thresholds if configured
-    min_score = cfg.get("min_score", 55)
-    ab_tier = cfg.get("buy_tier", "")
-    if ab_tier:
-        # Map tier name to user's v2 threshold (fallbacks match HEAT_SCORE_V2_DEFAULTS)
-        user_cfg = sm.get_user_settings(uid)
-        tier_map = {
-            "scouted":   user_cfg.get("alert_scouted_threshold", 35),
-            "warm":      user_cfg.get("alert_warm_threshold", 55),
-            "hot":       user_cfg.get("alert_hot_threshold", 70),
-            "ultra_hot": user_cfg.get("alert_ultra_hot_threshold", 85),
-        }
-        min_score = tier_map.get(ab_tier, min_score)
+        print(f"[AUTOBUY] uid={uid} evaluating {symbol} mint={mint[:8]}.. score={score} mcap=${mcap:,.0f}", flush=True)
 
-    if not result.get("grad_buy") and score < min_score:
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {min_score}", flush=True)
-        return False
+        if result.get("entry_quality_autobuy_blocked"):
+            reasons = (
+                result.get("entry_quality_reasons", [])
+                + result.get("entry_quality_force_scouted_reasons", [])
+                + result.get("entry_quality_autobuy_only_reasons", [])
+            )
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — quality blocked: {reasons}", flush=True)
+            return False
 
-    # ── MCap range filter ────────────────────────────────────────────────────
-    max_mcap = cfg.get("max_mcap", 500_000)
-    min_mcap = cfg.get("min_mcap_usd", 0)
-    if mcap and mcap > max_mcap:
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} > max ${max_mcap:,.0f}", flush=True)
-        return False
-    if min_mcap > 0 and mcap < min_mcap:
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} < min ${min_mcap:,.0f}", flush=True)
-        return False
+        # Use auto-buy min_score, but also respect v2 tier thresholds if configured
+        min_score = cfg.get("min_score", 55)
+        ab_tier = cfg.get("buy_tier", "")
+        if ab_tier:
+            user_cfg = sm.get_user_settings(uid)
+            tier_map = {
+                "scouted":   user_cfg.get("alert_scouted_threshold", 35),
+                "warm":      user_cfg.get("alert_warm_threshold", 55),
+                "hot":       user_cfg.get("alert_hot_threshold", 70),
+                "ultra_hot": user_cfg.get("alert_ultra_hot_threshold", 85),
+            }
+            min_score = tier_map.get(ab_tier, min_score)
 
-    # ── Liquidity range filter ───────────────────────────────────────────────
-    # Pump.fun bonding-curve tokens report $0 liquidity (not a DEX pair yet).
-    # Only enforce the min filter when we have a real non-zero liquidity reading.
-    liquidity    = entry_liquidity_usd
-    min_liq      = cfg.get("min_liquidity_usd", 0)
-    max_liq      = cfg.get("max_liquidity_usd", 0)
-    if min_liq > 0 and liquidity > 0 and liquidity < min_liq:
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} < min ${min_liq:,.0f}", flush=True)
-        return False
-    if max_liq > 0 and liquidity > max_liq:
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} > max ${max_liq:,.0f}", flush=True)
-        return False
+        if not result.get("grad_buy") and score < min_score:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — score {score} < min {min_score}", flush=True)
+            return False
 
-    # ── Age range filter ─────────────────────────────────────────────────────
+        # ── MCap range filter ────────────────────────────────────────────────────
+        max_mcap = cfg.get("max_mcap", 500_000)
+        min_mcap = cfg.get("min_mcap_usd", 0)
+        if mcap and mcap > max_mcap:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} > max ${max_mcap:,.0f}", flush=True)
+            return False
+        if min_mcap > 0 and mcap < min_mcap:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — mcap ${mcap:,.0f} < min ${min_mcap:,.0f}", flush=True)
+            return False
+
+    # These gates only run for direct/pumpfeed calls — autobuy.evaluate() already ran them
+    # for the scanner path (gates_already_passed=True).
     import time as _time
     pair_created_ms = result.get("pair_created", 0) or 0
     age_mins_now = None
     if pair_created_ms:
         age_mins_now = (_time.time() * 1000 - pair_created_ms) / 60_000
-        min_age = cfg.get("min_age_mins", 0)
-        max_age = cfg.get("max_age_mins", 0)
-        if min_age > 0 and age_mins_now < min_age:
-            print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m < min {min_age}m", flush=True)
-            return False
-        if max_age > 0 and age_mins_now > max_age:
-            print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m > max {max_age}m", flush=True)
-            return False
 
-    # ── Min 5m transactions filter ───────────────────────────────────────────
-    min_txns = cfg.get("min_txns_5m", 0)
-    if min_txns > 0:
-        txns_5m = entry_txns_5m
-        if txns_5m < min_txns:
-            print(f"[AUTOBUY] uid={uid} skipped {symbol} — txns_5m {txns_5m} < min {min_txns}", flush=True)
+    if not gates_already_passed:
+        # ── Liquidity range filter ───────────────────────────────────────────
+        liquidity = entry_liquidity_usd
+        min_liq   = cfg.get("min_liquidity_usd", 0)
+        max_liq   = cfg.get("max_liquidity_usd", 0)
+        if min_liq > 0 and liquidity > 0 and liquidity < min_liq:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} < min ${min_liq:,.0f}", flush=True)
+            return False
+        if max_liq > 0 and liquidity > max_liq:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — liquidity ${liquidity:,.0f} > max ${max_liq:,.0f}", flush=True)
             return False
 
-    cfg = _ab_reset_day_if_needed(cfg)
+        # ── Age range filter ─────────────────────────────────────────────────
+        if age_mins_now is not None:
+            min_age = cfg.get("min_age_mins", 0)
+            max_age = cfg.get("max_age_mins", 0)
+            if min_age > 0 and age_mins_now < min_age:
+                print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m < min {min_age}m", flush=True)
+                return False
+            if max_age > 0 and age_mins_now > max_age:
+                print(f"[AUTOBUY] uid={uid} skipped {symbol} — age {age_mins_now:.1f}m > max {max_age}m", flush=True)
+                return False
 
-    if mint in cfg.get("bought", []):
-        print(f"[AUTOBUY] uid={uid} skipped {symbol} — already bought today", flush=True)
-        return False  # already bought this token today
+        # ── Min 5m transactions filter ───────────────────────────────────────
+        min_txns = cfg.get("min_txns_5m", 0)
+        if min_txns > 0 and entry_txns_5m < min_txns:
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — txns_5m {entry_txns_5m} < min {min_txns}", flush=True)
+            return False
+
+        cfg = _ab_reset_day_if_needed(cfg)
+
+        if mint in cfg.get("bought", []):
+            print(f"[AUTOBUY] uid={uid} skipped {symbol} — already bought today", flush=True)
+            return False
+
+        # ── Momentum gate ────────────────────────────────────────────────────
+        _h1_price = result.get("price_h1", 0) or 0
+        _vol_m5   = result.get("volume_m5", 0) or 0
+        _vol_h1   = result.get("volume_h1", 1) or 1
+        _m5_pace  = _vol_m5 * 12
+        if not (_h1_price >= -5 or _m5_pace >= _vol_h1 * 0.3):
+            print(
+                f"[AUTOBUY] uid={uid} BLOCKED {symbol} — momentum dead "
+                f"(h1_price={_h1_price:+.1f}%, m5_pace=${_m5_pace:,.0f} vs h1=${_vol_h1:,.0f})",
+                flush=True,
+            )
+            return False
+
+        # ── Fresh data check ─────────────────────────────────────────────────
+        try:
+            _fresh_loop = asyncio.get_running_loop()
+            _fresh_pair = await asyncio.wait_for(
+                _fresh_loop.run_in_executor(None, fetch_sol_pair, mint),
+                timeout=8,
+            )
+            if _fresh_pair:
+                _fv_m5   = float((_fresh_pair.get("volume") or {}).get("m5", 0) or 0)
+                _fp_h1   = float((_fresh_pair.get("priceChange") or {}).get("h1", 0) or 0)
+                _fv_h1   = float((_fresh_pair.get("volume") or {}).get("h1", 1) or 1)
+                _fm5pace = _fv_m5 * 12
+                if not (_fp_h1 >= -5 or _fm5pace >= _fv_h1 * 0.3):
+                    print(
+                        f"[AUTOBUY] uid={uid} BLOCKED {symbol} — fresh data: momentum dead "
+                        f"(h1_price={_fp_h1:+.1f}%, m5_pace=${_fm5pace:,.0f} vs h1=${_fv_h1:,.0f})",
+                        flush=True,
+                    )
+                    return False
+                if _fv_m5 < 50:
+                    print(
+                        f"[AUTOBUY] uid={uid} BLOCKED {symbol} — fresh data: zero activity "
+                        f"(vol_m5=${_fv_m5:.0f} < $50 floor)",
+                        flush=True,
+                    )
+                    return False
+        except Exception as _fe:
+            print(f"[AUTOBUY] uid={uid} fresh data re-fetch failed for {symbol}: {_fe} — proceeding", flush=True)
+    else:
+        cfg = _ab_reset_day_if_needed(cfg)
 
     if decision is not None:
         sizing = position_sizing.SizingDecision(
@@ -2406,69 +2457,26 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
     daily_limit = cfg.get("daily_limit_sol", 1.0)
     spent_today = cfg.get("spent_today", 0.0)
 
-    if daily_limit > 0 and spent_today + sol_amount > daily_limit:
-        try:
-            await bot.send_message(
-                uid,
-                f"⚠️ *Auto-Buy Skipped* — daily limit reached\n\n"
-                f"Limit: `{daily_limit} SOL` | Spent: `{spent_today:.3f} SOL`\n"
-                f"Token: *{name}* (${symbol}) — score `{score}/100`",
-                parse_mode="Markdown",
-            )
-        except Exception:
-            pass
-        return False
-
-    max_pos = cfg.get("max_positions", 0)
-    if max_pos > 0:
-        open_positions = _db.get_open_position_count(uid)
-        if open_positions >= max_pos:
-            print(f"[AUTOBUY] uid={uid} skipped {symbol} — positions {open_positions} >= max {max_pos}", flush=True)
+    if not gates_already_passed:
+        if daily_limit > 0 and spent_today + sol_amount > daily_limit:
+            try:
+                await bot.send_message(
+                    uid,
+                    f"⚠️ *Auto-Buy Skipped* — daily limit reached\n\n"
+                    f"Limit: `{daily_limit} SOL` | Spent: `{spent_today:.3f} SOL`\n"
+                    f"Token: *{name}* (${symbol}) — score `{score}/100`",
+                    parse_mode="Markdown",
+                )
+            except Exception:
+                pass
             return False
 
-    # ── Momentum gate — hard-block dead/post-peak tokens ─────────────────────
-    # Mirrors scanner.py momentum check but enforced at buy time, not just alert time.
-    _h1_price = result.get("price_h1", 0) or 0
-    _vol_m5   = result.get("volume_m5", 0) or 0
-    _vol_h1   = result.get("volume_h1", 1) or 1
-    _m5_pace  = _vol_m5 * 12  # annualise m5 to hourly rate
-    if not (_h1_price >= -5 or _m5_pace >= _vol_h1 * 0.3):
-        print(
-            f"[AUTOBUY] uid={uid} BLOCKED {symbol} — momentum dead "
-            f"(h1_price={_h1_price:+.1f}%, m5_pace=${_m5_pace:,.0f} vs h1=${_vol_h1:,.0f})",
-            flush=True,
-        )
-        return False
-
-    # ── Fresh data check — re-fetch DexScreener to confirm token is still live ─
-    # Prevents buying tokens that peaked while waiting in the scanner queue.
-    try:
-        _fresh_loop = asyncio.get_running_loop()
-        _fresh_pair = await asyncio.wait_for(
-            _fresh_loop.run_in_executor(None, fetch_sol_pair, mint),
-            timeout=8,
-        )
-        if _fresh_pair:
-            _fv_m5   = float((_fresh_pair.get("volume") or {}).get("m5", 0) or 0)
-            _fp_h1   = float((_fresh_pair.get("priceChange") or {}).get("h1", 0) or 0)
-            _fv_h1   = float((_fresh_pair.get("volume") or {}).get("h1", 1) or 1)
-            _fm5pace = _fv_m5 * 12
-            if not (_fp_h1 >= -5 or _fm5pace >= _fv_h1 * 0.3):
-                print(
-                    f"[AUTOBUY] uid={uid} BLOCKED {symbol} — fresh data: momentum dead "
-                    f"(h1_price={_fp_h1:+.1f}%, m5_pace=${_fm5pace:,.0f} vs h1=${_fv_h1:,.0f})",
-                    flush=True,
-                )
+        max_pos = cfg.get("max_positions", 0)
+        if max_pos > 0:
+            open_positions = _db.get_open_position_count(uid)
+            if open_positions >= max_pos:
+                print(f"[AUTOBUY] uid={uid} skipped {symbol} — positions {open_positions} >= max {max_pos}", flush=True)
                 return False
-            if _fv_m5 < 50:
-                print(
-                    f"[AUTOBUY] uid={uid} BLOCKED {symbol} — fresh data: zero activity "
-                    f"(vol_m5=${_fv_m5:.0f} < $50 floor)",
-                    flush=True,
-                )
-                return False
-    except Exception as _fe:
-        print(f"[AUTOBUY] uid={uid} fresh data re-fetch failed for {symbol}: {_fe} — proceeding", flush=True)
 
     mode = get_mode(uid)
     print(
@@ -2554,20 +2562,27 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
         _db.record_buy(uid, mint, sol_amount)
         cfg = get_auto_buy(uid)
 
+        _ui_amount = out_amount / (10 ** decimals)
         try:
             await bot.send_message(
                 uid,
                 f"🤖 *Auto-Buy Executed* (Paper)\n\n"
-                f"🪙 *{name}* (${symbol})\n"
-                f"🌡️ Heat Score: `{score}/100`\n"
-                f"💰 Spent: `{sol_amount} SOL`\n"
-                f"📦 Received: `{out_amount:,}` raw tokens\n"
+                f"🪙 *{name}* (`${symbol}`)\n"
+                f"🌡️ Score: `{entry_score_effective}/100`"
+                + (f" · Confidence: `{entry_confidence:.0f}%`" if entry_confidence else "") + "\n"
+                f"📐 Strategy: `{entry_strategy or 'n/a'}`"
+                + (f" · `{entry_narrative}`" if entry_narrative and entry_narrative != "Other" else "") + "\n"
+                + (f"📡 Source: `{entry_source}`\n" if entry_source else "")
+                + f"💰 Spent: `{sol_amount} SOL`"
+                + (f" (x`{sizing.size_multiplier:.2f}`)" if sizing.size_multiplier != 1.0 else "") + "\n"
+                f"📦 Received: `{_ui_amount:,.4f}` tokens @ `${price_usd:.8g}`\n"
                 f"🏦 MCap: `${mcap:,.0f}`\n"
-                f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`\n"
+                f"📊 Daily: `{cfg['spent_today']:.3f}/{daily_limit} SOL`\n"
                 f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
+                    InlineKeyboardButton("🔎 Token", url=_token_dashboard_link(mint)),
                     InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
                 ]])
             )
@@ -2788,22 +2803,29 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
         _db.record_buy(uid, mint, sol_amount)
         cfg = get_auto_buy(uid)
 
+        _ui_amount_live = out_raw / (10 ** decimals)
         try:
             await bot.send_message(
                 uid,
                 f"🤖 *Auto-Buy Executed* (Live)\n\n"
-                f"🪙 *{name}* (${symbol})\n"
-                f"🌡️ Heat Score: `{score}/100`\n"
-                f"💰 Spent: `{sol_amount} SOL`\n"
-                f"📦 Received: `{out_raw:,}` raw tokens\n"
+                f"🪙 *{name}* (`${symbol}`)\n"
+                f"🌡️ Score: `{entry_score_effective}/100`"
+                + (f" · Confidence: `{entry_confidence:.0f}%`" if entry_confidence else "") + "\n"
+                f"📐 Strategy: `{entry_strategy or 'n/a'}`"
+                + (f" · `{entry_narrative}`" if entry_narrative and entry_narrative != "Other" else "") + "\n"
+                + (f"📡 Source: `{entry_source}`\n" if entry_source else "")
+                + f"💰 Spent: `{sol_amount} SOL`"
+                + (f" (x`{sizing.size_multiplier:.2f}`)" if sizing.size_multiplier != 1.0 else "") + "\n"
+                f"📦 Received: `{_ui_amount_live:,.4f}` tokens @ `${price_usd:.8g}`\n"
                 f"🔀 Route: `{route}`\n"
                 f"🏦 MCap: `${mcap:,.0f}`\n"
-                f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`\n"
-                f"🔗 TX: `{tx_sig[:20]}...`\n"
+                f"📊 Daily: `{cfg['spent_today']:.3f}/{daily_limit} SOL`\n"
+                f"🔗 TX: [`{tx_sig[:20]}...`](https://solscan.io/tx/{tx_sig})\n"
                 f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
+                    InlineKeyboardButton("🔎 Token", url=_token_dashboard_link(mint)),
                     InlineKeyboardButton("📊 Chart", url=f"https://dexscreener.com/solana/{mint}"),
                 ]])
             )
