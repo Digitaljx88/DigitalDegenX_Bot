@@ -869,19 +869,13 @@ def format_pair(pair: dict) -> str:
 # ─── Keyboards ────────────────────────────────────────────────────────────────
 
 def main_menu_kb(uid: int) -> InlineKeyboardMarkup:
-    mode      = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
-    targets   = _db.get_scan_targets()
-    scan_lbl  = "🔕 Pause Scout" if uid in targets else "🔔 Start Scout"
     return InlineKeyboardMarkup([
-        [InlineKeyboardButton(scan_lbl,           callback_data="scanner:toggle"),
-         InlineKeyboardButton("👀 Scouted",       callback_data="scanner:watchlist"),
-         InlineKeyboardButton("🏆 Top Scouts",    callback_data="scanner:topalerts")],
-        [InlineKeyboardButton("⚙️ Settings",      callback_data="menu:settings"),
-         InlineKeyboardButton(f"Mode: {mode}",    callback_data="mode:paper" if get_mode(uid) == "live" else "mode:live")],
-        [InlineKeyboardButton("🌐 Scanner", url=f"{DASHBOARD_URL}/scanner"),
-         InlineKeyboardButton("💼 Portfolio", url=f"{DASHBOARD_URL}/portfolio")],
-        [InlineKeyboardButton("📈 Trade Center", url=f"{DASHBOARD_URL}/trades"),
-         InlineKeyboardButton("🧠 Intel", url=f"{DASHBOARD_URL}/intel/wallets")],
+        [InlineKeyboardButton("🌐 Scanner",       url=f"{DASHBOARD_URL}/scanner"),
+         InlineKeyboardButton("💼 Portfolio",     url=f"{DASHBOARD_URL}/portfolio")],
+        [InlineKeyboardButton("📈 Trade Center",  url=f"{DASHBOARD_URL}/trades"),
+         InlineKeyboardButton("⚙️ Settings",      url=f"{DASHBOARD_URL}/settings")],
+        [InlineKeyboardButton("🧠 Intel",         url=f"{DASHBOARD_URL}/intel/wallets"),
+         InlineKeyboardButton("🔔 Alerts",        url=f"{DASHBOARD_URL}/top-alerts")],
     ])
 
 
@@ -3195,8 +3189,6 @@ def _token_dashboard_link(mint: str) -> str:
 def _dashboard_redirect_kb(path: str = "/scanner") -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup([
         [InlineKeyboardButton("🌐 Open Dashboard", url=_dashboard_link(path))],
-        [InlineKeyboardButton("⚙️ Telegram Settings", callback_data="menu:settings"),
-         InlineKeyboardButton("⬅️ Main Menu", callback_data="menu:main")],
     ])
 
 
@@ -3221,17 +3213,9 @@ async def _edit_dashboard_redirect(query, title: str, path: str, detail: str):
 async def cmd_dashboard(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
     await update.message.reply_text(
-        "*🌐 Dashboard*\n\nUse the web dashboard for trading, portfolio, analytics, research, and intelligence.",
+        "*🌐 Dashboard*\n\nAll trading, portfolio, analytics, research, and settings are on the web dashboard.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("🔎 Scanner", url=_dashboard_link("/scanner")),
-             InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio"))],
-            [InlineKeyboardButton("📈 Trade Center", url=_dashboard_link("/trades")),
-             InlineKeyboardButton("🧠 Intel", url=_dashboard_link("/intel/wallets"))],
-            [InlineKeyboardButton("⚙️ Telegram Settings", callback_data="menu:settings"),
-             InlineKeyboardButton(f"Mode: {'📄 Paper' if get_mode(uid) == 'paper' else '🔴 Live'}",
-                                  callback_data="mode:paper" if get_mode(uid) == "live" else "mode:live")],
-        ]),
+        reply_markup=main_menu_kb(uid),
         disable_web_page_preview=True,
     )
 
@@ -4544,7 +4528,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Auto-subscribe to live alerts
     _db.set_scanning(True)
     _db.add_scan_target(uid)
-    await show_main_menu(update.message, uid)
+    mode = "📄 Paper" if get_mode(uid) == "paper" else "🔴 Live"
+    await update.message.reply_text(
+        f"*@DigitalDegenX\\_Bot* — Alert Channel\n\n"
+        f"Mode: *{mode}*\n\n"
+        f"You're subscribed to live scout alerts. "
+        f"Use `/scan` to resume or `/stopscan` to pause.\n\n"
+        f"All trading, portfolio, settings, and analytics are on the dashboard:",
+        parse_mode="Markdown",
+        reply_markup=main_menu_kb(uid),
+        disable_web_page_preview=True,
+    )
 
 
 async def cmd_price(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5005,10 +4999,22 @@ async def cmd_research_log(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def cmd_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid = update.effective_user.id
-    await update.message.reply_text(
-        f"Mode: *{'📄 Paper' if get_mode(uid) == 'paper' else '🔴 Live'}*\n\nSelect:",
-        parse_mode="Markdown", reply_markup=settings_kb(uid)
-    )
+    args = context.args or []
+    if args and args[0].lower() in ("paper", "live"):
+        new_mode = args[0].lower()
+        set_mode(uid, new_mode)
+        label = "📄 Paper" if new_mode == "paper" else "🔴 Live"
+        await update.message.reply_text(
+            f"✅ Mode set to *{label}*",
+            parse_mode="Markdown",
+        )
+    else:
+        current = get_mode(uid)
+        label = "📄 Paper" if current == "paper" else "🔴 Live"
+        await update.message.reply_text(
+            f"Current mode: *{label}*\n\nUse `/mode paper` or `/mode live` to switch.",
+            parse_mode="Markdown",
+        )
 
 
 async def cmd_autosell(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -5126,15 +5132,12 @@ async def cmd_scan(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🟢 *Scout is live!*\n\n"
             f"Scanning pump.fun + DexScreener every 15 seconds.\n"
             f"Alerts fire at: WARM ≥ {warm_threshold}, HOT ≥ {user_settings.get('alert_hot_threshold', 80)}, ULTRA ≥ {user_settings.get('alert_ultra_hot_threshold', 90)}\n\n"
-            f"Edit thresholds: /customize or use menu below.\n\n"
-            f"Use /stopscan to pause your scout.",
+            f"Use /stopscan to pause. Adjust thresholds on the dashboard.",
             parse_mode="Markdown",
-            reply_markup=InlineKeyboardMarkup([[
-                InlineKeyboardButton("🔕 Pause Scout",  callback_data="scanner:toggle"),
-                InlineKeyboardButton("⚙️ Settings",     callback_data="scanner:set_threshold"),
-                InlineKeyboardButton("👀 Scouted",      callback_data="scanner:watchlist"),
-                InlineKeyboardButton("🏆 Top Scouts",   callback_data="scanner:topalerts"),
-            ]])
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("⚙️ Settings", url=_dashboard_link("/settings")),
+                 InlineKeyboardButton("🔔 Top Alerts", url=_dashboard_link("/top-alerts"))],
+            ])
         )
     except Exception as e:
         import traceback
@@ -5149,10 +5152,6 @@ async def cmd_stopscan(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "⏸ *Scout paused.*\n\nThe scanner keeps running in the background.\nUse /scan to resume your scout.",
         parse_mode="Markdown",
-        reply_markup=InlineKeyboardMarkup([[
-            InlineKeyboardButton("🔔 Start Scout", callback_data="scanner:toggle"),
-            InlineKeyboardButton("📋 Menu",        callback_data="menu:main"),
-        ]])
     )
 
 
@@ -10217,6 +10216,30 @@ async def qb_preset_callback(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ─── Text input state machine ─────────────────────────────────────────────────
 
 async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Text input is no longer handled in Telegram — all interactive workflows are on the dashboard."""
+    uid  = update.effective_user.id
+    text = (update.message.text or "").strip().lower()
+    # Still support natural language scan toggles for convenience
+    if any(p in text for p in ["start scanning", "start scan", "begin scan", "resume alerts", "resume scan"]):
+        await cmd_scan(update, context)
+        return
+    if any(p in text for p in ["stop scanning", "stop scan", "pause scan", "pause alerts"]):
+        await cmd_stopscan(update, context)
+        return
+    await update.message.reply_text(
+        "Use the dashboard for all trading, settings, and analysis.",
+        reply_markup=InlineKeyboardMarkup([
+            [InlineKeyboardButton("🌐 Open Dashboard", url=DASHBOARD_URL)],
+        ]),
+    )
+
+
+# ─── DEAD CODE BELOW — kept for background-task internals only ─────────────────
+# The following functions are no longer reachable via Telegram handlers but are
+# called internally by background tasks (check_auto_sell, etc.) or the API server.
+
+async def _handle_text_legacy(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Legacy text handler — UNUSED. Preserved for reference only."""
     uid   = update.effective_user.id
     text  = update.message.text.strip()
     state = get_state(uid, "waiting_for")
@@ -13670,16 +13693,31 @@ async def post_init(app):
     asyncio.create_task(_start_api_server(app))
 
     await app.bot.set_my_commands([
-        BotCommand("start",      "Open alert controls and dashboard link"),
-        BotCommand("menu",       "Show alert controls and dashboard link"),
-        BotCommand("dashboard",  "Open dashboard shortcuts"),
-        BotCommand("settings",   "Telegram settings and scanner controls"),
-        BotCommand("mode",       "Switch between paper and live mode"),
-        BotCommand("scan",       "Resume live token alerts"),
-        BotCommand("stopscan",   "Pause your live token alerts"),
-        BotCommand("watchlist",  "Scouted watchlist summary"),
-        BotCommand("topalerts",  "Best alerts from today"),
+        BotCommand("start",      "Subscribe to scout alerts + dashboard link"),
+        BotCommand("scan",       "Resume live scout alerts"),
+        BotCommand("stopscan",   "Pause scout alerts"),
+        BotCommand("mode",       "Switch paper/live mode (/mode paper | /mode live)"),
+        BotCommand("dashboard",  "Open the web dashboard"),
     ])
+
+
+# ─── Catch-all callback handler ──────────────────────────────────────────────
+
+async def dashboard_callback_catchall(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    Handles any callback_data that no longer has a dedicated handler.
+    Old alert messages may still carry legacy callback buttons — redirect to dashboard.
+    """
+    query = update.callback_query
+    await query.answer()
+    try:
+        await query.edit_message_reply_markup(
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("🌐 Open Dashboard", url=DASHBOARD_URL)],
+            ])
+        )
+    except Exception:
+        pass
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -13692,16 +13730,15 @@ if __name__ == "__main__":
         .build()
     )
 
+    # ── Alert-channel bot: only essential commands ────────────────────────────
     # Slash commands
     app.add_handler(CommandHandler("start",      start))
     app.add_handler(CommandHandler("menu",       start))
     app.add_handler(CommandHandler("dashboard",  cmd_dashboard))
-    app.add_handler(CommandHandler("mode",       cmd_mode))
     app.add_handler(CommandHandler("scan",       cmd_scan))
     app.add_handler(CommandHandler("stopscan",   cmd_stopscan))
-    app.add_handler(CommandHandler("watchlist",  cmd_watchlist))
-    app.add_handler(CommandHandler("topalerts",  cmd_topalerts))
-    app.add_handler(CommandHandler("settings",   cmd_settings))
+    app.add_handler(CommandHandler("mode",       cmd_mode))
+    # All remaining commands → redirect to dashboard
     app.add_handler(CommandHandler(
         [
             "price", "top", "buy", "sell", "portfolio", "trades", "research_log",
@@ -13710,49 +13747,13 @@ if __name__ == "__main__":
             "whalebuy", "momentum", "contract", "discoverwallet", "bundle",
             "fingerprint", "cluster", "clustertop", "playbook", "analytics",
             "autobuy", "pnl", "wallets", "narratives", "watchbuy", "history",
+            "watchlist", "topalerts", "settings",
         ],
         dashboard_only_command,
     ))
 
-    # Button callbacks
-    app.add_handler(CallbackQueryHandler(menu_callback,                pattern=r"^menu:"))
-    app.add_handler(CallbackQueryHandler(market_callback,              pattern=r"^market:"))
-    app.add_handler(CallbackQueryHandler(trade_callback,               pattern=r"^trade:"))
-    app.add_handler(CallbackQueryHandler(mode_callback,                pattern=r"^mode:"))
-    app.add_handler(CallbackQueryHandler(settings_callback,            pattern=r"^settings:"))
-    app.add_handler(CallbackQueryHandler(heatscore_callback,           pattern=r"^heatscore:"))
-    app.add_handler(CallbackQueryHandler(autosell_callback,            pattern=r"^as:"))
-    app.add_handler(CallbackQueryHandler(as_preset_callback,           pattern=r"^as_preset:"))
-    app.add_handler(CallbackQueryHandler(custom_target_type_callback,  pattern=r"^ct_type:"))
-    app.add_handler(CallbackQueryHandler(portfolio_callback,           pattern=r"^portfolio:"))
-    app.add_handler(CallbackQueryHandler(qt_callback,                  pattern=r"^qt:"))
-    app.add_handler(CallbackQueryHandler(qp_callback,                  pattern=r"^qp:"))
-    app.add_handler(CallbackQueryHandler(lambda u, c: u.callback_query.answer(), pattern=r"^noop$"))
-    app.add_handler(CallbackQueryHandler(confirm_callback,             pattern=r"^confirm:"))
-    app.add_handler(CallbackQueryHandler(quick_callback,               pattern=r"^quick:"))
-    app.add_handler(CallbackQueryHandler(alert_dir_callback,           pattern=r"^alert_dir:"))
-    app.add_handler(CallbackQueryHandler(cancel_callback,              pattern=r"^cancel$"))
-    app.add_handler(CallbackQueryHandler(scanner_callback,             pattern=r"^scanner:"))
-    app.add_handler(CallbackQueryHandler(wallet_callback,              pattern=r"^wallet:"))
-    app.add_handler(CallbackQueryHandler(pumplive_callback,            pattern=r"^pumplive:"))
-    app.add_handler(CallbackQueryHandler(pumpgrad_callback,            pattern=r"^pumpgrad:"))
-    app.add_handler(CallbackQueryHandler(watch_callback,               pattern=r"^watch:"))
-    app.add_handler(CallbackQueryHandler(launches_callback,            pattern=r"^launches:"))
-    app.add_handler(CallbackQueryHandler(channels_callback,            pattern=r"^channels:"))
-    app.add_handler(CallbackQueryHandler(pf_buy_callback,              pattern=r"^pf:buy:"))
-    app.add_handler(CallbackQueryHandler(analytics_callback,           pattern=r"^analytics:"))
-    app.add_handler(CallbackQueryHandler(autobuy_callback,             pattern=r"^autobuy:"))
-    app.add_handler(CallbackQueryHandler(pnl_callback,                 pattern=r"^pnl:"))
-    app.add_handler(CallbackQueryHandler(gsl_callback,                 pattern=r"^gsl:"))
-    app.add_handler(CallbackQueryHandler(gts_callback,                 pattern=r"^gts:"))
-    app.add_handler(CallbackQueryHandler(gttp_callback,                pattern=r"^gttp:"))
-    app.add_handler(CallbackQueryHandler(gbe_callback,                 pattern=r"^gbe:"))
-    app.add_handler(CallbackQueryHandler(gte_callback,                 pattern=r"^gte:"))
-    app.add_handler(CallbackQueryHandler(intel_callback,               pattern=r"^intel:"))
-    app.add_handler(CallbackQueryHandler(wbalert_callback,             pattern=r"^wbalert:"))
-    app.add_handler(CallbackQueryHandler(trade_center_callback,        pattern=r"^trades:"))
-    app.add_handler(CallbackQueryHandler(history_page_callback,        pattern=r"^history_page:"))
-    app.add_handler(CallbackQueryHandler(qb_preset_callback,           pattern=r"^qb_preset:"))
+    # Catch-all callback handler — old messages with interactive buttons redirect to dashboard
+    app.add_handler(CallbackQueryHandler(dashboard_callback_catchall))
 
     # Text input
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))

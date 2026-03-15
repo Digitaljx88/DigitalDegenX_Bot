@@ -22,6 +22,7 @@ import geckoterminal
 import heat_score_v2
 import settings_manager
 import config as _cfg
+DASHBOARD_URL = getattr(_cfg, "DASHBOARD_URL", "https://www.digitaldegenx.online").rstrip("/")
 import heat_momentum
 import db as _db
 from services.lifecycle import store as lifecycle_store
@@ -1398,9 +1399,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             _db.mark_scan_log_alerted(mint)
             scout_msg = format_scouted_alert(result)[:4000]
             scout_kb = InlineKeyboardMarkup([
-                [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
-                 InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
-                 InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
+                [InlineKeyboardButton("🔎 View on Dashboard", url=f"{DASHBOARD_URL}/token/{mint}")],
                 [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
                  InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
                  InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
@@ -1430,9 +1429,7 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             print(f"[SCANNER] format_alert error for {result.get('symbol', mint[:8])}: {_fe}", flush=True)
             continue
         kb = InlineKeyboardMarkup([
-            [InlineKeyboardButton("🟢 Buy",      callback_data=f"quick:buy:{mint}"),
-             InlineKeyboardButton("🤖 Analyze",  callback_data=f"quick:analyze:{mint}"),
-             InlineKeyboardButton("🔔 Alert",    callback_data=f"quick:alert:{mint}")],
+            [InlineKeyboardButton("🔎 View on Dashboard", url=f"{DASHBOARD_URL}/token/{mint}")],
             [InlineKeyboardButton("📊 Chart",    url=f"https://dexscreener.com/solana/{mint}"),
              InlineKeyboardButton("🔫 RugCheck", url=f"https://rugcheck.xyz/tokens/{mint}"),
              InlineKeyboardButton("🪙 Pump",     url=f"https://pump.fun/{mint}")],
