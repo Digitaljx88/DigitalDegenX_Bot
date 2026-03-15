@@ -1651,18 +1651,41 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                 portfolio.pop(mint, None)
             update_portfolio(uid, portfolio)
 
+        buy_price_usd = _get_buy_price(uid, mint)
         log_trade(uid, mode, "sell", mint, symbol,
                   sol_received=sol_received, token_amount=sell_amount,
-                  price_usd=price_usd, buy_price_usd=_get_buy_price(uid, mint),
+                  price_usd=price_usd, buy_price_usd=buy_price_usd,
                   mcap=mcap, exit_mcap=mcap, **exit_metrics)
+        # Build notification fields
+        _dec = as_cfg.get("decimals", 6)
+        _ui_sold = sell_amount / (10 ** _dec)
+        _pnl_pct = ((price_usd - buy_price_usd) / buy_price_usd * 100) if buy_price_usd and price_usd else None
+        _sol_in = as_cfg.get("sol_amount", 0) * sell_pct / 100
+        _pnl_sol = sol_received - _sol_in if _sol_in else None
+        _hold_s = exit_metrics.get("hold_seconds")
+        _hold_str = (
+            f"{int(_hold_s // 3600)}h {int((_hold_s % 3600) // 60)}m"
+            if _hold_s and _hold_s >= 3600
+            else (f"{int(_hold_s // 60)}m" if _hold_s else "n/a")
+        )
+        _pnl_line = ""
+        if _pnl_pct is not None:
+            _arrow = "📈" if _pnl_pct >= 0 else "📉"
+            _pnl_line = (
+                f"{_arrow} P&L: `{_pnl_pct:+.1f}%`"
+                + (f" (`{_pnl_sol:+.4f} SOL`)" if _pnl_sol is not None else "") + "\n"
+            )
         try:
             await bot.send_message(
                 chat_id=uid,
                 text=(
                     f"🤖 *Auto-Sell Triggered — {reason}*\n\n"
-                    f"Token: `${symbol}`\n"
-                    f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
-                    f"Received: `{sol_received:.4f} SOL`\n"
+                    f"🪙 `${symbol}`\n"
+                    f"Sold: `{sell_pct}%` — `{_ui_sold:,.4f}` tokens\n"
+                    + (f"Entry: `${buy_price_usd:.8g}` → Exit: `${price_usd:.8g}`\n" if buy_price_usd and price_usd else "")
+                    + _pnl_line
+                    + f"Received: `{sol_received:.4f} SOL`\n"
+                    f"Hold: `{_hold_str}` · MCap: `${mcap:,.0f}`\n"
                     f"📄 Paper mode — simulated\n"
                     f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`"
                 ),
@@ -1709,16 +1732,37 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                       sol_received=sol_received, token_amount=sell_amount,
                       price_usd=price_usd, buy_price_usd=buy_price,
                       mcap=mcap, tx_sig=sig, exit_mcap=mcap, **exit_metrics)
+            # Build notification fields
+            _dec_live = as_cfg.get("decimals", 6)
+            _ui_sold_live = sell_amount / (10 ** _dec_live)
+            _pnl_pct_live = ((price_usd - buy_price) / buy_price * 100) if buy_price and price_usd else None
+            _sol_in_live = as_cfg.get("sol_amount", 0) * sell_pct / 100
+            _pnl_sol_live = sol_received - _sol_in_live if _sol_in_live else None
+            _hold_s_live = exit_metrics.get("hold_seconds")
+            _hold_str_live = (
+                f"{int(_hold_s_live // 3600)}h {int((_hold_s_live % 3600) // 60)}m"
+                if _hold_s_live and _hold_s_live >= 3600
+                else (f"{int(_hold_s_live // 60)}m" if _hold_s_live else "n/a")
+            )
+            _pnl_line_live = ""
+            if _pnl_pct_live is not None:
+                _arrow_live = "📈" if _pnl_pct_live >= 0 else "📉"
+                _pnl_line_live = (
+                    f"{_arrow_live} P&L: `{_pnl_pct_live:+.1f}%`"
+                    + (f" (`{_pnl_sol_live:+.4f} SOL`)" if _pnl_sol_live is not None else "") + "\n"
+                )
             try:
                 await bot.send_message(
                     chat_id=uid,
                     text=(
                         f"🤖 *Auto-Sell Executed — {reason}*\n\n"
-                        f"Token: `${symbol}`\n"
-                        f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
-                        f"Received: `~{sol_received:.4f} SOL`\n"
-                        f"Tx: `{sig}`\n"
-                        f"[Solscan](https://solscan.io/tx/{sig})\n"
+                        f"🪙 `${symbol}`\n"
+                        f"Sold: `{sell_pct}%` — `{_ui_sold_live:,.4f}` tokens\n"
+                        + (f"Entry: `${buy_price:.8g}` → Exit: `${price_usd:.8g}`\n" if buy_price and price_usd else "")
+                        + _pnl_line_live
+                        + f"Received: `{sol_received:.4f} SOL`\n"
+                        f"Hold: `{_hold_str_live}` · MCap: `${mcap:,.0f}`\n"
+                        f"🔗 [Solscan](https://solscan.io/tx/{sig})\n"
                         f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`"
                     ),
                     parse_mode="Markdown",
