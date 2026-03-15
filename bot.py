@@ -1669,7 +1669,8 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                     f"Token: `${symbol}`\n"
                     f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
                     f"Received: `{sol_received:.4f} SOL`\n"
-                    f"📄 Paper mode — simulated"
+                    f"📄 Paper mode — simulated\n"
+                    f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`"
                 ),
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
@@ -1723,7 +1724,8 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                         f"Sold: `{sell_pct}%` ({sell_amount:,} raw units)\n"
                         f"Received: `~{sol_received:.4f} SOL`\n"
                         f"Tx: `{sig}`\n"
-                        f"[Solscan](https://solscan.io/tx/{sig})"
+                        f"[Solscan](https://solscan.io/tx/{sig})\n"
+                        f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`"
                     ),
                     parse_mode="Markdown",
                     reply_markup=InlineKeyboardMarkup([[
@@ -1873,6 +1875,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                             await context.bot.send_message(
                                 uid,
                                 f"🪂 *First Risk-Off Executed* — `${symbol}`\n"
+                                f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                                 f"Sold `{fro.get('sell_pct', 30)}%` at `{fro.get('activate_mult', 1.75)}x`.\n"
                                 + (
                                     f"Trailing stop tightened to `{cfg.get('trailing_stop', {}).get('trail_pct', 0)}%`."
@@ -1959,6 +1962,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                             await context.bot.send_message(
                                 uid,
                                 f"📈 *Trailing TP Activated* — `${symbol}`\n"
+                                f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                                 f"Price hit `{ttp['activate_mult']}x` — now trailing `{ttp['trail_pct']}%` below peak",
                                 parse_mode="Markdown"
                             )
@@ -2015,6 +2019,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(
                             uid,
                             f"🛡️ *Breakeven Stop Activated* — `${symbol}`\n"
+                            f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                             f"Price hit `{be['activate_mult']}x` — stop-loss moved to entry price",
                             parse_mode="Markdown"
                         )
@@ -2063,6 +2068,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(
                             uid,
                             f"📉 *Global Trailing Stop Fired* — `${symbol}`\n"
+                            f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                             f"Peak was `${peak:.6f}` → dropped `{drop_from_peak:.1f}%` → SOLD",
                             parse_mode="Markdown"
                         )
@@ -2084,6 +2090,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(
                             uid,
                             f"🎯 *Global Trailing TP Activated* — `${symbol}`\n"
+                            f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                             f"Price hit `{activate_mult}x` (`${price:.6f}`). "
                             f"Now trailing `{trail_pct}%` below peak. "
                             f"Will sell `{sell_pct}%` if price drops that far.",
@@ -2111,6 +2118,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                             await context.bot.send_message(
                                 uid,
                                 f"🎯 *Global Trailing TP Fired* — `${symbol}`\n"
+                                f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                                 f"Peak was `${peak:.6f}` → dropped `{drop_from_peak:.1f}%` → SOLD `{sell_pct}%`",
                                 parse_mode="Markdown"
                             )
@@ -2134,6 +2142,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                         await context.bot.send_message(
                             uid,
                             f"🛡️ *Global Breakeven Stop Activated* — `${symbol}`\n"
+                            f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                             f"Price hit `{be_mult}x` — stop-loss locked to entry price `${buy_price:.6f}`.\n"
                             f"You cannot lose money on this position now.",
                             parse_mode="Markdown"
@@ -2163,6 +2172,7 @@ async def check_auto_sell(context: ContextTypes.DEFAULT_TYPE):
                             await context.bot.send_message(
                                 uid,
                                 f"⏱️ *Global Time Exit Fired* — `${symbol}`\n"
+                                f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"
                                 f"`{hours_elapsed:.1f}h` elapsed and price still below `{target_mult}x` target → SOLD",
                                 parse_mode="Markdown"
                             )
@@ -2559,7 +2569,8 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
                 f"💰 Spent: `{sol_amount} SOL`\n"
                 f"📦 Received: `{out_amount:,}` raw tokens\n"
                 f"🏦 MCap: `${mcap:,.0f}`\n"
-                f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`",
+                f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`\n"
+                f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
@@ -2794,7 +2805,8 @@ async def execute_auto_buy(bot, uid: int, result: dict, decision=None):
                 f"🔀 Route: `{route}`\n"
                 f"🏦 MCap: `${mcap:,.0f}`\n"
                 f"📊 Daily spent: `{cfg['spent_today']:.3f}/{daily_limit} SOL`\n"
-                f"🔗 TX: `{tx_sig[:20]}...`",
+                f"🔗 TX: `{tx_sig[:20]}...`\n"
+                f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`",
                 parse_mode="Markdown",
                 reply_markup=InlineKeyboardMarkup([[
                     InlineKeyboardButton("💼 Portfolio", url=_dashboard_link("/portfolio")),
@@ -3482,6 +3494,7 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
         total_tokens  = len(accounts)
         lines         = [
             f"🔴 *Live Wallet*\n`{pubkey[:8]}...{pubkey[-6:]}`{page_info}",
+            f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`",
             f"Holdings: *{total_tokens}* tokens  •  SOL: `{sol_bal:.4f}` _(${sol_bal * sol_usd:,.0f})_\n",
         ]
         token_rows    = []
@@ -3601,6 +3614,7 @@ async def _show_portfolio(send_fn, uid: int, page: int = 0):
 
     lines = [
         f"📄 *Paper Portfolio*{page_info}",
+        f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`",
         f"Holdings: *{total_tokens}* tokens  •  SOL: `{sol_bal:.4f}` _({_val_usd_str(sol_bal)})_",
     ]
     if total_portfolio_sol:
@@ -4700,6 +4714,7 @@ def _build_trade_center_page(uid: int) -> tuple[str, InlineKeyboardMarkup]:
 
     lines = [
         f"📊 *Trade Center* — {_trade_filter_label(state['filter_spec'])}",
+        f"🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`",
         f"View: *{state['view'].title()}*",
         f"Trades: `{summary['total_rows']}` · Closed: `{summary['closed_count']}` · Win rate: `{summary['win_rate']:.0f}%`",
         f"Realized P&L: `{'+' if summary['realized_pnl_sol'] >= 0 else ''}{summary['realized_pnl_sol']:.4f} SOL`",
@@ -4729,7 +4744,7 @@ def _build_trade_center_page(uid: int) -> tuple[str, InlineKeyboardMarkup]:
     page_rows = rows[(page - 1) * per_page : page * per_page]
     if state["view"] == "closed":
         for row in page_rows:
-            sold_at = datetime.fromtimestamp(float(row.get("sell_ts") or 0), tz=timezone.utc).strftime("%m/%d %H:%M")
+            sold_at = datetime.fromtimestamp(float(row.get("sell_ts") or 0), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             lines.append(
                 f"{'✅' if row['pnl_sol'] >= 0 else '❌'} *${_esc(row['symbol'])}* {'📄' if row['mode']=='paper' else '🔴'} `{sold_at}`\n"
                 f"   In `{row['sol_in']:.4f}◎` → Out `{row['sol_out']:.4f}◎` · `{row['pnl_pct']:+.1f}%` "
@@ -4737,7 +4752,7 @@ def _build_trade_center_page(uid: int) -> tuple[str, InlineKeyboardMarkup]:
             )
     else:
         for row in page_rows:
-            ts = datetime.fromtimestamp(float(row.get("ts") or 0), tz=timezone.utc).strftime("%m/%d %H:%M")
+            ts = datetime.fromtimestamp(float(row.get("ts") or 0), tz=timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
             action = str(row.get("action", "")).lower()
             is_buy = action == "buy"
             sol = float(row.get("sol_amount") or 0) if is_buy else float(row.get("sol_received") or 0)
@@ -12220,30 +12235,33 @@ def _build_analytics(uid: int, days: int = None) -> tuple:
         trades = [t for t in trades if t.get("ts", 0) >= cutoff]
 
     buys  = [t for t in trades if t.get("action") == "buy"]
-    sells = [t for t in trades if t.get("action") == "sell"]
 
-    closed = [t for t in sells if t.get("pnl_pct") is not None]
-    wins   = [t for t in closed if t["pnl_pct"] > 0]
-    losses = [t for t in closed if t["pnl_pct"] <= 0]
+    # Use FIFO closed_trades so SOL in/out only covers completed round-trips
+    all_closed = _db.get_closed_trades(uid, limit=10000)
+    if cutoff:
+        all_closed = [t for t in all_closed if (t.get("sell_ts") or 0) >= cutoff]
+    closed = all_closed
+    wins   = [t for t in closed if float(t.get("pnl_sol") or 0) > 0]
+    losses = [t for t in closed if float(t.get("pnl_sol") or 0) <= 0]
     win_rate = len(wins) / len(closed) * 100 if closed else 0
-    avg_pnl  = sum(t["pnl_pct"] for t in closed) / len(closed) if closed else 0
-    best  = max(closed, key=lambda x: x["pnl_pct"], default=None)
-    worst = min(closed, key=lambda x: x["pnl_pct"], default=None)
+    avg_pnl  = sum(float(t.get("pnl_pct") or 0) for t in closed) / len(closed) if closed else 0
+    best  = max(closed, key=lambda x: float(x.get("pnl_pct") or 0), default=None)
+    worst = min(closed, key=lambda x: float(x.get("pnl_pct") or 0), default=None)
 
-    sol_spent    = sum(t.get("sol_amount", 0) or 0 for t in buys)
-    sol_received = sum(t.get("sol_received", 0) or 0 for t in sells)
+    sol_spent    = sum(float(t.get("sol_in", 0) or 0) for t in closed)
+    sol_received = sum(float(t.get("sol_out", 0) or 0) for t in closed)
     net_sol = sol_received - sol_spent
 
     nar_wins   = defaultdict(int)
     nar_losses = defaultdict(int)
     nar_pnl    = defaultdict(list)
     for t in closed:
-        n = t.get("narrative", "Other")
-        if t["pnl_pct"] > 0:
+        n = t.get("narrative", "Other") or "Other"
+        if float(t.get("pnl_sol") or 0) > 0:
             nar_wins[n] += 1
         else:
             nar_losses[n] += 1
-        nar_pnl[n].append(t["pnl_pct"])
+        nar_pnl[n].append(float(t.get("pnl_pct") or 0))
     all_narratives = set(list(nar_wins) + list(nar_losses))
     nar_rows = []
     for n in sorted(all_narratives,
@@ -12280,7 +12298,7 @@ def _build_analytics(uid: int, days: int = None) -> tuple:
             nar_alert_counts[e["narrative"]] += 1
 
     label = f"{days}d" if days else "All Time"
-    lines = [f"📊 *Analytics — {label}*\n"]
+    lines = [f"📊 *Analytics — {label}*\n🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"]
 
     lines.append("*💰 Trade Performance*")
     lines.append(f"Trades: {len(buys)} tokens")
@@ -12363,16 +12381,16 @@ async def _build_pnl(uid: int) -> str:
     mode     = get_mode(uid)
     my_trades = _db.get_trades(uid, limit=10000)
     buys     = [t for t in my_trades if t.get("action") == "buy"]
-    sells    = [t for t in my_trades if t.get("action") == "sell"]
-    closed   = [t for t in sells if t.get("pnl_pct") is not None]
 
-    # Realized
-    sol_spent    = sum(t.get("sol_amount", 0) or 0 for t in buys)
-    sol_received = sum(t.get("sol_received", 0) or 0 for t in sells)
+    # Realized — use FIFO-matched closed_trades so only completed round-trips are counted.
+    # (Summing all buys vs all sells inflates sol_spent with still-open positions.)
+    closed_trades = _db.get_closed_trades(uid, limit=10000, mode=mode)
+    sol_spent    = sum(float(t.get("sol_in", 0) or 0) for t in closed_trades)
+    sol_received = sum(float(t.get("sol_out", 0) or 0) for t in closed_trades)
     realized_sol = sol_received - sol_spent
-    wins   = [t for t in closed if t["pnl_pct"] > 0]
-    losses = [t for t in closed if t["pnl_pct"] <= 0]
-    win_rate = len(wins) / len(closed) * 100 if closed else 0
+    wins   = [t for t in closed_trades if float(t.get("pnl_sol") or 0) > 0]
+    losses = [t for t in closed_trades if float(t.get("pnl_sol") or 0) <= 0]
+    win_rate = len(wins) / len(closed_trades) * 100 if closed_trades else 0
 
     # Unrealized — check open positions in auto_sell configs
     as_configs = _db.get_all_auto_sells(uid)
@@ -12422,7 +12440,7 @@ async def _build_pnl(uid: int) -> str:
         except Exception:
             continue
 
-    lines = ["*💰 P&L Summary*\n"]
+    lines = [f"*💰 P&L Summary*\n🕐 `{datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S')} UTC`\n"]
     lines.append(f"*Mode:* {'📄 Paper' if mode == 'paper' else '🔴 Live'}")
     lines.append(f"*Total Trades:* {len(buys)} tokens\n")
 
@@ -12431,7 +12449,7 @@ async def _build_pnl(uid: int) -> str:
     lines.append(f"SOL Received: `{sol_received:.4f}`")
     net_arrow = "📈" if realized_sol >= 0 else "📉"
     lines.append(f"Net SOL: {net_arrow} `{realized_sol:+.4f}`")
-    if closed:
+    if closed_trades:
         lines.append(f"Win Rate: `{win_rate:.0f}%` ({len(wins)}W / {len(losses)}L)")
 
     if unreal_lines:
