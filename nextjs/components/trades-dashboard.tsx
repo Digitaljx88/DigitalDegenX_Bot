@@ -1,7 +1,6 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Panel } from "@/components/panel";
 import { Tooltip } from "@/components/tooltip";
 import { apiFetch } from "@/lib/api";
 import { useActiveUid } from "@/lib/active-uid";
@@ -19,173 +18,112 @@ type TradeRow = {
   pnl_pct?: number;
 };
 
-type TradesResponse = {
-  uid: number;
-  count: number;
-  trades: TradeRow[];
-};
+type TradesResponse = { uid: number; count: number; trades: TradeRow[] };
 
 type TradeStatsResponse = {
   summary: {
-    total_rows: number;
-    closed_count: number;
-    win_rate: number;
-    realized_pnl_sol: number;
-    paper_count: number;
-    live_count: number;
-    avg_giveback_pct: number;
-    avg_peak_unrealized_pct: number;
-    best_exit_reason: string;
-    top_source: string;
-    top_strategy: string;
-    top_archetype: string;
-    top_narrative: string;
+    total_rows: number; closed_count: number; win_rate: number; realized_pnl_sol: number;
+    paper_count: number; live_count: number; avg_giveback_pct: number; avg_peak_unrealized_pct: number;
+    best_exit_reason: string; top_source: string; top_strategy: string; top_archetype: string; top_narrative: string;
   };
   cohorts: {
-    by_exit_reason: CohortRow[];
-    by_source: CohortRow[];
-    by_strategy: CohortRow[];
-    by_score_band: CohortRow[];
-    by_age_band: CohortRow[];
-    by_narrative: CohortRow[];
-    by_archetype: CohortRow[];
+    by_exit_reason: CohortRow[]; by_source: CohortRow[]; by_strategy: CohortRow[];
+    by_score_band: CohortRow[]; by_age_band: CohortRow[]; by_narrative: CohortRow[]; by_archetype: CohortRow[];
   };
 };
 
 type CohortRow = {
-  label: string;
-  count: number;
-  win_rate: number;
-  realized_pnl_sol: number;
-  avg_giveback_pct: number | null;
-  avg_peak_unrealized_pct: number | null;
+  label: string; count: number; win_rate: number; realized_pnl_sol: number;
+  avg_giveback_pct: number | null; avg_peak_unrealized_pct: number | null;
 };
 
 type Cohorts = {
-  by_exit_reason: CohortRow[];
-  by_source: CohortRow[];
-  by_strategy: CohortRow[];
-  by_score_band: CohortRow[];
-  by_age_band: CohortRow[];
-  by_narrative: CohortRow[];
-  by_archetype: CohortRow[];
+  by_exit_reason: CohortRow[]; by_source: CohortRow[]; by_strategy: CohortRow[];
+  by_score_band: CohortRow[]; by_age_band: CohortRow[]; by_narrative: CohortRow[]; by_archetype: CohortRow[];
 };
 
 type WeeklyReportResponse = {
   window_days: number;
-  summary: {
-    window_days: number;
-    closed_count: number;
-    win_rate: number;
-    realized_pnl_sol: number;
-    avg_giveback_pct: number;
-    avg_peak_unrealized_pct: number;
-  };
-  leaders: {
-    strategy: CohortRow | null;
-    source: CohortRow | null;
-    score_band: CohortRow | null;
-    age_band: CohortRow | null;
-    exit_reason: CohortRow | null;
-    narrative: CohortRow | null;
-    archetype: CohortRow | null;
-  };
+  summary: { window_days: number; closed_count: number; win_rate: number; realized_pnl_sol: number; avg_giveback_pct: number; avg_peak_unrealized_pct: number };
+  leaders: { strategy: CohortRow | null; source: CohortRow | null; score_band: CohortRow | null; age_band: CohortRow | null; exit_reason: CohortRow | null; narrative: CohortRow | null; archetype: CohortRow | null };
   cohorts: Cohorts;
   insights: string[];
 };
 
-function CohortList({
-  title,
-  subtitle,
-  rows,
-}: {
-  title: string;
-  subtitle: string;
-  rows: CohortRow[];
-}) {
+const PAGE_SIZE = 30;
+
+function SCard({ label, value, sub, color, tip }: { label: string; value: string; sub?: string; color?: string; tip?: string }) {
   return (
-    <Panel title={title} subtitle={subtitle}>
-      {rows.length ? (
-        <div className="space-y-3">
-          {rows.slice(0, 4).map((row, idx) => (
-            <div key={row.label} className={`rounded-2xl border p-4 ${
-              idx === 0 ? "border-[var(--accent)]/30 bg-[var(--accent)]/5" : "border-white/8 bg-black/10"
-            }`}>
-              <div className="flex items-center justify-between">
-                <div className="font-medium text-white">
-                  {row.label}
-                  {idx === 0 && <span className="ml-2 rounded-full bg-[var(--accent)]/20 px-2 py-0.5 text-[9px] uppercase tracking-wider text-[var(--accent)]">Best</span>}
-                </div>
-                <div className="text-xs text-[var(--muted-foreground)]">{row.count} trades</div>
-              </div>
-              <div className="mt-2 grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-3">
-                <div>Win Rate: <span className={row.win_rate >= 60 ? "text-emerald-300" : row.win_rate >= 45 ? "text-amber-300" : "text-red-300"}>{row.win_rate.toFixed(0)}%</span></div>
-                <div>Realized: {row.realized_pnl_sol.toFixed(4)} SOL</div>
-                <div>Give-Back: <span className={row.avg_giveback_pct !== null ? (row.avg_giveback_pct <= 20 ? "text-emerald-300" : row.avg_giveback_pct <= 40 ? "text-amber-300" : "text-red-300") : ""}>{row.avg_giveback_pct !== null ? `${row.avg_giveback_pct.toFixed(1)}%` : "n/a"}</span></div>
-              </div>
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="text-sm text-[var(--muted-foreground)]">No closed-trade cohorts yet.</div>
-      )}
-    </Panel>
+    <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 10, padding: "14px 16px" }}>
+      <div style={{ fontSize: 10, color: "var(--t3)", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 500, marginBottom: 6 }}>{label}</div>
+      <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+        <div style={{ fontSize: 20, fontWeight: 700, fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)", letterSpacing: "-0.02em", color: color || "var(--foreground)" }}>{value}</div>
+        {tip && <Tooltip text={tip} />}
+      </div>
+      {sub && <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 3 }}>{sub}</div>}
+    </div>
   );
 }
 
-const PAGE_SIZE = 30;
+function CohortPanel({ title, rows }: { title: string; rows: CohortRow[] }) {
+  if (!rows.length) return null;
+  return (
+    <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+      <div style={{ padding: "12px 18px", background: "var(--bg2)", borderBottom: "1px solid var(--border)" }}>
+        <span style={{ fontSize: 12, fontWeight: 600, color: "var(--foreground)" }}>{title}</span>
+      </div>
+      <div style={{ padding: "12px 16px", display: "flex", flexDirection: "column", gap: 8 }}>
+        {rows.slice(0, 4).map((row, idx) => (
+          <div key={row.label} style={{ padding: "10px 12px", borderRadius: 8, background: idx === 0 ? "rgba(249,115,22,0.06)" : "var(--bg2)", border: `1px solid ${idx === 0 ? "rgba(249,115,22,0.2)" : "var(--border)"}` }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ fontSize: 12, fontWeight: 600, color: "var(--foreground)" }}>{row.label}</span>
+                {idx === 0 && <span style={{ fontSize: 9, fontWeight: 600, textTransform: "uppercase", letterSpacing: "0.08em", padding: "1px 6px", borderRadius: 4, background: "rgba(249,115,22,0.15)", color: "var(--accent)" }}>Best</span>}
+              </div>
+              <span style={{ fontSize: 10, color: "var(--t3)" }}>{row.count} trades</span>
+            </div>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 4 }}>
+              {[
+                { label: "Win Rate", value: `${row.win_rate.toFixed(0)}%`, color: row.win_rate >= 60 ? "var(--green)" : row.win_rate >= 45 ? "var(--yellow)" : "var(--red)" },
+                { label: "Realized", value: `${row.realized_pnl_sol.toFixed(4)} SOL`, color: "var(--foreground)" },
+                { label: "Give-Back", value: row.avg_giveback_pct != null ? `${row.avg_giveback_pct.toFixed(1)}%` : "n/a", color: row.avg_giveback_pct != null ? (row.avg_giveback_pct <= 20 ? "var(--green)" : row.avg_giveback_pct <= 40 ? "var(--yellow)" : "var(--red)") : "var(--t3)" },
+              ].map((s) => (
+                <div key={s.label}>
+                  <div style={{ fontSize: 9, color: "var(--t3)", textTransform: "uppercase", letterSpacing: "0.06em" }}>{s.label}</div>
+                  <div style={{ fontSize: 11, fontWeight: 600, color: s.color, fontFamily: "var(--font-mono, monospace)", marginTop: 1 }}>{s.value}</div>
+                </div>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
 
 export function TradesDashboard() {
   const { uid } = useActiveUid();
-  const [filter, setFilter] = useState<string | null>(null); // null = loading, set from mode
+  const [filter, setFilter] = useState<string | null>(null);
   const [trades, setTrades] = useState<TradeRow[]>([]);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [stats, setStats] = useState<TradeStatsResponse["summary"] | null>(null);
   const [weekly, setWeekly] = useState<WeeklyReportResponse | null>(null);
-  const [cohorts, setCohorts] = useState<Cohorts>({
-    by_exit_reason: [],
-    by_source: [],
-    by_strategy: [],
-    by_score_band: [],
-    by_age_band: [],
-    by_narrative: [],
-    by_archetype: [],
-  });
+  const [cohorts, setCohorts] = useState<Cohorts>({ by_exit_reason: [], by_source: [], by_strategy: [], by_score_band: [], by_age_band: [], by_narrative: [], by_archetype: [] });
   const [error, setError] = useState("");
 
-  // On uid change, fetch the user's current trading mode and default the filter to it
   useEffect(() => {
-    if (!uid) {
-      setFilter("paper");
-      return;
-    }
+    if (!uid) { setFilter("paper"); return; }
     apiFetch<{ mode: string }>("/mode", { query: { uid } })
       .then((r) => setFilter(r.mode === "live" ? "live" : "paper"))
       .catch(() => setFilter("paper"));
   }, [uid]);
 
   useEffect(() => {
-    if (filter === null) return; // wait until mode is resolved
+    if (filter === null) return;
     async function load() {
-      if (!uid) {
-        setTrades([]);
-        setOffset(0);
-        setHasMore(false);
-        setStats(null);
-        setWeekly(null);
-        setCohorts({
-          by_exit_reason: [],
-          by_source: [],
-          by_strategy: [],
-          by_score_band: [],
-          by_age_band: [],
-          by_narrative: [],
-          by_archetype: [],
-        });
-        return;
-      }
+      if (!uid) { setTrades([]); setOffset(0); setHasMore(false); setStats(null); setWeekly(null); setCohorts({ by_exit_reason: [], by_source: [], by_strategy: [], by_score_band: [], by_age_band: [], by_narrative: [], by_archetype: [] }); return; }
       try {
         const fs = filter ?? undefined;
         const [tradeData, statData, weeklyData] = await Promise.all([
@@ -198,19 +136,9 @@ export function TradesDashboard() {
         setHasMore((tradeData.trades || []).length === PAGE_SIZE);
         setStats(statData.summary);
         setWeekly(weeklyData);
-        setCohorts({
-          by_exit_reason: statData.cohorts?.by_exit_reason || [],
-          by_source: statData.cohorts?.by_source || [],
-          by_strategy: statData.cohorts?.by_strategy || [],
-          by_score_band: statData.cohorts?.by_score_band || [],
-          by_age_band: statData.cohorts?.by_age_band || [],
-          by_narrative: statData.cohorts?.by_narrative || [],
-          by_archetype: statData.cohorts?.by_archetype || [],
-        });
+        setCohorts({ by_exit_reason: statData.cohorts?.by_exit_reason || [], by_source: statData.cohorts?.by_source || [], by_strategy: statData.cohorts?.by_strategy || [], by_score_band: statData.cohorts?.by_score_band || [], by_age_band: statData.cohorts?.by_age_band || [], by_narrative: statData.cohorts?.by_narrative || [], by_archetype: statData.cohorts?.by_archetype || [] });
         setError("");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load trades");
-      }
+      } catch (err) { setError(err instanceof Error ? err.message : "Failed to load trades"); }
     }
     load();
   }, [filter, uid]);
@@ -219,245 +147,191 @@ export function TradesDashboard() {
     if (!uid || loadingMore) return;
     setLoadingMore(true);
     try {
-      const tradeData = await apiFetch<TradesResponse>("/trades", {
-        query: { uid, limit: PAGE_SIZE, offset, filter_spec: filter ?? undefined },
-      });
+      const tradeData = await apiFetch<TradesResponse>("/trades", { query: { uid, limit: PAGE_SIZE, offset, filter_spec: filter ?? undefined } });
       const newRows = tradeData.trades || [];
       setTrades((prev) => [...prev, ...newRows]);
       setOffset((prev) => prev + PAGE_SIZE);
       setHasMore(newRows.length === PAGE_SIZE);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to load more trades");
-    } finally {
-      setLoadingMore(false);
-    }
+    } catch (err) { setError(err instanceof Error ? err.message : "Failed to load more"); }
+    finally { setLoadingMore(false); }
   }
 
   if (!uid) {
     return (
-      <Panel title="Trade Center" subtitle="Set your Telegram UID to load your ledger and closed-trade stats.">
-        <div className="text-sm text-[var(--muted-foreground)]">
-          Add your Telegram UID in the top bar to unlock your trade history, filters, and performance stats.
-        </div>
-      </Panel>
+      <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 14, padding: 40, textAlign: "center" }}>
+        <div style={{ fontSize: 13, color: "var(--t3)" }}>Set your Telegram UID in the top bar to view trades.</div>
+      </div>
     );
   }
 
+  const filterOptions = ["all", "wins", "losses", "buys", "sells", "paper", "live"];
+
   return (
-    <div className="space-y-6">
-      <div className="grid gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <Panel title="Trades" subtitle="Ledger rows">
-          <div className="text-3xl font-semibold text-white">{stats?.total_rows ?? 0}</div>
-        </Panel>
-        <Panel title="Closed" subtitle="Realized exits">
-          <div className="text-3xl font-semibold text-white">{stats?.closed_count ?? 0}</div>
-        </Panel>
-        <Panel title="Win Rate" subtitle="Closed trade ratio">
-          <div className="text-3xl font-semibold text-white">{stats ? `${stats.win_rate.toFixed(0)}%` : "0%"}</div>
-        </Panel>
-        <Panel title="Realized P&L" subtitle="SOL">
-          <div className="text-3xl font-semibold text-white">{stats?.realized_pnl_sol?.toFixed(4) ?? "0.0000"}</div>
-        </Panel>
-        <Panel title="Avg Give-Back" subtitle="Peak to exit">
-          <div className="flex items-center gap-1">
-            <div className="text-3xl font-semibold text-white">
-              {stats ? `${stats.avg_giveback_pct.toFixed(1)}%` : "0.0%"}
-            </div>
-            <Tooltip text="The percentage of peak unrealized gain that was surrendered before the position closed. Lower is better — means exits were well-timed." />
-          </div>
-        </Panel>
-        <Panel title="Peak Unrealized" subtitle="Before exit">
-          <div className="flex items-center gap-1">
-            <div className="text-3xl font-semibold text-white">
-              {stats ? `${stats.avg_peak_unrealized_pct.toFixed(1)}%` : "0.0%"}
-            </div>
-            <Tooltip text="The highest unrealized gain the position reached before closing. High peak + low give-back = excellent exit timing." />
-          </div>
-        </Panel>
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+      {/* Stats row */}
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
+        <SCard label="Trades" value={String(stats?.total_rows ?? 0)} sub="ledger rows" />
+        <SCard label="Closed" value={String(stats?.closed_count ?? 0)} sub="realized exits" />
+        <SCard label="Win Rate" value={stats ? `${stats.win_rate.toFixed(0)}%` : "—"} color={stats ? (stats.win_rate >= 50 ? "var(--green)" : "var(--red)") : undefined} sub={stats ? `${stats.closed_count} closed` : undefined} />
+        <SCard label="Realized P&L" value={stats?.realized_pnl_sol != null ? `${stats.realized_pnl_sol >= 0 ? "+" : ""}${stats.realized_pnl_sol.toFixed(4)}` : "—"} sub="SOL" color={stats ? (stats.realized_pnl_sol >= 0 ? "var(--green)" : "var(--red)") : undefined} />
+        <SCard label="Avg Give-Back" value={stats ? `${stats.avg_giveback_pct.toFixed(1)}%` : "—"} sub="peak to exit" tip="The percentage of peak unrealized gain surrendered before closing. Lower = better exits." />
+        <SCard label="Peak Unrealized" value={stats ? `${stats.avg_peak_unrealized_pct.toFixed(1)}%` : "—"} sub="before exit" tip="Highest unrealized gain reached before closing. High peak + low give-back = excellent timing." />
       </div>
 
-      <div className="grid gap-4 lg:grid-cols-4">
-        <Panel title="Top Strategy" subtitle="Best closed cohort">
-          <div className="text-xl font-semibold text-white">{stats?.top_strategy || "None"}</div>
-        </Panel>
-        <Panel title="Top Source" subtitle="Best discovery path">
-          <div className="text-xl font-semibold text-white">{stats?.top_source || "None"}</div>
-        </Panel>
-        <Panel title="Top Archetype" subtitle="Most productive pattern">
-          <div className="text-xl font-semibold text-white">{stats?.top_archetype || "None"}</div>
-        </Panel>
-        <Panel title="Top Narrative" subtitle="Most active theme">
-          <div className="text-xl font-semibold text-white">{stats?.top_narrative || "None"}</div>
-        </Panel>
-      </div>
-
-      <Panel title="Weekly Optimization Report" subtitle="Realized performance over the last 7 days.">
-        {weekly?.summary.closed_count ? (
-          <div className="space-y-5">
-            <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-6">
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">Closed</div>
-                <div className="mt-2 text-2xl font-semibold text-white">{weekly.summary.closed_count}</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">Win Rate</div>
-                <div className="mt-2 text-2xl font-semibold text-white">{weekly.summary.win_rate.toFixed(0)}%</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">Realized</div>
-                <div className="mt-2 text-2xl font-semibold text-white">{weekly.summary.realized_pnl_sol.toFixed(4)} SOL</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">Give-Back</div>
-                <div className="mt-2 text-2xl font-semibold text-white">{weekly.summary.avg_giveback_pct.toFixed(1)}%</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">Best Strategy</div>
-                <div className="mt-2 text-lg font-semibold text-white">{weekly.leaders.strategy?.label || "None"}</div>
-              </div>
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="text-xs uppercase tracking-[0.18em] text-[var(--muted-foreground)]">Best Source</div>
-                <div className="mt-2 text-lg font-semibold text-white">{weekly.leaders.source?.label || "None"}</div>
-              </div>
+      {/* Top performers */}
+      {stats && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(130px, 1fr))", gap: 12 }}>
+          {[
+            { label: "Top Strategy", value: stats.top_strategy || "None" },
+            { label: "Top Source", value: stats.top_source || "None" },
+            { label: "Top Archetype", value: stats.top_archetype || "None" },
+            { label: "Top Narrative", value: stats.top_narrative || "None" },
+          ].map((s) => (
+            <div key={s.label} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 10, padding: "12px 14px" }}>
+              <div style={{ fontSize: 10, color: "var(--t3)", textTransform: "uppercase", letterSpacing: "0.1em", fontWeight: 500, marginBottom: 5 }}>{s.label}</div>
+              <div style={{ fontSize: 13, fontWeight: 600, color: "var(--foreground)" }}>{s.value}</div>
             </div>
+          ))}
+        </div>
+      )}
 
-            {weekly.insights.length ? (
-              <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="mb-3 text-sm font-medium text-white">What worked this week</div>
-                <div className="space-y-2 text-sm text-[var(--muted-foreground)]">
+      {/* Weekly report */}
+      {weekly?.summary.closed_count ? (
+        <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+          <div style={{ padding: "14px 20px", background: "var(--bg2)", borderBottom: "1px solid var(--border)" }}>
+            <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)" }}>7-Day Optimization Report</h2>
+          </div>
+          <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(110px, 1fr))", gap: 10 }}>
+              {[
+                { label: "Closed", value: String(weekly.summary.closed_count) },
+                { label: "Win Rate", value: `${weekly.summary.win_rate.toFixed(0)}%` },
+                { label: "Realized", value: `${weekly.summary.realized_pnl_sol.toFixed(4)} SOL` },
+                { label: "Give-Back", value: `${weekly.summary.avg_giveback_pct.toFixed(1)}%` },
+                { label: "Best Strategy", value: weekly.leaders.strategy?.label || "None" },
+                { label: "Best Source", value: weekly.leaders.source?.label || "None" },
+              ].map((s) => (
+                <div key={s.label} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+                  <div style={{ fontSize: 9, color: "var(--t3)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>{s.label}</div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: "var(--foreground)", fontFamily: "var(--font-mono, monospace)" }}>{s.value}</div>
+                </div>
+              ))}
+            </div>
+            {weekly.insights.length > 0 && (
+              <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 8, padding: "12px 14px" }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: "var(--foreground)", marginBottom: 8 }}>What worked this week</div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                   {weekly.insights.map((insight) => (
-                    <div key={insight}>{insight}</div>
+                    <div key={insight} style={{ fontSize: 11, color: "var(--t2)" }}>• {insight}</div>
                   ))}
                 </div>
               </div>
-            ) : null}
-
-            <div className="grid gap-4 xl:grid-cols-2">
-              <CohortList
-                title="Weekly Strategy Leaders"
-                subtitle="Best playbooks over the current window."
-                rows={weekly.cohorts.by_strategy}
-              />
-              <CohortList
-                title="Weekly Source Leaders"
-                subtitle="Discovery sources with real closed P&L this week."
-                rows={weekly.cohorts.by_source}
-              />
-              <CohortList
-                title="Weekly Score Bands"
-                subtitle="Which entry score ranges are paying right now."
-                rows={weekly.cohorts.by_score_band}
-              />
-              <CohortList
-                title="Weekly Age Bands"
-                subtitle="Which freshness windows are actually converting."
-                rows={weekly.cohorts.by_age_band}
-              />
+            )}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+              <CohortPanel title="Weekly Strategy Leaders" rows={weekly.cohorts.by_strategy} />
+              <CohortPanel title="Weekly Source Leaders" rows={weekly.cohorts.by_source} />
+              <CohortPanel title="Weekly Score Bands" rows={weekly.cohorts.by_score_band} />
+              <CohortPanel title="Weekly Age Bands" rows={weekly.cohorts.by_age_band} />
             </div>
           </div>
-        ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
-            No closed trades in the last 7 days yet, so the optimization report has nothing to rank.
-          </div>
-        )}
-      </Panel>
+        </div>
+      ) : null}
 
-      <Panel title="Exit Performance" subtitle="Which exits are protecting profit best.">
-        {cohorts.by_exit_reason.length ? (
-          <div className="space-y-3">
-            <div className="text-sm text-[var(--muted-foreground)]">
-              Best exit right now: <span className="font-medium text-white">{stats?.best_exit_reason || "None"}</span>
-            </div>
-            {cohorts.by_exit_reason.slice(0, 4).map((row) => (
-              <div key={row.label} className="rounded-2xl border border-white/8 bg-black/10 p-4">
-                <div className="flex items-center justify-between">
-                  <div className="font-medium text-white">{row.label}</div>
-                  <div className="text-xs text-[var(--muted-foreground)]">{row.count} exits</div>
-                </div>
-                <div className="mt-2 grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-4">
-                  <div>Win Rate: {row.win_rate.toFixed(0)}%</div>
-                  <div>Realized: {row.realized_pnl_sol.toFixed(4)} SOL</div>
-                  <div>Give-Back: {row.avg_giveback_pct !== null ? `${row.avg_giveback_pct.toFixed(1)}%` : "n/a"}</div>
-                  <div>Peak: {row.avg_peak_unrealized_pct !== null ? `${row.avg_peak_unrealized_pct.toFixed(1)}%` : "n/a"}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="text-sm text-[var(--muted-foreground)]">
-            Exit analytics will appear after your first closed trades are attributed.
-          </div>
-        )}
-      </Panel>
+      {/* Exit performance */}
+      {cohorts.by_exit_reason.length > 0 && (
+        <CohortPanel title={`Exit Performance · Best: ${stats?.best_exit_reason || "None"}`} rows={cohorts.by_exit_reason} />
+      )}
 
-      <div className="grid gap-4 xl:grid-cols-2">
-        <CohortList
-          title="Strategy Cohorts"
-          subtitle="How each playbook is performing."
-          rows={cohorts.by_strategy}
-        />
-        <CohortList
-          title="Source Cohorts"
-          subtitle="Which discovery sources are actually paying."
-          rows={cohorts.by_source}
-        />
-        <CohortList
-          title="Score Bands"
-          subtitle="Expected value by entry score."
-          rows={cohorts.by_score_band}
-        />
-        <CohortList
-          title="Age Bands"
-          subtitle="Performance by token freshness."
-          rows={cohorts.by_age_band}
-        />
+      {/* Cohort grids */}
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+        <CohortPanel title="Strategy Cohorts" rows={cohorts.by_strategy} />
+        <CohortPanel title="Source Cohorts" rows={cohorts.by_source} />
+        <CohortPanel title="Score Bands" rows={cohorts.by_score_band} />
+        <CohortPanel title="Age Bands" rows={cohorts.by_age_band} />
       </div>
 
-      <Panel title="Trade Ledger" subtitle="Filter and review recent trade rows.">
-        <div className="mb-4 flex flex-wrap gap-2">
-          {["all", "wins", "losses", "buys", "sells", "paper", "live"].map((option) => (
-            <button
-              key={option}
-              type="button"
-              onClick={() => setFilter(option)}
-              className={`rounded-full px-3 py-1.5 text-xs font-medium ${filter === option ? "bg-[var(--accent)] text-[var(--accent-foreground)]" : "border border-white/10 text-[var(--muted-foreground)]"}`}
-            >
-              {option}
-            </button>
-          ))}
+      {/* Trade Ledger */}
+      <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+        <div style={{ padding: "14px 20px", background: "var(--bg2)", borderBottom: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 10 }}>
+          <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)" }}>Trade Ledger</h2>
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap" }}>
+            {filterOptions.map((option) => (
+              <button
+                key={option}
+                type="button"
+                onClick={() => setFilter(option)}
+                style={{
+                  fontSize: 11, fontWeight: 500, padding: "4px 10px", borderRadius: 6, cursor: "pointer",
+                  background: filter === option ? "var(--accent)" : "transparent",
+                  color: filter === option ? "#fff" : "var(--t3)",
+                  border: `1px solid ${filter === option ? "var(--accent)" : "var(--border)"}`,
+                }}
+              >
+                {option}
+              </button>
+            ))}
+          </div>
         </div>
-        {error ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
-        <div className="space-y-3">
-          {trades.map((trade, idx) => (
-            <div key={`${trade.mint}-${trade.ts}-${idx}`} className="rounded-2xl border border-white/8 bg-black/10 p-4">
-              <div className="flex items-center justify-between">
-                <div className="font-medium text-white">
-                  {trade.symbol || trade.mint?.slice(0, 6) || "Unknown"} · {String(trade.action || "").toUpperCase()}
+
+        {error && (
+          <div style={{ margin: 16, padding: "10px 14px", background: "rgba(244,63,94,0.1)", border: "1px solid rgba(244,63,94,0.25)", borderRadius: 8, fontSize: 12, color: "var(--red)" }}>
+            {error}
+          </div>
+        )}
+
+        <div>
+          {trades.map((trade, idx) => {
+            const isBuy = String(trade.action).toLowerCase() === "buy";
+            const pnl = trade.pnl_pct != null ? Number(trade.pnl_pct) : null;
+            return (
+              <div key={`${trade.mint}-${trade.ts}-${idx}`}
+                style={{ display: "grid", gridTemplateColumns: "auto 1fr auto", alignItems: "center", gap: 12, padding: "10px 20px", borderBottom: "1px solid var(--border)" }}
+                className="hover:bg-white/[0.02] transition-colors"
+              >
+                {/* Action badge */}
+                <div style={{ padding: "4px 8px", borderRadius: 6, fontSize: 10, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase", background: isBuy ? "rgba(34,211,160,0.12)" : "rgba(244,63,94,0.12)", color: isBuy ? "var(--green)" : "var(--red)" }}>
+                  {trade.action || "—"}
                 </div>
-                <div className="text-xs text-[var(--muted-foreground)]">{trade.mode || "paper"}</div>
+
+                {/* Token + details */}
+                <div>
+                  <div style={{ fontSize: 12, fontWeight: 600, color: "var(--foreground)" }}>
+                    {trade.symbol || trade.mint?.slice(0, 6) || "Unknown"}
+                    <span style={{ marginLeft: 6, fontSize: 10, color: "var(--t3)", fontWeight: 400 }}>{trade.mode || "paper"}</span>
+                  </div>
+                  <div style={{ display: "flex", gap: 10, marginTop: 2, fontSize: 11, color: "var(--t3)", fontFamily: "var(--font-mono, monospace)" }}>
+                    <span>${Number(trade.price_usd || 0).toFixed(8)}</span>
+                    <span>{Number(trade.token_amount || 0).toLocaleString()} tokens</span>
+                    <span>{Number(trade.sol_amount || trade.sol_received || 0).toFixed(4)} SOL</span>
+                  </div>
+                </div>
+
+                {/* PnL */}
+                {pnl != null ? (
+                  <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "var(--font-mono, monospace)", color: pnl >= 0 ? "var(--green)" : "var(--red)" }}>
+                    {pnl >= 0 ? "+" : ""}{pnl.toFixed(1)}%
+                  </div>
+                ) : <div />}
               </div>
-              <div className="mt-2 grid gap-2 text-sm text-[var(--muted-foreground)] md:grid-cols-4">
-                <div>Price: ${Number(trade.price_usd || 0).toFixed(8)}</div>
-                <div>Tokens: {Number(trade.token_amount || 0).toLocaleString()}</div>
-                <div>SOL: {Number(trade.sol_amount || trade.sol_received || 0).toFixed(4)}</div>
-                <div>PnL: {trade.pnl_pct !== undefined && trade.pnl_pct !== null ? `${Number(trade.pnl_pct).toFixed(1)}%` : "n/a"}</div>
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
+
         {hasMore && (
-          <div className="mt-4 flex justify-center">
+          <div style={{ padding: 16, textAlign: "center" }}>
             <button
               type="button"
               onClick={loadMore}
               disabled={loadingMore}
-              className="rounded-full border border-white/10 px-5 py-2 text-sm text-[var(--muted-foreground)] disabled:opacity-50"
+              style={{ fontSize: 12, padding: "8px 20px", borderRadius: 8, background: "var(--bg2)", border: "1px solid var(--border)", color: "var(--t2)", cursor: "pointer" }}
+              className="hover:border-[var(--border2)] disabled:opacity-50"
             >
               {loadingMore ? "Loading…" : "Load more"}
             </button>
           </div>
         )}
-      </Panel>
+      </div>
     </div>
   );
 }

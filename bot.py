@@ -108,6 +108,28 @@ def _portfolio_lock(uid: int) -> asyncio.Lock:
         _portfolio_locks[uid] = asyncio.Lock()
     return _portfolio_locks[uid]
 
+# ─── Per-position sell guard ──────────────────────────────────────────────────
+# Prevents a second swap from being submitted on-chain while one is already
+# in-flight for the same (uid, mint) pair. check_auto_sell and the API's
+# /sell endpoint both compete for the same position; without this guard both
+# can read a non-zero balance, submit separate swaps, and both land on-chain.
+
+_sell_in_flight: set[tuple[int, str]] = set()
+
+def _claim_sell(uid: int, mint: str) -> bool:
+    """Atomically claim the sell slot for (uid, mint).
+    Returns True if the claim succeeded (caller may proceed), False if another
+    sell is already in-flight and this one should be skipped."""
+    key = (uid, mint)
+    if key in _sell_in_flight:
+        return False
+    _sell_in_flight.add(key)
+    return True
+
+def _release_sell(uid: int, mint: str) -> None:
+    """Release the sell slot for (uid, mint) once the swap settles."""
+    _sell_in_flight.discard((uid, mint))
+
 # ─── Storage helpers ──────────────────────────────────────────────────────────
 
 def _load(path: str) -> dict:
@@ -288,6 +310,20 @@ def get_global_time_exit() -> dict:
 def set_global_time_exit(data: dict):
     _db.set_setting("global_time_exit", data)
 
+def get_user_profile_overrides(uid: int) -> dict:
+    """Return user-customised exit parameters per strategy profile."""
+    return _db.get_setting(f"prof_overrides_{uid}", {})
+
+def set_user_profile_overrides(uid: int, overrides: dict):
+    _db.set_setting(f"prof_overrides_{uid}", overrides)
+
+def get_user_profile_entry_overrides(uid: int) -> dict:
+    """Return user-customised entry rule parameters per strategy profile."""
+    return _db.get_setting(f"prof_entry_overrides_{uid}", {})
+
+def set_user_profile_entry_overrides(uid: int, overrides: dict):
+    _db.set_setting(f"prof_entry_overrides_{uid}", overrides)
+
 def get_user_as_presets(uid: int) -> list:
     return _db.get_setting(f"as_presets_{uid}", [{"mult": 2.0, "sell_pct": 50}, {"mult": 4.0, "sell_pct": 50}])
 
@@ -432,7 +468,10 @@ def setup_auto_sell(uid: int, mint: str, symbol: str,
         narrative=narrative,
         entry_score_effective=entry_score_effective,
     )
-    strategy_profiles.apply_auto_sell_profile(config, strategy_profile)
+    strategy_profiles.apply_auto_sell_profile(
+        config, strategy_profile,
+        user_overrides=get_user_profile_overrides(uid),
+    )
     set_auto_sell(uid, mint, config)
     return config
 
@@ -684,10 +723,37 @@ def _save_user_modes():
 
 user_modes: dict[int, str]  = _load_user_modes()
 user_state: dict[int, dict] = {}
+LIVE_TRADING_ENABLED = os.environ.get("DDX_ENABLE_LIVE_TRADING", "0").strip().lower() in {"1", "true", "yes", "on"}
+ADMIN_ID_SET = {int(uid) for uid in ADMIN_IDS}
+TELEGRAM_WALLET_LOCKDOWN = True
+DISABLED_WALLET_ACTIONS = {
+    "create",
+    "create_manual",
+    "create_encrypted",
+    "save_pending_bip39",
+    "save_pending",
+    "import",
+    "import_key",
+    "import_seed",
+    "export",
+    "send_sol",
+    "send_sol_exec",
+    "send_token",
+    "send_token_pick",
+    "send_token_exec",
+}
+SAFE_WALLET_ACTIONS = {"menu", "receive", "tracked", "discover", "clustertop"}
 
 
 def get_mode(uid: int) -> str:
-    return user_modes.get(uid, "paper")
+    mode = user_modes.get(uid, "paper")
+    if mode == "live" and not LIVE_TRADING_ENABLED:
+        return "paper"
+    return mode
+
+
+def is_admin_user(uid: int) -> bool:
+    return int(uid) in ADMIN_ID_SET
 
 def set_state(uid: int, **kwargs):
     user_state.setdefault(uid, {}).update(kwargs)
@@ -1281,6 +1347,9 @@ async def _swap_with_retry(
     with higher slippage makes us MORE exploitable (the sandwich bot knows we'll accept
     a worse price on the next block).
     """
+    if not LIVE_TRADING_ENABLED:
+        return "ERROR: live trading disabled", None, 0, 0
+
     slippage = get_user_slippage(uid)
     quote = None
     sig   = "ERROR: no attempts made"
@@ -1368,17 +1437,18 @@ def send_token_onchain(mint: str, to_address: str, raw_amount: int) -> str:
         from solders.message import MessageV0
         from solders.transaction import VersionedTransaction
         kp         = Keypair.from_base58_string(WALLET_PRIVATE_KEY)
-        src_ata    = pumpfun.get_associated_token_address(str(kp.pubkey()), mint)
-        dst_ata    = pumpfun.get_associated_token_address(to_address, mint)
+        tok_prog   = pumpfun.get_mint_token_program(mint, SOLANA_RPC)
+        src_ata    = pumpfun.get_associated_token_address(str(kp.pubkey()), mint, tok_prog)
+        dst_ata    = pumpfun.get_associated_token_address(to_address, mint, tok_prog)
         src_pk     = Pubkey.from_string(src_ata)
         dst_pk     = Pubkey.from_string(dst_ata)
         mint_pk    = Pubkey.from_string(mint)
         dst_own_pk = Pubkey.from_string(to_address)
-        token_prog = Pubkey.from_string("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA")
+        token_prog = tok_prog
         instructions = []
         if not pumpfun.account_exists(dst_ata, SOLANA_RPC):
             instructions.append(pumpfun.make_create_ata_idempotent(
-                kp.pubkey(), dst_own_pk, mint_pk, dst_pk))
+                kp.pubkey(), dst_own_pk, mint_pk, dst_pk, tok_prog))
         # Token transfer instruction index 3
         transfer_data = bytes([3]) + struct.pack("<Q", raw_amount)
         instructions.append(Instruction(
@@ -1592,6 +1662,22 @@ async def execute_auto_sell(bot, uid: int, mint: str, symbol: str,
                              price_usd: float = 0.0, mcap: float = 0.0) -> bool:
     """Sell `sell_pct`% of the current position for this user/token.
     Returns True if the sell was executed, False if it failed/skipped."""
+    # Guard: skip if a sell for this position is already in-flight (e.g. from
+    # a concurrent API call or a previous check_auto_sell cycle that hasn't
+    # settled yet). This prevents double-swaps on the same position.
+    if not _claim_sell(uid, mint):
+        print(f"[AUTO-SELL] Skipping {mint[:8]} for uid={uid} — sell already in-flight", flush=True)
+        return False
+    try:
+        return await _execute_auto_sell_inner(bot, uid, mint, symbol, sell_pct, reason, mode, price_usd, mcap)
+    finally:
+        _release_sell(uid, mint)
+
+
+async def _execute_auto_sell_inner(bot, uid: int, mint: str, symbol: str,
+                                   sell_pct: int, reason: str, mode: str,
+                                   price_usd: float = 0.0, mcap: float = 0.0) -> bool:
+    """Inner sell implementation — always called with the sell-in-flight slot held."""
     # Quick pre-check outside lock
     raw_held = get_portfolio(uid).get(mint, 0)
     if raw_held <= 0 and mode == "live":
@@ -5297,11 +5383,18 @@ async def cmd_topalerts(update: Update, context: ContextTypes.DEFAULT_TYPE):
             ]])
         )
         return
-    top = sorted(alerts, key=lambda x: -x.get("timestamp", 0))[:10]
+    top = sorted(alerts, key=lambda x: -x.get("ts", x.get("timestamp", 0)))[:10]
     lines = ["*🏆 Top Scouts Today*\n"]
+    now_ts = time.time()
     for i, e in enumerate(top, 1):
         label = sc.priority_label(e["score"])
-        lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
+        ts = e.get("ts") or e.get("timestamp")
+        if ts:
+            mins_ago = (now_ts - ts) / 60
+            age_s = f"{mins_ago:.0f}m ago" if mins_ago < 60 else f"{mins_ago/60:.1f}h ago"
+        else:
+            age_s = "?"
+        lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100 · 🕐 {age_s}")
     await update.message.reply_text(
         "\n".join(lines), parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([[
@@ -6195,20 +6288,18 @@ async def _show_wallet_menu(send_fn):
     else:
         text = "*👛 Wallet*\n\nNo wallet configured yet."
 
+    if TELEGRAM_WALLET_LOCKDOWN:
+        text += "\n\nSecurity lockdown: wallet import, export, and transfer actions are disabled in Telegram."
+
     wallet_rows = []
     if WALLET_PRIVATE_KEY:
         wallet_rows += [
-            [InlineKeyboardButton("📤 Send SOL",   callback_data="wallet:send_sol"),
-             InlineKeyboardButton("📤 Send Token", callback_data="wallet:send_token")],
-            [InlineKeyboardButton("📥 Receive",    callback_data="wallet:receive")],
+            [InlineKeyboardButton("📥 Receive", callback_data="wallet:receive")],
         ]
     await send_fn(
         text, parse_mode="Markdown",
         reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("✨ Create New Wallet", callback_data="wallet:create"),
-             InlineKeyboardButton("📥 Import Wallet",     callback_data="wallet:import")],
             *wallet_rows,
-            [InlineKeyboardButton("🔑 Export Key ⚠️",    callback_data="wallet:export")],
             [InlineKeyboardButton("👁️ Tracked Wallets",   callback_data="wallet:tracked")],
             [InlineKeyboardButton("⬅️ Main Menu",         callback_data="menu:main")],
         ]),
@@ -6221,6 +6312,23 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     uid    = query.from_user.id
     action = query.data.split(":")[1]
     await query.answer()
+
+    if action in DISABLED_WALLET_ACTIONS and TELEGRAM_WALLET_LOCKDOWN:
+        await query.edit_message_text(
+            "Wallet management actions are disabled during security lockdown.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")
+            ]])
+        )
+        return
+    if action not in SAFE_WALLET_ACTIONS and not is_admin_user(uid):
+        await query.edit_message_text(
+            "This wallet action is restricted to configured admin IDs.",
+            reply_markup=InlineKeyboardMarkup([[
+                InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")
+            ]])
+        )
+        return
 
     if action == "menu":
         await _show_wallet_menu(query.edit_message_text)
@@ -6364,17 +6472,8 @@ async def wallet_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
 
     elif action == "export":
-        if not WALLET_PRIVATE_KEY:
-            await query.edit_message_text("No wallet stored.", reply_markup=back_kb())
-            return
-        from solders.keypair import Keypair as _KP
-        pubkey = str(_KP.from_base58_string(WALLET_PRIVATE_KEY).pubkey())
         await query.edit_message_text(
-            f"*🔑 Private Key Export*\n\n"
-            f"Address: `{pubkey}`\n\n"
-            f"Key: `{WALLET_PRIVATE_KEY}`\n\n"
-            f"⚠️ *Never share this key. Delete this message after saving.*",
-            parse_mode="Markdown",
+            "Private key export is disabled during security lockdown.",
             reply_markup=InlineKeyboardMarkup([[
                 InlineKeyboardButton("⬅️ Back", callback_data="wallet:menu")
             ]])
@@ -7323,15 +7422,22 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         items = [t for t in wl.values() if t.get("score", 0) >= watch_thr]
         items = sorted(items, key=lambda x: -x.get("score", 0))[:25]
         lines = [f"*👀 Watchlist* — score ≥ {watch_thr} | alert ≥ {alert_thr}\n"]
+        now_ts = time.time()
         for t in items:
             score = t.get("score", 0)
             flag  = "🔥" if score >= alert_thr else ("🟡" if score >= (watch_thr + alert_thr) // 2 else "⚪")
             mcap  = t.get("mcap", 0) or 0
             mcap_s = (f"${mcap/1_000_000:.2f}M" if mcap >= 1_000_000
                       else f"${mcap/1_000:.0f}K" if mcap >= 1_000 else f"${mcap:.0f}")
+            added = t.get("_added_at")
+            if added:
+                mins_ago = (now_ts - added) / 60
+                age_s = f"{mins_ago:.0f}m ago" if mins_ago < 60 else f"{mins_ago/60:.1f}h ago"
+            else:
+                age_s = "?"
             lines.append(
                 f"{flag} *{t['name']}* (${t['symbol']}) — `{score}/100`\n"
-                f"   MCap: {mcap_s}"
+                f"   MCap: {mcap_s} · 🕐 {age_s}"
             )
         await query.edit_message_text(
             "\n".join(lines), parse_mode="Markdown",
@@ -7354,11 +7460,18 @@ async def scanner_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 ]])
             )
             return
-        top   = sorted(alerts, key=lambda x: -x.get("timestamp", 0))[:10]
+        top   = sorted(alerts, key=lambda x: -x.get("ts", x.get("timestamp", 0)))[:10]
         lines = ["*🏆 Top Scouts Today*\n"]
+        now_ts = time.time()
         for i, e in enumerate(top, 1):
             label = sc.priority_label(e["score"])
-            lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100")
+            ts = e.get("ts") or e.get("timestamp")
+            if ts:
+                mins_ago = (now_ts - ts) / 60
+                age_s = f"{mins_ago:.0f}m ago" if mins_ago < 60 else f"{mins_ago/60:.1f}h ago"
+            else:
+                age_s = "?"
+            lines.append(f"{i}. {label} *{e['name']}* (${e['symbol']}) — {e['score']}/100 · 🕐 {age_s}")
         await query.edit_message_text(
             "\n".join(lines), parse_mode="Markdown",
             reply_markup=InlineKeyboardMarkup([[
@@ -7744,6 +7857,12 @@ async def mode_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query  = update.callback_query
     uid    = query.from_user.id
     chosen = query.data.split(":")[1]
+    if not is_admin_user(uid):
+        await query.answer("Mode changes are restricted to configured admin IDs.", show_alert=True)
+        return
+    if chosen == "live" and not LIVE_TRADING_ENABLED:
+        await query.answer("Live trading is disabled during security lockdown.", show_alert=True)
+        return
     if chosen == "live" and not WALLET_PRIVATE_KEY:
         await query.answer("Add WALLET_PRIVATE_KEY to config.py first!", show_alert=True)
         return
@@ -13745,6 +13864,14 @@ async def post_init(app):
         print(f"[BOOT] Removed {removed_invalid_wallets} invalid wallet alert rows", flush=True)
     # Inject auto-buy callback into pumpfeed (avoids circular import)
     pf.set_grad_autobuy_fn(execute_auto_buy)
+    # Inject sniper callback into pumpfeed — fans out new launches to all enabled sniper users
+    import sniper as _sniper
+    _sniper.set_notify_bot(app.bot)
+    def _pumpfeed_snipe(mint, symbol, name, creator_wallet, event_data=None):
+        for uid in _sniper.all_enabled_uids():
+            engine = _sniper.get_engine(uid)
+            asyncio.create_task(engine.attempt_snipe(mint, symbol, name, creator_wallet, event_data))
+    pf.set_snipe_fn(_pumpfeed_snipe)
     # Start pump.fun live feed WebSocket listener (supervised, auto-restarts)
     asyncio.create_task(_supervised_task("PUMPFEED", pf.run_pumpfeed, app.bot))
     # Poll pump.fun API for graduated tokens → pumpgrad DM notifications

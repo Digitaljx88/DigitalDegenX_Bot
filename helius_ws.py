@@ -116,6 +116,22 @@ class HeliusWatcher:
     # ── Mint extraction ───────────────────────────────────────────────────────
 
     @staticmethod
+    def _extract_mint_from_logs(logs: list) -> str:
+        """
+        Try to pull the new token mint from pump.fun log messages.
+        pump.fun emits a log line like:
+          'Program log: mint: <BASE58_ADDRESS>'
+        Falls back to empty string if not found (tx-fetch path handles it).
+        """
+        for line in logs:
+            if "mint:" in line.lower():
+                parts = line.split()
+                for part in parts:
+                    if 30 <= len(part) <= 44 and part.endswith("pump"):
+                        return part
+        return ""
+
+    @staticmethod
     def _extract_launch_mint(tx: dict) -> str:
         """
         Extract the new token mint from a pump.fun Create transaction.
@@ -153,7 +169,7 @@ class HeliusWatcher:
     # ── Event handlers ────────────────────────────────────────────────────────
 
     async def _handle_launch(self, sig: str, logs: list):
-        """pump.fun Create → post to launch feed."""
+        """pump.fun Create → snipe immediately, then post to launch feed."""
         if sig in self._seen_sigs:
             return
         # Only process new token creations
@@ -162,6 +178,20 @@ class HeliusWatcher:
         self._seen_sigs.add(sig)
 
         loop = asyncio.get_running_loop()
+
+        # ── Sniper fast-path: fire before any sleeps ──────────────────────────
+        # Extract mint from log messages if possible (avoids a tx fetch round-trip).
+        # pump.fun logs include the mint address as the first non-program argument.
+        snipe_mint = self._extract_mint_from_logs(logs)
+        if snipe_mint:
+            try:
+                import sniper as _sniper
+                for uid in _sniper.all_enabled_uids():
+                    engine = _sniper.get_engine(uid)
+                    asyncio.create_task(engine.attempt_snipe(snipe_mint))
+            except Exception as _se:
+                logger.debug(f"[Helius] sniper fast-path error: {_se}")
+        # ─────────────────────────────────────────────────────────────────────
 
         # Give RPC a moment to index the tx
         await asyncio.sleep(3)
@@ -172,6 +202,16 @@ class HeliusWatcher:
         mint = self._extract_launch_mint(tx)
         if not mint or mint in self._seen_mints:
             return
+
+        # Sniper fallback: if log-based extraction missed the mint, snipe now
+        if not snipe_mint and mint:
+            try:
+                import sniper as _sniper
+                for uid in _sniper.all_enabled_uids():
+                    engine = _sniper.get_engine(uid)
+                    asyncio.create_task(engine.attempt_snipe(mint))
+            except Exception as _se:
+                logger.debug(f"[Helius] sniper tx-fallback error: {_se}")
 
         lifecycle_store.record_launch_event(
             mint,

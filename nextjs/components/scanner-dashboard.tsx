@@ -4,8 +4,8 @@ import Link from "next/link";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { apiFetch } from "@/lib/api";
 import { useActiveUid } from "@/lib/active-uid";
-import { Tooltip } from "@/components/tooltip";
 import { ExternalLinks } from "@/components/external-links";
+import { topFactors, type BreakdownMap } from "@/lib/score-labels";
 
 type ScannerFeedItem = {
   mint: string;
@@ -23,6 +23,7 @@ type ScannerFeedItem = {
   alerted?: number;
   dq?: string;
   ts?: number;
+  breakdown?: BreakdownMap;
   autobuy_preview?: {
     eligible?: boolean;
     status?: string;
@@ -36,9 +37,9 @@ type ScannerFeedItem = {
 
 type ScannerFeedResponse = { count: number; items: ScannerFeedItem[] };
 type ModeResponse = { uid: number; mode: "paper" | "live" };
-
 type FilterTab = "all" | "alerted" | "tracked" | "dq";
 
+// ── Formatters ───────────────────────────────────────────────────
 function fmtMcap(v?: number) {
   if (!v) return "—";
   if (v >= 1_000_000) return `$${(v / 1_000_000).toFixed(2)}M`;
@@ -53,38 +54,55 @@ function fmtAge(v?: number) {
   return `${Math.round(v)}m`;
 }
 
-function scoreColor(score: number, dq?: string) {
-  if (dq) return "text-red-400";
-  if (score >= 75) return "text-emerald-400";
-  if (score >= 60) return "text-amber-400";
-  if (score >= 40) return "text-white/70";
-  return "text-white/35";
+// ── Token avatar color from mint hash ────────────────────────────
+const AVATAR_COLORS = [
+  { bg: "rgba(249,115,22,0.12)",  color: "#f97316", border: "rgba(249,115,22,0.22)" },
+  { bg: "rgba(96,165,250,0.10)",  color: "#60a5fa", border: "rgba(96,165,250,0.20)" },
+  { bg: "rgba(34,211,160,0.10)",  color: "#22d3a0", border: "rgba(34,211,160,0.20)" },
+  { bg: "rgba(167,139,250,0.10)", color: "#a78bfa", border: "rgba(167,139,250,0.20)" },
+  { bg: "rgba(251,191,36,0.10)",  color: "#fbbf24", border: "rgba(251,191,36,0.20)" },
+  { bg: "rgba(244,63,94,0.10)",   color: "#f43f5e", border: "rgba(244,63,94,0.20)" },
+];
+
+function avatarColor(mint: string) {
+  let h = 0;
+  for (let i = 0; i < mint.length; i++) h = (h * 31 + mint.charCodeAt(i)) >>> 0;
+  return AVATAR_COLORS[h % AVATAR_COLORS.length];
 }
 
-function scoreBg(score: number, dq?: string) {
-  if (dq) return "bg-red-500/20";
-  if (score >= 75) return "bg-emerald-500/20";
-  if (score >= 60) return "bg-amber-500/20";
-  return "bg-white/8";
+function initials(name?: string, symbol?: string) {
+  const s = symbol || name || "??";
+  return s.slice(0, 2).toUpperCase();
 }
 
-function buyRatioColor(r?: number) {
-  if (r == null) return "text-white/30";
-  if (r >= 0.65) return "text-emerald-400";
-  if (r >= 0.5) return "text-amber-400";
-  return "text-red-400/70";
+// ── Score helpers ─────────────────────────────────────────────────
+function scoreBadgeStyle(score: number, dq?: string) {
+  if (dq)       return { bg: "rgba(244,63,94,0.12)",  color: "#f43f5e", border: "rgba(244,63,94,0.25)",  bar: "#f43f5e" };
+  if (score >= 65) return { bg: "rgba(249,115,22,0.12)",  color: "#f97316", border: "rgba(249,115,22,0.25)", bar: "#f97316" };
+  if (score >= 50) return { bg: "rgba(251,191,36,0.10)",  color: "#fbbf24", border: "rgba(251,191,36,0.20)", bar: "#fbbf24" };
+  return            { bg: "rgba(139,144,168,0.10)", color: "#8b90a8", border: "rgba(139,144,168,0.18)", bar: "#555c78" };
 }
 
 export function ScannerDashboard() {
   const { uid } = useActiveUid();
   const [feed, setFeed] = useState<ScannerFeedItem[]>([]);
-  const [lastUpdated, setLastUpdated] = useState<string>("");
-  const [error, setError] = useState<string>("");
-  const [message, setMessage] = useState<string>("");
-  const [submittingMint, setSubmittingMint] = useState<string>("");
+  const [clock, setClock] = useState("");
+  const [error, setError] = useState("");
+  const [message, setMessage] = useState("");
+  const [submittingMint, setSubmittingMint] = useState("");
   const [buyAmount, setBuyAmount] = useState("0.1");
   const [tradeMode, setTradeMode] = useState<"paper" | "live">("paper");
   const [tab, setTab] = useState<FilterTab>("all");
+
+  // Live clock
+  useEffect(() => {
+    function tick() {
+      setClock(new Date().toLocaleTimeString("en-US", { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+    }
+    tick();
+    const t = setInterval(tick, 1000);
+    return () => clearInterval(t);
+  }, []);
 
   const loadFeed = useCallback(async () => {
     try {
@@ -92,7 +110,6 @@ export function ScannerDashboard() {
         query: { limit: 40, uid: uid || undefined },
       });
       setFeed(data.items || []);
-      setLastUpdated(new Date().toLocaleTimeString());
       setError("");
     } catch (err) {
       setError(err instanceof Error ? err.message : "Feed error");
@@ -101,7 +118,7 @@ export function ScannerDashboard() {
 
   useEffect(() => {
     loadFeed();
-    const t = window.setInterval(() => loadFeed(), 5000);
+    const t = window.setInterval(loadFeed, 5000);
     return () => window.clearInterval(t);
   }, [loadFeed]);
 
@@ -116,20 +133,20 @@ export function ScannerDashboard() {
     void loadMode();
   }, [uid]);
 
-  const filtered = useMemo(() => {
-    const base = feed.slice(0, 40);
-    if (tab === "alerted") return base.filter((i) => i.alerted && !i.dq);
-    if (tab === "tracked") return base.filter((i) => !i.alerted && !i.dq);
-    if (tab === "dq") return base.filter((i) => !!i.dq);
-    return base;
-  }, [feed, tab]);
-
   const counts = useMemo(() => ({
-    all: feed.length,
+    all:     feed.length,
     alerted: feed.filter((i) => i.alerted && !i.dq).length,
     tracked: feed.filter((i) => !i.alerted && !i.dq).length,
-    dq: feed.filter((i) => !!i.dq).length,
+    dq:      feed.filter((i) => !!i.dq).length,
   }), [feed]);
+
+  const filtered = useMemo(() => {
+    const base = feed.slice(0, 40);
+    if (tab === "alerted") return base.filter((i) => !!i.alerted && !i.dq);
+    if (tab === "tracked") return base.filter((i) => !i.alerted && !i.dq);
+    if (tab === "dq")      return base.filter((i) => !!i.dq);
+    return base;
+  }, [feed, tab]);
 
   async function quickBuy(mint: string) {
     if (!uid) { setError("Set your Telegram UID first."); return; }
@@ -146,33 +163,65 @@ export function ScannerDashboard() {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Buy failed");
       setTimeout(() => setError(""), 6000);
-      setMessage("");
     } finally {
       setSubmittingMint("");
     }
   }
 
   const TABS: { key: FilterTab; label: string }[] = [
-    { key: "all", label: "All" },
+    { key: "all",     label: "All" },
     { key: "alerted", label: "Alerted" },
     { key: "tracked", label: "Tracked" },
-    { key: "dq", label: "DQ'd" },
+    { key: "dq",      label: "DQ'd" },
   ];
 
   return (
-    <div className="overflow-hidden rounded-[28px] border border-white/8 bg-[#080e14]">
-      {/* Terminal header */}
-      <div className="flex flex-col gap-3 border-b border-white/8 px-4 py-3 md:flex-row md:items-center md:justify-between">
-        <div className="flex items-center gap-4">
+    <div
+      style={{
+        background: "var(--bg1)",
+        border: "1px solid var(--border)",
+        borderRadius: 14,
+        overflow: "hidden",
+      }}
+    >
+      {/* ── Toolbar ── */}
+      <div
+        className="flex items-center justify-between flex-wrap gap-3"
+        style={{
+          padding: "14px 20px",
+          borderBottom: "1px solid var(--border)",
+          background: "var(--bg2)",
+        }}
+      >
+        {/* Left: title + filter tabs */}
+        <div className="flex items-center gap-3 flex-wrap">
           <div className="flex items-center gap-2">
-            <span className="live-dot h-1.5 w-1.5 rounded-full bg-emerald-400" />
-            <span className="text-[11px] font-semibold uppercase tracking-[0.2em] text-white/50">
+            <span
+              className="live-dot rounded-full"
+              style={{ width: 6, height: 6, background: "var(--green)", display: "inline-block" }}
+            />
+            <span
+              style={{
+                fontSize: 12,
+                fontWeight: 600,
+                letterSpacing: "0.12em",
+                textTransform: "uppercase",
+                color: "var(--text2)",
+              }}
+            >
               Scanner
             </span>
-            {lastUpdated && (
-              <span className="text-[10px] text-white/25">{lastUpdated}</span>
-            )}
+            <span
+              style={{
+                fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                fontSize: 11,
+                color: "var(--text3)",
+              }}
+            >
+              {clock}
+            </span>
           </div>
+
           {/* Filter tabs */}
           <div className="flex gap-1">
             {TABS.map((t) => (
@@ -180,246 +229,419 @@ export function ScannerDashboard() {
                 key={t.key}
                 type="button"
                 onClick={() => setTab(t.key)}
-                className={`rounded px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider transition-colors ${
-                  tab === t.key
-                    ? "bg-white/12 text-white"
-                    : "text-white/30 hover:text-white/60"
-                }`}
+                className="transition-all"
+                style={{
+                  padding: "4px 12px",
+                  borderRadius: 6,
+                  fontSize: 12,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  fontFamily: "var(--font-sans, 'Space Grotesk', sans-serif)",
+                  border: tab === t.key ? "1px solid var(--accent)" : "1px solid var(--border)",
+                  background: tab === t.key ? "var(--accent)" : "transparent",
+                  color: tab === t.key ? "#fff" : "var(--text3)",
+                }}
               >
                 {t.label}
-                <span className={`ml-1 ${t.key === "dq" ? "text-red-400/60" : "text-white/25"}`}>{counts[t.key]}</span>
+                <span
+                  style={{
+                    display: "inline-flex",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    background: "rgba(255,255,255,0.15)",
+                    borderRadius: 4,
+                    fontSize: 10,
+                    padding: "1px 5px",
+                    marginLeft: 4,
+                    fontWeight: 600,
+                  }}
+                >
+                  {counts[t.key]}
+                </span>
               </button>
             ))}
           </div>
         </div>
-        {/* Buy controls */}
+
+        {/* Right: size + mode */}
         <div className="flex items-center gap-2">
-          <div className="flex gap-1">
-            {["0.05", "0.1", "0.25", "0.5"].map((amt) => (
-              <button
-                key={amt}
-                type="button"
-                onClick={() => setBuyAmount(amt)}
-                className={`rounded px-2 py-1 text-[10px] font-mono ${
-                  buyAmount === amt
-                    ? "bg-[var(--accent)]/20 text-[var(--accent)]"
-                    : "bg-white/5 text-white/40 hover:bg-white/10 hover:text-white/70"
-                }`}
-              >
-                {amt}
-              </button>
-            ))}
-            <input
-              value={buyAmount}
-              onChange={(e) => setBuyAmount(e.target.value)}
-              className="w-14 rounded border border-white/10 bg-black/30 px-2 py-1 text-center text-[10px] font-mono text-white outline-none"
-            />
-            <span className="self-center text-[10px] text-white/30">SOL</span>
-          </div>
+          <span style={{ fontSize: 11, color: "var(--text3)", marginRight: 2 }}>Size</span>
+          {["0.05", "0.1", "0.25", "0.5"].map((amt) => (
+            <button
+              key={amt}
+              type="button"
+              onClick={() => setBuyAmount(amt)}
+              style={{
+                padding: "4px 10px",
+                borderRadius: 6,
+                fontSize: 12,
+                fontWeight: 600,
+                fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                cursor: "pointer",
+                border: buyAmount === amt ? "1px solid rgba(249,115,22,0.3)" : "1px solid var(--border)",
+                background: buyAmount === amt ? "var(--bg4)" : "transparent",
+                color: buyAmount === amt ? "var(--accent)" : "var(--text3)",
+              }}
+            >
+              {amt}
+            </button>
+          ))}
+
+          <div style={{ width: 1, height: 20, background: "var(--border)", margin: "0 2px" }} />
+
           <button
             type="button"
             onClick={() => setTradeMode(tradeMode === "paper" ? "live" : "paper")}
-            className={`rounded px-2.5 py-1 text-[10px] font-medium uppercase tracking-wider ${
-              tradeMode === "live"
-                ? "bg-red-500/20 text-red-300"
-                : "bg-white/8 text-white/50"
-            }`}
+            style={{
+              padding: "4px 12px",
+              borderRadius: 6,
+              fontSize: 12,
+              fontWeight: 600,
+              cursor: "pointer",
+              fontFamily: "var(--font-sans, 'Space Grotesk', sans-serif)",
+              border: tradeMode === "live"
+                ? "1px solid rgba(244,63,94,0.25)"
+                : "1px solid var(--border)",
+              background: tradeMode === "live"
+                ? "rgba(244,63,94,0.10)"
+                : "transparent",
+              color: tradeMode === "live" ? "var(--red)" : "var(--text3)",
+            }}
           >
             {tradeMode === "paper" ? "Paper" : "Live"}
           </button>
         </div>
       </div>
 
-      {/* Alerts */}
+      {/* ── Alerts ── */}
       {error && (
-        <div className="border-b border-red-500/20 bg-red-500/10 px-4 py-2 text-xs text-red-300">
+        <div style={{
+          borderBottom: "1px solid rgba(244,63,94,0.2)",
+          background: "rgba(244,63,94,0.08)",
+          padding: "8px 20px",
+          fontSize: 12,
+          color: "var(--red)",
+        }}>
           {error}
         </div>
       )}
       {message && (
-        <div className="border-b border-emerald-500/20 bg-emerald-500/10 px-4 py-2 text-xs text-emerald-300">
+        <div style={{
+          borderBottom: "1px solid rgba(34,211,160,0.2)",
+          background: "rgba(34,211,160,0.08)",
+          padding: "8px 20px",
+          fontSize: 12,
+          color: "var(--green)",
+        }}>
           {message}
         </div>
       )}
 
-      {/* Table */}
+      {/* ── Table ── */}
       <div className="overflow-x-auto">
-        <table className="min-w-full text-xs">
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
           <thead>
-            <tr className="border-b border-white/6 text-left text-[10px] uppercase tracking-[0.18em] text-white/30">
-              <th className="px-4 py-2">Token</th>
-              <th className="px-3 py-2">
-                Score
-                <Tooltip text="Heat score 0–100. ≥75 = strong, ≥60 = alerted, <40 = weak." />
-              </th>
-              <th className="px-3 py-2">MCap</th>
-              <th className="px-3 py-2">Age</th>
-              <th className="px-3 py-2">
-                Setup
-                <Tooltip text="Narrative · strategy profile · confidence · 5m buy ratio" />
-              </th>
-              <th className="px-3 py-2">
-                Status
-                <Tooltip text="Alerted = Telegram alert sent. Tracked = below threshold. DQ = failed quality check." />
-              </th>
-              {uid ? (
-                <th className="px-3 py-2">
-                  Auto-Buy
-                  <Tooltip text="Would the bot buy this right now given your config?" />
-                </th>
-              ) : null}
-              <th className="px-3 py-2">Action</th>
+            <tr style={{ background: "var(--bg2)", borderBottom: "1px solid var(--border)" }}>
+              {["Token", "Score", "MCap", "Age", "Setup", "Status", uid ? "Auto-Buy" : null, "Action"]
+                .filter(Boolean)
+                .map((h) => (
+                  <th
+                    key={h as string}
+                    style={{
+                      padding: "10px 16px",
+                      textAlign: "left",
+                      fontSize: 10,
+                      fontWeight: 600,
+                      letterSpacing: "0.12em",
+                      textTransform: "uppercase",
+                      color: "var(--text3)",
+                      whiteSpace: "nowrap",
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
             </tr>
           </thead>
-          <tbody className="divide-y divide-white/4">
+          <tbody>
             {filtered.length === 0 ? (
               <tr>
-                <td colSpan={uid ? 8 : 7} className="px-4 py-10 text-center text-white/30">
+                <td
+                  colSpan={uid ? 8 : 7}
+                  style={{ padding: "40px", textAlign: "center", color: "var(--text3)", fontSize: 13 }}
+                >
                   {feed.length === 0
                     ? "Waiting for scanner feed — refreshing every 5s…"
                     : "No tokens match this filter."}
                 </td>
               </tr>
             ) : null}
+
             {filtered.map((item) => {
               const score = item.score ?? 0;
               const isAlerted = !!item.alerted && !item.dq;
               const isDq = !!item.dq;
+              const av = avatarColor(item.mint);
+              const sb = scoreBadgeStyle(score, item.dq);
+
               return (
                 <tr
                   key={`${item.mint}-${item.ts}`}
-                  className="group hover:bg-white/[0.025]"
+                  style={{ borderBottom: "1px solid var(--border)", cursor: "pointer" }}
+                  className="hover:bg-white/[0.02] transition-colors"
                 >
-                  {/* Token */}
-                  <td className="px-4 py-2.5">
-                    <div className="font-semibold text-white">
-                      <Link
-                        href={`/token/${item.mint}`}
-                        className="hover:text-[var(--accent)]"
+                  {/* ── Token ── */}
+                  <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
+                    <div className="flex items-center gap-3">
+                      <div
+                        style={{
+                          width: 36, height: 36, borderRadius: 10,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 13, fontWeight: 700, flexShrink: 0,
+                          background: av.bg, color: av.color, border: `1px solid ${av.border}`,
+                        }}
                       >
-                        {item.symbol || item.name || item.mint.slice(0, 6)}
-                      </Link>
+                        {initials(item.name, item.symbol)}
+                      </div>
+                      <div>
+                        <div style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)" }}>
+                          <Link
+                            href={`/token/${item.mint}`}
+                            className="hover:text-[var(--accent)] transition-colors"
+                          >
+                            {item.symbol || item.name || item.mint.slice(0, 8)}
+                          </Link>
+                        </div>
+                        <div
+                          style={{
+                            fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                            fontSize: 10,
+                            color: "var(--text3)",
+                            marginTop: 2,
+                          }}
+                        >
+                          {item.mint.slice(0, 14)}…
+                        </div>
+                        <div className="mt-1 flex gap-1">
+                          <span
+                            style={{
+                              fontSize: 9, fontWeight: 600, letterSpacing: "0.08em",
+                              textTransform: "uppercase", padding: "2px 6px", borderRadius: 4,
+                              background: "rgba(249,115,22,0.10)", color: "var(--accent)",
+                              border: "1px solid rgba(249,115,22,0.18)",
+                            }}
+                          >
+                            {item.source_primary || "scan"}
+                          </span>
+                          {item.state ? (
+                            <span
+                              style={{
+                                fontSize: 9, fontWeight: 600, letterSpacing: "0.08em",
+                                textTransform: "uppercase", padding: "2px 6px", borderRadius: 4,
+                                background: "rgba(96,165,250,0.08)", color: "var(--blue)",
+                                border: "1px solid rgba(96,165,250,0.15)",
+                              }}
+                            >
+                              {item.state.replaceAll("_", " ")}
+                            </span>
+                          ) : null}
+                        </div>
+                        <ExternalLinks mint={item.mint} className="mt-1" />
+                      </div>
                     </div>
-                    <div className="mt-0.5 flex gap-1.5 text-[10px] text-white/25 uppercase tracking-wider">
-                      <span>{item.source_primary || "scan"}</span>
-                      {item.state ? <span>· {item.state.replaceAll("_", " ")}</span> : null}
-                    </div>
-                    <div className="mt-0.5 font-mono text-[9px] text-white/15">
-                      {item.mint.slice(0, 12)}…
-                    </div>
-                    <ExternalLinks mint={item.mint} className="mt-1" />
                   </td>
 
-                  {/* Score */}
-                  <td className="px-3 py-2.5">
-                    <div className="flex items-center gap-1.5">
-                      <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-sm font-bold tabular-nums ${scoreBg(score, item.dq)} ${scoreColor(score, item.dq)}`}
+                  {/* ── Score ── */}
+                  <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
+                    <div className="flex items-center gap-2.5">
+                      <div
+                        style={{
+                          width: 42, height: 42, borderRadius: 10,
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          fontSize: 16, fontWeight: 700,
+                          fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                          flexShrink: 0,
+                          background: sb.bg, color: sb.color, border: `1px solid ${sb.border}`,
+                        }}
                       >
                         {score}
-                      </span>
+                      </div>
+                      <div>
+                        <div
+                          style={{
+                            width: 40, height: 3,
+                            background: "var(--bg4)", borderRadius: 2, overflow: "hidden",
+                            marginBottom: 5,
+                          }}
+                        >
+                          <div
+                            style={{
+                              height: "100%", borderRadius: 2,
+                              width: `${Math.min(100, score)}%`,
+                              background: sb.bar,
+                              transition: "width 0.3s",
+                            }}
+                          />
+                        </div>
+                        {item.breakdown && (() => {
+                          const chips = topFactors(item.breakdown, 3);
+                          if (chips.length === 0) return null;
+                          return (
+                            <div style={{ display: "flex", gap: 3, flexWrap: "nowrap" }}>
+                              {chips.map(({ key, pts, reason, meta }) => (
+                                <span
+                                  key={key}
+                                  title={`${meta.label}: ${meta.description}${reason ? `\n${reason}` : ""}`}
+                                  style={{
+                                    display: "inline-flex", alignItems: "center", gap: 2,
+                                    padding: "1px 5px", borderRadius: 4, fontSize: 10, fontWeight: 600,
+                                    lineHeight: "18px", whiteSpace: "nowrap",
+                                    background: `rgba(${meta.colorRgb}, 0.12)`,
+                                    color: meta.color,
+                                    border: `1px solid rgba(${meta.colorRgb}, 0.22)`,
+                                  }}
+                                >
+                                  {meta.icon}+{pts}
+                                </span>
+                              ))}
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
-                    {/* Mini score bar */}
-                    <div className="mt-1 h-0.5 w-12 overflow-hidden rounded-full bg-white/8">
-                      <div
-                        className={`h-full rounded-full ${isDq ? "bg-red-500" : score >= 75 ? "bg-emerald-500" : score >= 60 ? "bg-amber-500" : "bg-white/30"}`}
-                        style={{ width: `${Math.min(100, score)}%` }}
-                      />
+                  </td>
+
+                  {/* ── MCap ── */}
+                  <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
+                    <div
+                      style={{
+                        fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                        fontSize: 13, fontWeight: 500, color: "var(--foreground)",
+                      }}
+                    >
+                      {fmtMcap(item.mcap)}
                     </div>
+                    {item.buy_ratio_5m != null ? (
+                      <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 2 }}>
+                        {Math.round(item.buy_ratio_5m * 100)}% buy
+                      </div>
+                    ) : null}
                   </td>
 
-                  {/* MCap */}
-                  <td className="px-3 py-2.5 font-mono tabular-nums text-white/80">
-                    {fmtMcap(item.mcap)}
+                  {/* ── Age ── */}
+                  <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
+                    <span
+                      style={{
+                        display: "inline-flex", alignItems: "center", gap: 4,
+                        background: "rgba(167,139,250,0.08)", color: "var(--purple)",
+                        border: "1px solid rgba(167,139,250,0.15)",
+                        borderRadius: 6, padding: "3px 8px",
+                        fontSize: 11, fontWeight: 500,
+                        fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                      }}
+                    >
+                      ⬤ {fmtAge(item.age_mins)}
+                    </span>
                   </td>
 
-                  {/* Age */}
-                  <td className="px-3 py-2.5 text-white/50">
-                    {fmtAge(item.age_mins)}
-                  </td>
-
-                  {/* Setup */}
-                  <td className="px-3 py-2.5">
-                    <div className="text-white/80">
+                  {/* ── Setup ── */}
+                  <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
+                    <div style={{ fontSize: 12, fontWeight: 600, color: "var(--foreground)", marginBottom: 3 }}>
                       {item.narrative || "Other"}
                     </div>
-                    <div className="mt-0.5 text-[10px] text-white/40">
-                      {item.strategy_profile || "unprofiled"}
-                    </div>
-                    <div className="mt-0.5 flex gap-2 text-[10px]">
-                      <span className="text-white/30">
-                        conf{" "}
-                        <span className="text-white/60">
-                          {item.confidence?.toFixed(2) ?? "0.00"}
-                        </span>
-                      </span>
-                      {item.buy_ratio_5m != null ? (
-                        <span className={buyRatioColor(item.buy_ratio_5m)}>
-                          {Math.round(item.buy_ratio_5m * 100)}% buy
-                        </span>
-                      ) : null}
+                    <div style={{ fontSize: 10, color: "var(--text3)" }}>
+                      {item.strategy_profile || "unprofiled"} · conf {(item.confidence ?? 0).toFixed(2)}
                     </div>
                   </td>
 
-                  {/* Status */}
-                  <td className="px-3 py-2.5">
+                  {/* ── Status ── */}
+                  <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
                     {isDq ? (
                       <div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="h-1.5 w-1.5 rounded-full bg-red-400" />
-                          <span className="text-red-300">DQ'd</span>
-                        </div>
+                        <span
+                          style={{
+                            display: "inline-flex", alignItems: "center", gap: 5,
+                            padding: "4px 10px", borderRadius: 20,
+                            fontSize: 11, fontWeight: 600,
+                            background: "rgba(244,63,94,0.08)", color: "var(--red)",
+                            border: "1px solid rgba(244,63,94,0.15)",
+                          }}
+                        >
+                          <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--red)", display: "inline-block" }} />
+                          DQ&apos;d
+                        </span>
                         {item.dq && (
-                          <div className="mt-0.5 max-w-[140px] text-[10px] text-red-400/60 leading-tight">
+                          <div style={{ fontSize: 10, color: "rgba(244,63,94,0.6)", marginTop: 3, maxWidth: 120 }}>
                             {item.dq.replaceAll("_", " ")}
                           </div>
                         )}
                       </div>
                     ) : isAlerted ? (
-                      <div className="flex items-center gap-1.5">
-                        <span className="live-dot h-1.5 w-1.5 rounded-full bg-emerald-400" />
-                        <span className="text-emerald-300">Alerted</span>
-                      </div>
+                      <span
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                          padding: "4px 10px", borderRadius: 20,
+                          fontSize: 11, fontWeight: 600,
+                          background: "rgba(34,211,160,0.08)", color: "var(--green)",
+                          border: "1px solid rgba(34,211,160,0.15)",
+                        }}
+                      >
+                        <span className="live-dot" style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--green)", display: "inline-block" }} />
+                        Alerted
+                      </span>
                     ) : (
-                      <div className="flex items-center gap-1.5">
-                        <span className="h-1.5 w-1.5 rounded-full bg-amber-400/60" />
-                        <span className="text-amber-200/60">Tracked</span>
-                      </div>
+                      <span
+                        style={{
+                          display: "inline-flex", alignItems: "center", gap: 5,
+                          padding: "4px 10px", borderRadius: 20,
+                          fontSize: 11, fontWeight: 600,
+                          background: "rgba(139,144,168,0.08)", color: "var(--text2)",
+                        }}
+                      >
+                        <span style={{ width: 5, height: 5, borderRadius: "50%", background: "var(--text3)", display: "inline-block" }} />
+                        Tracked
+                      </span>
                     )}
                   </td>
 
-                  {/* Auto-Buy preview */}
+                  {/* ── Auto-Buy ── */}
                   {uid ? (
-                    <td className="px-3 py-2.5">
-                      {item.autobuy_preview ? (
+                    <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
+                      {item.autobuy_preview?.eligible ? (
+                        <span
+                          style={{
+                            fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                            fontSize: 12, color: "var(--green)", fontWeight: 500,
+                          }}
+                        >
+                          {Number(item.autobuy_preview.sol_amount || 0).toFixed(3)} SOL
+                        </span>
+                      ) : item.autobuy_preview ? (
                         <div>
-                          <div className={`flex items-center gap-1.5 ${item.autobuy_preview.eligible ? "text-emerald-300" : "text-white/40"}`}>
-                            <span className={`h-1.5 w-1.5 rounded-full ${item.autobuy_preview.eligible ? "bg-emerald-400" : "bg-white/20"}`} />
-                            {item.autobuy_preview.eligible ? "Would buy" : "Blocked"}
-                          </div>
-                          {item.autobuy_preview.eligible && (
-                            <div className="mt-0.5 font-mono text-[10px] text-white/40">
-                              {Number(item.autobuy_preview.sol_amount || 0).toFixed(3)} SOL
-                            </div>
-                          )}
-                          {!item.autobuy_preview.eligible && item.autobuy_preview.block_category && (
-                            <div className="mt-0.5 text-[10px] text-white/30">
+                          <span style={{ fontSize: 12, color: "var(--text3)" }}>—</span>
+                          {item.autobuy_preview.block_category && (
+                            <div style={{ fontSize: 10, color: "var(--text3)", marginTop: 2 }}>
                               {item.autobuy_preview.block_category.replaceAll("_", " ")}
                             </div>
                           )}
                         </div>
                       ) : (
-                        <span className="text-white/20">—</span>
+                        <span style={{ fontSize: 12, color: "var(--text3)" }}>—</span>
                       )}
                     </td>
                   ) : null}
 
-                  {/* Actions */}
-                  <td className="px-3 py-2.5">
+                  {/* ── Action ── */}
+                  <td style={{ padding: "14px 16px", verticalAlign: "middle" }}>
                     <div className="flex items-center gap-1.5">
                       <Link
                         href={`/token/${item.mint}`}
-                        className="rounded border border-white/10 px-2.5 py-1 text-[10px] text-white/50 hover:border-white/25 hover:text-white/80"
+                        style={{
+                          padding: "5px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                          border: "1px solid var(--border2)", background: "var(--bg3)",
+                          color: "var(--text2)", cursor: "pointer",
+                        }}
+                        className="hover:bg-[var(--bg4)] hover:text-white transition-colors"
                       >
                         View
                       </Link>
@@ -427,11 +649,20 @@ export function ScannerDashboard() {
                         type="button"
                         onClick={() => quickBuy(item.mint)}
                         disabled={!uid || !!item.dq || submittingMint === item.mint}
-                        className={`rounded px-2.5 py-1 text-[10px] font-medium disabled:opacity-30 ${
-                          tradeMode === "live"
-                            ? "bg-red-500/20 text-red-200 hover:bg-red-500/30"
-                            : "bg-[var(--accent)]/15 text-[var(--accent)] hover:bg-[var(--accent)]/25"
-                        }`}
+                        style={{
+                          padding: "5px 12px", borderRadius: 6, fontSize: 11, fontWeight: 600,
+                          cursor: "pointer",
+                          fontFamily: "var(--font-sans, 'Space Grotesk', sans-serif)",
+                          border: tradeMode === "live"
+                            ? "1px solid rgba(244,63,94,0.25)"
+                            : "1px solid rgba(167,139,250,0.25)",
+                          background: tradeMode === "live"
+                            ? "rgba(244,63,94,0.08)"
+                            : "rgba(167,139,250,0.08)",
+                          color: tradeMode === "live" ? "var(--red)" : "var(--purple)",
+                          opacity: (!uid || !!item.dq) ? 0.35 : 1,
+                        }}
+                        className="hover:opacity-80 transition-opacity"
                       >
                         {submittingMint === item.mint
                           ? "…"

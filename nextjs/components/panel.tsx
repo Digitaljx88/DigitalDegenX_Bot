@@ -12,20 +12,46 @@ export function Panel({
   children: ReactNode;
 }) {
   return (
-    <section className="rounded-[28px] border border-white/10 bg-[var(--panel)] p-6 shadow-[0_24px_80px_rgba(0,0,0,0.22)]">
-      <div className="mb-5 flex flex-col gap-1">
+    <section
+      style={{
+        borderRadius: 14,
+        border: "1px solid var(--border)",
+        background: "var(--bg1)",
+        overflow: "hidden",
+      }}
+    >
+      <div
+        style={{
+          padding: "14px 20px",
+          borderBottom: "1px solid var(--border)",
+          background: "var(--bg2)",
+        }}
+      >
         <div className="flex items-center gap-2">
-          <h2 className="text-lg font-semibold text-white">{title}</h2>
+          <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)" }}>{title}</h2>
           {badge && (
-            <span className="rounded-full bg-[var(--accent)]/15 px-2 py-0.5 text-[10px]
-                             font-semibold uppercase tracking-widest text-[var(--accent)]">
+            <span
+              style={{
+                borderRadius: 20,
+                background: "rgba(249,115,22,0.12)",
+                padding: "2px 8px",
+                fontSize: 10,
+                fontWeight: 600,
+                letterSpacing: "0.1em",
+                textTransform: "uppercase",
+                color: "var(--accent)",
+                border: "1px solid rgba(249,115,22,0.2)",
+              }}
+            >
               {badge}
             </span>
           )}
         </div>
-        {subtitle ? <p className="text-sm text-[var(--muted-foreground)]">{subtitle}</p> : null}
+        {subtitle ? (
+          <p style={{ fontSize: 12, color: "var(--text3)", marginTop: 3 }}>{subtitle}</p>
+        ) : null}
       </div>
-      {children}
+      <div style={{ padding: "20px" }}>{children}</div>
     </section>
   );
 }

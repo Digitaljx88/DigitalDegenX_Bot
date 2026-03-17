@@ -10,7 +10,6 @@ type TickerItem = {
   name?: string;
   score?: number;
   mcap?: number;
-  buy_ratio_5m?: number;
   alerted?: number;
   dq?: string;
 };
@@ -22,12 +21,11 @@ function fmtMcap(v?: number) {
   return `$${v.toFixed(0)}`;
 }
 
-function scoreColor(item: TickerItem) {
-  if (item.dq) return "text-red-400";
-  const s = item.score ?? 0;
-  if (s >= 70) return "text-emerald-400";
-  if (s >= 50) return "text-amber-400";
-  return "text-white/40";
+function scoreColor(score: number, dq?: string): string {
+  if (dq) return "var(--red)";
+  if (score >= 65) return "var(--accent)";
+  if (score >= 50) return "var(--yellow)";
+  return "var(--text2)";
 }
 
 export function TickerBar() {
@@ -49,38 +47,45 @@ export function TickerBar() {
 
   if (!items.length) return null;
 
-  // Double the list so the scroll loop is seamless
   const doubled = [...items, ...items];
 
   return (
-    <div className="group relative overflow-hidden border-b border-white/6 bg-black/50 py-1.5">
-      <div className="absolute left-0 top-0 bottom-0 z-10 flex items-center bg-gradient-to-r from-black/50 via-black/50 to-transparent pl-2 pr-4">
-        <span className="text-[9px] font-semibold uppercase tracking-[0.2em] text-white/20">Live</span>
-      </div>
-      <div className="ticker-scroll group-hover:[animation-play-state:paused] flex gap-8 whitespace-nowrap px-4">
-        {doubled.map((item, i) => (
-          <Link
-            key={`${item.mint}-${i}`}
-            href={`/token/${item.mint}`}
-            className="inline-flex items-center gap-1.5 text-[11px] hover:opacity-75"
-          >
-            <span className="font-semibold text-white">
-              {item.symbol || item.name || item.mint.slice(0, 6)}
-            </span>
-            <span className={`font-mono tabular-nums ${scoreColor(item)}`}>
-              {item.score ?? 0}
-            </span>
-            {item.mcap ? (
-              <span className="text-white/35">{fmtMcap(item.mcap)}</span>
-            ) : null}
-            {item.buy_ratio_5m != null ? (
-              <span className={item.buy_ratio_5m >= 0.6 ? "text-emerald-400/60" : "text-white/20"}>
-                {Math.round(item.buy_ratio_5m * 100)}%
+    <div
+      className="overflow-hidden flex items-center"
+      style={{
+        background: "var(--bg1)",
+        borderBottom: "1px solid var(--border)",
+        height: 32,
+      }}
+    >
+      <div className="ticker-scroll flex whitespace-nowrap">
+        {doubled.map((item, i) => {
+          const score = item.score ?? 0;
+          const mcap = fmtMcap(item.mcap);
+          return (
+            <Link
+              key={`${item.mint}-${i}`}
+              href={`/token/${item.mint}`}
+              className="inline-flex items-center gap-1.5 hover:bg-white/[0.04]"
+              style={{
+                padding: "0 20px",
+                fontSize: 11,
+                fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                borderRight: "1px solid var(--border)",
+              }}
+            >
+              <span style={{ color: "var(--text2)", fontWeight: 500, letterSpacing: "0.03em" }}>
+                {item.symbol || item.name || item.mint.slice(0, 6)}
               </span>
-            ) : null}
-            <span className="text-white/10">│</span>
-          </Link>
-        ))}
+              <span style={{ color: scoreColor(score, item.dq), fontWeight: 600 }}>
+                {score}
+              </span>
+              {mcap ? (
+                <span style={{ color: "var(--text3)" }}>{mcap}</span>
+              ) : null}
+            </Link>
+          );
+        })}
       </div>
     </div>
   );

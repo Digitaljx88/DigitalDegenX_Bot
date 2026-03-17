@@ -8,6 +8,7 @@ const BOT_API_BASE_URL =
 
 const BOT_API_KEY =
   process.env.BOT_API_KEY ||
+  process.env.API_KEY ||
   process.env.NEXT_PUBLIC_BOT_API_KEY ||
   "";
 
@@ -20,7 +21,7 @@ function routeNeedsUid(path: string[]): boolean {
   if (head === "portfolio" || head === "trades" || head === "history" || head === "research-log" || head === "buy" || head === "sell" || head === "mode") {
     return true;
   }
-  if (head === "autobuy" || head === "settings" || head === "autosell" || head === "trade-controls") {
+  if (head === "autobuy" || head === "settings" || head === "autosell" || head === "trade-controls" || head === "sniper" || head === "wallet") {
     return true;
   }
   if (head === "scanner" && ["feed", "threshold", "top", "watchlist"].includes(path[1] || "")) {
@@ -39,6 +40,14 @@ function rewritePathUid(path: string[], uid: string): string[] {
   if (!uid) return path;
   if (path[0] === "autobuy" && path[1] === "activity" && path[2]) {
     return [path[0], path[1], uid, ...path.slice(3)];
+  }
+  // Sniper: /api/sniper/status → /sniper/{uid}/status  (uid injected after prefix)
+  if (path[0] === "sniper" && path[1]) {
+    return [path[0], uid, ...path.slice(1)];
+  }
+  // Wallet tracked: /api/wallet/tracked → /wallet/tracked/{uid}
+  if (path[0] === "wallet" && path[1] === "tracked") {
+    return [path[0], path[1], uid, ...path.slice(2)];
   }
   if ((path[0] === "autobuy" || path[0] === "settings" || path[0] === "trade-controls") && path[1]) {
     return [path[0], uid, ...path.slice(2)];
@@ -138,6 +147,14 @@ export async function GET(
 }
 
 export async function POST(
+  request: NextRequest,
+  { params }: { params: Promise<{ path: string[] }> },
+) {
+  const { path } = await params;
+  return forward(request, path);
+}
+
+export async function DELETE(
   request: NextRequest,
   { params }: { params: Promise<{ path: string[] }> },
 ) {

@@ -320,23 +320,26 @@ def score_social_narrative(token: dict, cfg: dict = None) -> tuple[int, str, dic
     details["twitter_handle"] = twitter_handle
     details["twitter_followers"] = twitter_followers
     
-    # Narrative alignment (check token name/symbol/description for hot narratives)
-    # This is a placeholder - would integrate with intelligence_tracker in production
+    # Narrative alignment — weighted by social_narrative_trending_boost (0-100, default 50)
+    # At 50 (default) the multiplier is 1.0x; at 100 it's 2x; at 0 narratives score nothing.
+    narrative_boost = cfg.get("social_narrative_trending_boost", 50)
+    narrative_scale = float(narrative_boost) / 50.0
+
     narratives = []
     name = (token.get("name", "") or "").lower()
     symbol = (token.get("symbol", "") or "").lower()
     description = (token.get("description", "") or "").lower()
     lifecycle_narrative = str(token.get("lifecycle_narrative") or token.get("matched_narrative") or "").strip()
-    
+
     hot_narratives = ["ai", "agent", "trump", "maga", "solana", "defi", "nft", "gaming"]
     for narrative in hot_narratives:
         if narrative in name or narrative in symbol or narrative in description:
             narratives.append(narrative)
-            social_pts += 2
+            social_pts += int(round(2 * narrative_scale))
 
     if lifecycle_narrative and lifecycle_narrative.lower() != "other":
         narratives.append(lifecycle_narrative.lower())
-        social_pts += 4
+        social_pts += int(round(4 * narrative_scale))
     
     details["detected_narratives"] = sorted(set(narratives))
     details["lifecycle_narrative"] = lifecycle_narrative or None

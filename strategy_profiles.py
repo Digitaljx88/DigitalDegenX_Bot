@@ -7,11 +7,11 @@ STRATEGY_PROFILES = {
     "launch_snipe": {
         "label": "Ultra-fresh pump.fun",
         "allowed_sources": {"pumpfun_newest", "pumpfun_hot"},
-        "soft_max_age_mins": 20,
-        "hard_max_age_mins": 45,
+        "soft_max_age_mins": 35,
+        "hard_max_age_mins": 60,
         "min_liquidity_usd": 2_500,
         "min_txns_5m": 6,
-        "min_buy_ratio_5m": 0.56,
+        "min_buy_ratio_5m": 0.53,
         "max_mcap_usd": 350_000,
         "size_bias": 1.15,
         "exit_preset": "scalp",
@@ -52,6 +52,13 @@ STRATEGY_PROFILES = {
 }
 
 
+# Entry-rule keys that users may override per profile
+PROFILE_ENTRY_FIELDS = frozenset([
+    "soft_max_age_mins", "hard_max_age_mins", "min_liquidity_usd",
+    "min_txns_5m", "min_buy_ratio_5m", "max_mcap_usd",
+    "min_wallet_signal", "size_bias", "exit_preset",
+])
+
 ARCHETYPE_TO_PROFILE = {
     "MICRO_ROCKETSHIP": "launch_snipe",
     "STEALTH_RAYDIUM": "migration_continuation",
@@ -75,8 +82,13 @@ def _narrative(result: dict) -> str:
     )
 
 
-def get_profile(name: str | None) -> dict:
-    return deepcopy(STRATEGY_PROFILES.get(str(name or ""), STRATEGY_PROFILES["narrative_breakout"]))
+def get_profile(name: str | None, user_entry_overrides: dict | None = None) -> dict:
+    profile = deepcopy(STRATEGY_PROFILES.get(str(name or ""), STRATEGY_PROFILES["narrative_breakout"]))
+    if user_entry_overrides:
+        for key, value in user_entry_overrides.get(str(name or ""), {}).items():
+            if key in PROFILE_ENTRY_FIELDS:
+                profile[key] = value
+    return profile
 
 
 def resolve_strategy_profile(result: dict) -> str:
@@ -137,9 +149,9 @@ def annotate_result(result: dict) -> dict:
     }
 
 
-def evaluate_strategy_rules(data: dict) -> dict:
+def evaluate_strategy_rules(data: dict, user_entry_overrides: dict | None = None) -> dict:
     profile_name = resolve_strategy_profile(data)
-    profile = get_profile(profile_name)
+    profile = get_profile(profile_name, user_entry_overrides)
     reasons: list[str] = []
     autobuy_only: list[str] = []
 
@@ -195,74 +207,82 @@ def evaluate_strategy_rules(data: dict) -> dict:
     }
 
 
-def apply_auto_sell_profile(cfg: dict, strategy_profile: str | None) -> bool:
+# Canonical defaults for each strategy profile — used both by apply_auto_sell_profile
+# and by the settings API to show users what the baseline values are.
+PROFILE_EXIT_DEFAULTS: dict[str, dict] = {
+    "launch_snipe": {
+        "trailing_stop":    {"enabled": True,  "trail_pct": 16,   "post_partial_trail_pct": 14},
+        "time_exit":        {"enabled": True,  "hours": 3,        "target_mult": 1.4},
+        "first_risk_off":   {"enabled": True,  "activate_mult": 1.5,  "sell_pct": 35},
+        "velocity_rollover":{"enabled": True},
+    },
+    "migration_continuation": {
+        "trailing_stop":    {"enabled": True,  "trail_pct": 22,   "post_partial_trail_pct": 18},
+        "time_exit":        {"enabled": False},
+        "first_risk_off":   {"enabled": True,  "activate_mult": 1.8,  "sell_pct": 25},
+        "velocity_rollover":{"enabled": True},
+    },
+    "wallet_follow": {
+        "trailing_stop":    {"enabled": True,  "trail_pct": 24,   "post_partial_trail_pct": 18},
+        "trailing_tp":      {"enabled": True,  "activate_mult": 2.5, "trail_pct": 18, "sell_pct": 60},
+        "first_risk_off":   {"enabled": True,  "activate_mult": 2.2,  "sell_pct": 20},
+        "velocity_rollover":{"enabled": True},
+    },
+    "narrative_breakout": {
+        "trailing_stop":    {"enabled": True,  "trail_pct": 20,   "post_partial_trail_pct": 17},
+        "time_exit":        {"enabled": True,  "hours": 8,        "target_mult": 1.6},
+        "first_risk_off":   {"enabled": True,  "activate_mult": 1.75, "sell_pct": 30},
+        "velocity_rollover":{"enabled": True},
+    },
+}
+
+
+def apply_auto_sell_profile(
+    cfg: dict,
+    strategy_profile: str | None,
+    *,
+    user_overrides: dict | None = None,
+) -> bool:
+    """Apply exit defaults for the resolved strategy profile, then layer in any
+    user-customised overrides stored under that profile name."""
     profile_name = resolve_strategy_profile({"strategy_profile": strategy_profile})
     changed = False
     cfg["strategy_profile"] = profile_name
 
-    ts = cfg.setdefault("trailing_stop", {})
+    ts  = cfg.setdefault("trailing_stop", {})
     ttp = cfg.setdefault("trailing_tp", {})
-    te = cfg.setdefault("time_exit", {})
+    te  = cfg.setdefault("time_exit", {})
     fro = cfg.setdefault("first_risk_off", {})
     vro = cfg.setdefault("velocity_rollover", {})
 
-    if profile_name == "launch_snipe":
-        updates = {
-            "trail_pct": 16,
-            "post_partial_trail_pct": 14,
-            "enabled": True,
-        }
-        for key, value in updates.items():
-            if ts.get(key) != value:
-                ts[key] = value
+    # ── Apply built-in defaults ───────────────────────────────────────────────
+    defaults = PROFILE_EXIT_DEFAULTS.get(profile_name, PROFILE_EXIT_DEFAULTS["narrative_breakout"])
+
+    section_map = {
+        "trailing_stop": ts,
+        "trailing_tp": ttp,
+        "time_exit": te,
+        "first_risk_off": fro,
+        "velocity_rollover": vro,
+    }
+    for section, values in defaults.items():
+        target = section_map[section]
+        for key, value in values.items():
+            if target.get(key) != value:
+                target[key] = value
                 changed = True
-        for key, value in {"enabled": True, "hours": 3, "target_mult": 1.4}.items():
-            if te.get(key) != value:
-                te[key] = value
-                changed = True
-        for key, value in {"enabled": True, "activate_mult": 1.5, "sell_pct": 35}.items():
-            if fro.get(key) != value:
-                fro[key] = value
-                changed = True
-    elif profile_name == "migration_continuation":
-        for key, value in {"enabled": True, "trail_pct": 22, "post_partial_trail_pct": 18}.items():
-            if ts.get(key) != value:
-                ts[key] = value
-                changed = True
-        for key, value in {"enabled": True, "activate_mult": 1.8, "sell_pct": 25}.items():
-            if fro.get(key) != value:
-                fro[key] = value
-                changed = True
-        for key, value in {"enabled": False}.items():
-            if te.get(key) != value:
-                te[key] = value
-                changed = True
-    elif profile_name == "wallet_follow":
-        for key, value in {"enabled": True, "trail_pct": 24, "post_partial_trail_pct": 18}.items():
-            if ts.get(key) != value:
-                ts[key] = value
-                changed = True
-        for key, value in {"enabled": True, "activate_mult": 2.5, "trail_pct": 18, "sell_pct": 60}.items():
-            if ttp.get(key) != value:
-                ttp[key] = value
-                changed = True
-        for key, value in {"enabled": True, "activate_mult": 2.2, "sell_pct": 20}.items():
-            if fro.get(key) != value:
-                fro[key] = value
-                changed = True
-    else:  # narrative_breakout
-        for key, value in {"enabled": True, "trail_pct": 20, "post_partial_trail_pct": 17}.items():
-            if ts.get(key) != value:
-                ts[key] = value
-                changed = True
-        for key, value in {"enabled": True, "hours": 8, "target_mult": 1.6}.items():
-            if te.get(key) != value:
-                te[key] = value
-                changed = True
-        for key, value in {"enabled": True, "activate_mult": 1.75, "sell_pct": 30}.items():
-            if fro.get(key) != value:
-                fro[key] = value
-                changed = True
+
+    # ── Layer user overrides on top ───────────────────────────────────────────
+    if user_overrides:
+        profile_overrides = user_overrides.get(profile_name, {})
+        for section, values in profile_overrides.items():
+            if section not in section_map:
+                continue
+            target = section_map[section]
+            for key, value in values.items():
+                if target.get(key) != value:
+                    target[key] = value
+                    changed = True
 
     if not vro.get("enabled"):
         vro["enabled"] = True

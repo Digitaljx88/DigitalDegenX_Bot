@@ -12,9 +12,7 @@ export function UidBar() {
 
   function applyUid() {
     const value = draftUid.trim();
-    if (!value) {
-      return;
-    }
+    if (!value) return;
     startTransition(() => {
       void setUid(value)
         .then((nextUid) => {
@@ -32,7 +30,7 @@ export function UidBar() {
       void clearUid()
         .then(() => {
           setDraftUid("");
-          setMessage("Dashboard UID cleared");
+          setMessage("UID cleared");
         })
         .catch((err) => {
           setMessage(err instanceof Error ? err.message : "Failed to clear UID");
@@ -41,38 +39,106 @@ export function UidBar() {
   }
 
   return (
-    <div className="flex flex-col gap-3 rounded-2xl border border-white/10 bg-black/15 p-4 md:flex-row md:items-end md:justify-between">
-      <div>
-        <div className="text-xs uppercase tracking-[0.24em] text-[var(--muted-foreground)]">Active Telegram User</div>
-        <div className="mt-1 text-sm text-white">
-          {currentUid ? `UID ${currentUid}` : "Set your Telegram user ID to unlock portfolio, trades, and controls."}
-        </div>
-        {message ? <div className="mt-2 text-xs text-[var(--muted-foreground)]">{message}</div> : null}
-        {error ? <div className="mt-2 text-xs text-red-200">{error}</div> : null}
-      </div>
-      <div className="flex flex-col gap-2 sm:flex-row">
-        <input
-          value={draftUid || currentUid}
-          onChange={(event) => setDraftUid(event.target.value.replace(/[^\d]/g, ""))}
-          placeholder="Telegram UID"
-          className="rounded-full border border-white/10 bg-black/25 px-4 py-2 text-sm text-white outline-none placeholder:text-[var(--muted-foreground)]"
-        />
-        <button
-          type="button"
-          onClick={applyUid}
-          disabled={isPending}
-          className="rounded-full bg-[var(--accent)] px-4 py-2 text-sm font-medium text-[var(--accent-foreground)] disabled:opacity-60"
+    <div
+      className="flex items-center gap-2.5 flex-shrink-0 flex-wrap"
+      style={{
+        background: "var(--bg2)",
+        border: "1px solid var(--border)",
+        borderRadius: 10,
+        padding: "10px 14px",
+      }}
+    >
+      <span
+        style={{
+          fontSize: 10,
+          fontWeight: 500,
+          letterSpacing: "0.1em",
+          textTransform: "uppercase",
+          color: "var(--text3)",
+          whiteSpace: "nowrap",
+        }}
+      >
+        Active UID
+      </span>
+
+      {currentUid ? (
+        <span
+          style={{
+            fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+            fontSize: 12,
+            color: "var(--blue)",
+            background: "rgba(96,165,250,0.07)",
+            padding: "4px 10px",
+            borderRadius: 6,
+            border: "1px solid rgba(96,165,250,0.15)",
+          }}
         >
-          {isPending ? "Saving..." : "Use UID"}
-        </button>
-        <button
-          type="button"
-          onClick={handleClearUid}
-          className="rounded-full border border-white/10 px-4 py-2 text-sm text-[var(--muted-foreground)]"
-        >
-          Clear
-        </button>
-      </div>
+          {currentUid}
+        </span>
+      ) : null}
+
+      <input
+        value={draftUid}
+        onChange={(e) => setDraftUid(e.target.value.replace(/[^\d]/g, ""))}
+        placeholder="Enter UID…"
+        onKeyDown={(e) => e.key === "Enter" && applyUid()}
+        style={{
+          background: "var(--bg3)",
+          border: "1px solid var(--border2)",
+          borderRadius: 7,
+          color: "var(--foreground)",
+          fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+          fontSize: 12,
+          padding: "6px 10px",
+          outline: "none",
+          width: 160,
+        }}
+        className="focus:border-[var(--accent)] placeholder:text-[var(--text3)]"
+      />
+
+      <button
+        type="button"
+        onClick={applyUid}
+        disabled={isPending}
+        style={{
+          background: "var(--accent)",
+          color: "#fff",
+          border: "none",
+          borderRadius: 7,
+          fontFamily: "var(--font-sans, 'Space Grotesk', sans-serif)",
+          fontSize: 12,
+          fontWeight: 600,
+          padding: "7px 14px",
+          cursor: "pointer",
+        }}
+        className="hover:bg-[var(--accent2)] disabled:opacity-60 transition-colors"
+      >
+        {isPending ? "Saving…" : "Use UID"}
+      </button>
+
+      <button
+        type="button"
+        onClick={handleClearUid}
+        style={{
+          background: "transparent",
+          color: "var(--text3)",
+          border: "1px solid var(--border)",
+          borderRadius: 7,
+          fontFamily: "var(--font-sans, 'Space Grotesk', sans-serif)",
+          fontSize: 12,
+          padding: "7px 12px",
+          cursor: "pointer",
+        }}
+        className="hover:text-white hover:border-[var(--border2)] transition-colors"
+      >
+        Clear
+      </button>
+
+      {(message || error) ? (
+        <span style={{ fontSize: 10, color: error ? "var(--red)" : "var(--text3)" }}>
+          {error || message}
+        </span>
+      ) : null}
     </div>
   );
 }

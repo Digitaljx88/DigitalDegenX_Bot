@@ -367,6 +367,83 @@ def init():
                 wallet_json  TEXT NOT NULL DEFAULT '{}',
                 updated_ts   REAL NOT NULL DEFAULT 0
             );
+
+            -- Sniper: per-user configuration
+            CREATE TABLE IF NOT EXISTS sniper_config (
+                uid                        INTEGER PRIMARY KEY,
+                enabled                    INTEGER NOT NULL DEFAULT 0,
+                sol_amount                 REAL    NOT NULL DEFAULT 0.05,
+                max_concurrent             INTEGER NOT NULL DEFAULT 3,
+                take_profit_pct            REAL    NOT NULL DEFAULT 100.0,
+                stop_loss_pct              REAL    NOT NULL DEFAULT 30.0,
+                max_age_secs               INTEGER NOT NULL DEFAULT 300,
+                dev_buy_max_pct            REAL    NOT NULL DEFAULT 10.0,
+                require_narrative          INTEGER NOT NULL DEFAULT 0,
+                min_predictor_confidence   REAL    NOT NULL DEFAULT 0.0,
+                use_lifecycle_filter       INTEGER NOT NULL DEFAULT 0,
+                sol_multiplier_narrative   REAL    NOT NULL DEFAULT 1.5,
+                sol_multiplier_predictor   REAL    NOT NULL DEFAULT 2.0,
+                active_hours_utc           TEXT    NOT NULL DEFAULT '',
+                telegram_notify            INTEGER NOT NULL DEFAULT 1,
+                max_bundle_risk            INTEGER NOT NULL DEFAULT 10
+            );
+
+            -- Sniper: open positions
+            CREATE TABLE IF NOT EXISTS sniper_positions (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid             INTEGER NOT NULL,
+                mint            TEXT    NOT NULL,
+                symbol          TEXT,
+                name            TEXT,
+                tokens_bought   REAL    NOT NULL,
+                sol_spent       REAL    NOT NULL,
+                buy_price_sol   REAL    NOT NULL,
+                buy_time        REAL    NOT NULL,
+                status          TEXT    NOT NULL DEFAULT 'open',
+                mode            TEXT    NOT NULL DEFAULT 'paper',
+                UNIQUE(uid, mint)
+            );
+            CREATE INDEX IF NOT EXISTS idx_sniper_positions_uid ON sniper_positions(uid, status);
+
+            -- Sniper: completed trade history
+            CREATE TABLE IF NOT EXISTS sniper_history (
+                id           INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid          INTEGER NOT NULL,
+                mint         TEXT    NOT NULL,
+                symbol       TEXT,
+                name         TEXT,
+                sol_spent    REAL    NOT NULL,
+                sol_received REAL    NOT NULL DEFAULT 0,
+                profit_sol   REAL    NOT NULL DEFAULT 0,
+                buy_time     REAL    NOT NULL,
+                sell_time    REAL    NOT NULL,
+                hold_secs    REAL    NOT NULL,
+                exit_reason  TEXT    NOT NULL,
+                mode         TEXT    NOT NULL DEFAULT 'paper'
+            );
+            CREATE INDEX IF NOT EXISTS idx_sniper_history_uid_ts ON sniper_history(uid, sell_time DESC);
+
+            -- Sniper: buy attempt ledger for live-mode reconciliation / circuit breaker
+            CREATE TABLE IF NOT EXISTS sniper_buy_attempts (
+                id               INTEGER PRIMARY KEY AUTOINCREMENT,
+                uid              INTEGER NOT NULL,
+                mint             TEXT    NOT NULL,
+                symbol           TEXT,
+                name             TEXT,
+                mode             TEXT    NOT NULL DEFAULT 'live',
+                trade_sol        REAL    NOT NULL DEFAULT 0,
+                tx_sig           TEXT    NOT NULL DEFAULT '',
+                tx_status        TEXT    NOT NULL DEFAULT '',
+                tokens_received  REAL    NOT NULL DEFAULT 0,
+                sol_before       REAL    NOT NULL DEFAULT 0,
+                sol_after        REAL    NOT NULL DEFAULT 0,
+                sol_delta        REAL    NOT NULL DEFAULT 0,
+                outcome          TEXT    NOT NULL DEFAULT '',
+                note             TEXT    NOT NULL DEFAULT '',
+                attempted_at     REAL    NOT NULL DEFAULT 0
+            );
+            CREATE INDEX IF NOT EXISTS idx_sniper_buy_attempts_uid_ts
+                ON sniper_buy_attempts(uid, attempted_at DESC);
         """)
         c.commit()
 
@@ -429,6 +506,46 @@ def init():
         try:
             with _conn() as c:
                 c.execute(f"ALTER TABLE closed_trades ADD COLUMN {col} {defn}")
+                c.commit()
+        except Exception:
+            pass
+
+    _new_sniper_pos_cols = [
+        ("mode", "TEXT NOT NULL DEFAULT 'paper'"),
+    ]
+    for col, defn in _new_sniper_pos_cols:
+        try:
+            with _conn() as c:
+                c.execute(f"ALTER TABLE sniper_positions ADD COLUMN {col} {defn}")
+                c.commit()
+        except Exception:
+            pass
+
+    _new_sniper_hist_cols = [
+        ("mode", "TEXT NOT NULL DEFAULT 'paper'"),
+    ]
+    for col, defn in _new_sniper_hist_cols:
+        try:
+            with _conn() as c:
+                c.execute(f"ALTER TABLE sniper_history ADD COLUMN {col} {defn}")
+                c.commit()
+        except Exception:
+            pass
+
+    _new_sniper_cols = [
+        ("require_narrative",        "INTEGER NOT NULL DEFAULT 0"),
+        ("min_predictor_confidence", "REAL    NOT NULL DEFAULT 0.0"),
+        ("use_lifecycle_filter",     "INTEGER NOT NULL DEFAULT 0"),
+        ("sol_multiplier_narrative", "REAL    NOT NULL DEFAULT 1.5"),
+        ("sol_multiplier_predictor", "REAL    NOT NULL DEFAULT 2.0"),
+        ("active_hours_utc",         "TEXT    NOT NULL DEFAULT ''"),
+        ("telegram_notify",          "INTEGER NOT NULL DEFAULT 1"),
+        ("max_bundle_risk",          "INTEGER NOT NULL DEFAULT 10"),
+    ]
+    for col, defn in _new_sniper_cols:
+        try:
+            with _conn() as c:
+                c.execute(f"ALTER TABLE sniper_config ADD COLUMN {col} {defn}")
                 c.commit()
         except Exception:
             pass
@@ -1066,8 +1183,13 @@ def clear_seen_tokens():
 # ── Scanner: watchlist ─────────────────────────────────────────────────────────
 
 def get_watchlist() -> dict:
-    rows = _fetchall("SELECT mint, data_json FROM scanner_watchlist")
-    return {r["mint"]: json.loads(r["data_json"]) for r in rows}
+    rows = _fetchall("SELECT mint, data_json, added_at FROM scanner_watchlist")
+    result = {}
+    for r in rows:
+        d = json.loads(r["data_json"])
+        d["_added_at"] = r["added_at"]
+        result[r["mint"]] = d
+    return result
 
 
 def add_to_watchlist(mint: str, data: dict):

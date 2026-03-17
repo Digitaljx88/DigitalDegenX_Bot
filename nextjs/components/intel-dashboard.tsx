@@ -3,7 +3,6 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useState } from "react";
-import { Panel } from "@/components/panel";
 import { apiFetch } from "@/lib/api";
 
 type IntelDashboardProps = {
@@ -24,6 +23,56 @@ const intelLinks = [
   { href: "/intel/playbook", label: "Playbook" },
 ];
 
+function formatIntelValue(value: unknown): string {
+  if (value === null || value === undefined || value === "") return "n/a";
+  if (typeof value === "number") return Number.isInteger(value) ? value.toLocaleString() : value.toFixed(2);
+  if (typeof value === "boolean") return value ? "yes" : "no";
+  if (Array.isArray(value)) return value.map((item) => (typeof item === "object" ? JSON.stringify(item) : String(item))).join(", ");
+  if (typeof value === "object") return JSON.stringify(value);
+  return String(value);
+}
+
+function IntelCard({ item, compact = false }: { item: Record<string, unknown>; compact?: boolean }) {
+  const entries = Object.entries(item);
+  const mint = typeof item.mint === "string" ? item.mint : null;
+  const address = typeof item.address === "string" ? item.address : null;
+  const title =
+    (typeof item.name === "string" && item.name) ||
+    (typeof item.symbol === "string" && item.symbol) ||
+    address || mint || "Record";
+
+  return (
+    <div style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 10, padding: 14 }}>
+      <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", gap: 10, marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--foreground)" }}>{title}</div>
+          {mint && <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 2, fontFamily: "var(--font-mono, monospace)" }}>{mint}</div>}
+          {!mint && address && <div style={{ fontSize: 10, color: "var(--t3)", marginTop: 2, fontFamily: "var(--font-mono, monospace)" }}>{address}</div>}
+        </div>
+        {mint && (
+          <Link href={`/token/${mint}`}
+            style={{ fontSize: 11, padding: "5px 10px", borderRadius: 7, background: "var(--bg3)", border: "1px solid var(--border)", color: "var(--t2)", textDecoration: "none", flexShrink: 0 }}
+            className="hover:border-[var(--border2)] hover:text-white transition-colors"
+          >
+            View
+          </Link>
+        )}
+      </div>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 6 }}>
+        {entries
+          .filter(([key]) => !["mint", "address", "name", "symbol"].includes(key))
+          .slice(0, compact ? 6 : 10)
+          .map(([key, value]) => (
+            <div key={key} style={{ background: "var(--bg3)", border: "1px solid var(--border)", borderRadius: 6, padding: "6px 10px" }}>
+              <div style={{ fontSize: 9, textTransform: "uppercase", letterSpacing: "0.1em", color: "var(--t3)", marginBottom: 2 }}>{key.replace(/_/g, " ")}</div>
+              <div style={{ fontSize: 11, color: "var(--foreground)", wordBreak: "break-all" }}>{formatIntelValue(value)}</div>
+            </div>
+          ))}
+      </div>
+    </div>
+  );
+}
+
 export function IntelDashboard({
   title,
   subtitle,
@@ -42,124 +91,84 @@ export function IntelDashboard({
       try {
         const response = await apiFetch<Record<string, unknown>>(endpoint);
         const rows = Array.isArray(response[collectionKey]) ? (response[collectionKey] as Record<string, unknown>[]) : [];
-        const extraRows =
-          secondaryCollectionKey && Array.isArray(response[secondaryCollectionKey])
-            ? (response[secondaryCollectionKey] as Record<string, unknown>[])
-            : [];
+        const extraRows = secondaryCollectionKey && Array.isArray(response[secondaryCollectionKey]) ? (response[secondaryCollectionKey] as Record<string, unknown>[]) : [];
         setItems(rows);
         setSecondaryItems(extraRows);
         setError("");
-      } catch (err) {
-        setError(err instanceof Error ? err.message : "Failed to load intelligence panel");
-      }
+      } catch (err) { setError(err instanceof Error ? err.message : "Failed to load intel"); }
     }
     void load();
   }, [collectionKey, endpoint, secondaryCollectionKey]);
 
   return (
-    <Panel title={title} subtitle={subtitle}>
-      <div className="mb-5 flex flex-wrap gap-3">
-        {intelLinks.map((item) => (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={`rounded-full border px-4 py-2 text-xs transition ${
-              pathname === item.href
-                ? "border-orange-400/50 bg-orange-500/20 text-orange-100"
-                : "border-white/10 text-[var(--muted-foreground)] hover:border-white/20 hover:text-white"
-            }`}
-          >
-            {item.label}
-          </Link>
-        ))}
+    <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+
+      {/* Sub-nav */}
+      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+        {intelLinks.map((item) => {
+          const active = pathname === item.href;
+          return (
+            <Link
+              key={item.href}
+              href={item.href}
+              style={{
+                fontSize: 12, fontWeight: 500, padding: "6px 14px", borderRadius: 8, textDecoration: "none",
+                background: active ? "rgba(249,115,22,0.12)" : "var(--bg2)",
+                color: active ? "var(--accent)" : "var(--t2)",
+                border: `1px solid ${active ? "rgba(249,115,22,0.25)" : "var(--border)"}`,
+              }}
+              className="hover:border-[var(--border2)] transition-colors"
+            >
+              {item.label}
+            </Link>
+          );
+        })}
       </div>
-      {error ? <div className="mb-4 rounded-2xl border border-red-400/30 bg-red-500/10 px-4 py-3 text-sm text-red-100">{error}</div> : null}
-      <div className="mb-4 grid gap-3 md:grid-cols-3">
-        <SummaryCard label="Rows" value={String(items.length)} />
-        <SummaryCard label="Secondary events" value={String(secondaryItems.length)} />
-        <SummaryCard label="Endpoint" value={endpoint.replace("/intel/", "")} />
-      </div>
-      <div className="space-y-3">
-        {items.length ? items.map((item, index) => (
-          <IntelCard key={index} item={item} />
-        )) : <div className="text-sm text-[var(--muted-foreground)]">No data yet.</div>}
-      </div>
-      {secondaryItems.length ? (
-        <div className="mt-6 space-y-3">
-          <div className="text-sm font-medium text-white">{secondaryTitle}</div>
-          {secondaryItems.map((item, index) => (
-            <IntelCard key={`secondary-${index}`} item={item} compact />
-          ))}
+
+      {/* Panel */}
+      <div style={{ background: "var(--bg1)", border: "1px solid var(--border)", borderRadius: 14, overflow: "hidden" }}>
+        <div style={{ padding: "14px 20px", background: "var(--bg2)", borderBottom: "1px solid var(--border)" }}>
+          <h2 style={{ fontSize: 14, fontWeight: 600, color: "var(--foreground)" }}>{title}</h2>
+          <p style={{ fontSize: 12, color: "var(--t3)", marginTop: 3 }}>{subtitle}</p>
         </div>
-      ) : null}
-    </Panel>
-  );
-}
 
-function SummaryCard({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-2xl border border-white/8 bg-black/10 p-4">
-      <div className="text-xs uppercase tracking-[0.2em] text-[var(--muted-foreground)]">{label}</div>
-      <div className="mt-2 text-lg font-semibold text-white break-all">{value}</div>
-    </div>
-  );
-}
-
-function IntelCard({ item, compact = false }: { item: Record<string, unknown>; compact?: boolean }) {
-  const entries = Object.entries(item);
-  const mint = typeof item.mint === "string" ? item.mint : null;
-  const address = typeof item.address === "string" ? item.address : null;
-  const title =
-    (typeof item.name === "string" && item.name) ||
-    (typeof item.symbol === "string" && item.symbol) ||
-    address ||
-    mint ||
-    "Record";
-
-  return (
-    <div className="rounded-2xl border border-white/8 bg-black/10 p-4 text-sm">
-      <div className="mb-3 flex items-start justify-between gap-3">
-        <div>
-          <div className="font-medium text-white">{title}</div>
-          {mint ? <div className="mt-1 text-xs text-[var(--muted-foreground)]">{mint}</div> : null}
-          {!mint && address ? <div className="mt-1 text-xs text-[var(--muted-foreground)]">{address}</div> : null}
-        </div>
-        {mint ? (
-          <Link
-            href={`/token/${mint}`}
-            className="rounded-full border border-white/10 px-3 py-1.5 text-xs text-[var(--muted-foreground)] transition hover:border-white/20 hover:text-white"
-          >
-            View token
-          </Link>
-        ) : null}
-      </div>
-      <div className="grid gap-2 md:grid-cols-2">
-        {entries
-          .filter(([key]) => !["mint", "address", "name", "symbol"].includes(key))
-          .slice(0, compact ? 6 : 10)
-          .map(([key, value]) => (
-            <div key={key} className="rounded-xl border border-white/6 bg-black/10 px-3 py-2">
-              <div className="text-[10px] uppercase tracking-[0.18em] text-[var(--muted-foreground)]">
-                {key.replace(/_/g, " ")}
+        <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 14 }}>
+          {/* Stats */}
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(100px, 1fr))", gap: 10 }}>
+            {[
+              { label: "Rows", value: String(items.length) },
+              { label: "Secondary", value: String(secondaryItems.length) },
+              { label: "Endpoint", value: endpoint.replace("/intel/", "") },
+            ].map((s) => (
+              <div key={s.label} style={{ background: "var(--bg2)", border: "1px solid var(--border)", borderRadius: 8, padding: "10px 12px" }}>
+                <div style={{ fontSize: 9, color: "var(--t3)", textTransform: "uppercase", letterSpacing: "0.1em", marginBottom: 4 }}>{s.label}</div>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--foreground)", fontFamily: "var(--font-mono, monospace)", wordBreak: "break-all" }}>{s.value}</div>
               </div>
-              <div className="mt-1 text-white break-all">
-                {formatIntelValue(value)}
-              </div>
+            ))}
+          </div>
+
+          {error && (
+            <div style={{ padding: "10px 14px", background: "rgba(244,63,94,0.1)", border: "1px solid rgba(244,63,94,0.25)", borderRadius: 8, fontSize: 12, color: "var(--red)" }}>
+              {error}
             </div>
-          ))}
+          )}
+
+          {items.length === 0 && !error && (
+            <div style={{ padding: 16, textAlign: "center", fontSize: 13, color: "var(--t3)" }}>No data yet.</div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {items.map((item, index) => <IntelCard key={index} item={item} />)}
+          </div>
+
+          {secondaryItems.length > 0 && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: "var(--foreground)", paddingTop: 12, borderTop: "1px solid var(--border)" }}>{secondaryTitle}</div>
+              {secondaryItems.map((item, index) => <IntelCard key={`s-${index}`} item={item} compact />)}
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
-}
-
-function formatIntelValue(value: unknown) {
-  if (value === null || value === undefined || value === "") return "n/a";
-  if (typeof value === "number") {
-    if (Number.isInteger(value)) return value.toLocaleString();
-    return value.toFixed(2);
-  }
-  if (typeof value === "boolean") return value ? "yes" : "no";
-  if (Array.isArray(value)) return value.map((item) => (typeof item === "object" ? JSON.stringify(item) : String(item))).join(", ");
-  if (typeof value === "object") return JSON.stringify(value);
-  return String(value);
 }

@@ -359,10 +359,12 @@ async def evaluate_lifecycle_snapshot(
     narrative = result.get("matched_narrative") or token.get("lifecycle_narrative") or "Other"
     result["matched_narrative"] = narrative
     result.update(_scanner.build_entry_quality(token, snapshot.enrichment.rugcheck or {}, result, narrative))
+    _user_entry_overrides = _db.get_setting(f"prof_entry_overrides_{user_id}", {})
     quality_flags = _scanner.apply_entry_quality_rules(
         result,
         effective_score=result["effective_score"],
         momentum_alive=True,
+        user_entry_overrides=_user_entry_overrides or None,
     )
     result["entry_quality_reasons"] = quality_flags["quality_reasons"]
     result["entry_quality_force_scouted"] = quality_flags["force_scouted"]

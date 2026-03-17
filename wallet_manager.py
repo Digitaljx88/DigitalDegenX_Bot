@@ -17,6 +17,7 @@ import base64
 import base58
 import hashlib
 import hmac
+import re
 from typing import Optional
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from cryptography.hazmat.primitives.kdf.pbkdf2 import PBKDF2HMAC
@@ -35,6 +36,7 @@ except ImportError:
 
 DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 WALLET_BACKUP_FILE = os.path.join(DATA_DIR, "wallet_backup.json")
+DEFAULT_SOLANA_DERIVATION_PATH = "m/44'/501'/0'/0'"
 os.makedirs(DATA_DIR, exist_ok=True)
 
 
@@ -48,11 +50,14 @@ def _check_dependencies():
 
 # ────── Mnemonic Generation ──────────────────────────────────────────────────
 
-def generate_mnemonic(language: str = "english") -> str:
-    """Generate a 12-word BIP39 mnemonic."""
+def generate_mnemonic(word_count: int = 12, language: str = "english") -> str:
+    """Generate a BIP39 mnemonic."""
     _check_dependencies()
+    strength_map = {12: 128, 24: 256}
+    if word_count not in strength_map:
+        raise ValueError("word_count must be 12 or 24")
     mnemo = Mnemonic(language)
-    return mnemo.generate(strength=128)
+    return mnemo.generate(strength=strength_map[word_count])
 
 
 def validate_mnemonic(mnemonic: str) -> bool:
@@ -64,15 +69,26 @@ def validate_mnemonic(mnemonic: str) -> bool:
 
 # ────── Keypair Derivation ──────────────────────────────────────────────────
 
-def mnemonic_to_keypair(mnemonic: str) -> dict:
+def _normalize_derivation_path(derivation_path: Optional[str]) -> str:
+    path = (derivation_path or DEFAULT_SOLANA_DERIVATION_PATH).strip()
+    if not re.fullmatch(r"m(?:/\d+'?)+", path):
+        raise ValueError("Invalid derivation path")
+    return path
+
+
+def mnemonic_to_keypair(
+    mnemonic: str,
+    passphrase: str = "",
+    derivation_path: Optional[str] = None,
+) -> dict:
     """Derive a Solana keypair from a BIP39 mnemonic."""
     _check_dependencies()
     if not validate_mnemonic(mnemonic):
         raise ValueError("Invalid mnemonic phrase")
     
     mnemo = Mnemonic("english")
-    seed = mnemo.to_seed(mnemonic)
-    derivation_path = "m/44'/501'/0'/0'"
+    seed = mnemo.to_seed(mnemonic, passphrase=passphrase or "")
+    derivation_path = _normalize_derivation_path(derivation_path)
     
     try:
         kp = Keypair.from_seed_and_derivation_path(seed, derivation_path)
@@ -86,6 +102,21 @@ def mnemonic_to_keypair(mnemonic: str) -> dict:
         }
     except Exception as e:
         raise RuntimeError(f"Keypair derivation failed: {e}")
+
+
+def private_key_to_keypair(private_key_base58: str) -> dict:
+    """Validate and normalize a base58-encoded Solana private key."""
+    _check_dependencies()
+    try:
+        kp = Keypair.from_base58_string(private_key_base58.strip())
+    except Exception as e:
+        raise ValueError(f"Invalid private key: {e}")
+
+    return {
+        "public_key": str(kp.pubkey()),
+        "private_key_base58": base58.b58encode(bytes(kp)).decode(),
+        "path": None,
+    }
 
 
 # ────── Encryption / Decryption ──────────────────────────────────────────────
@@ -181,7 +212,12 @@ def get_saved_backup(public_key: str) -> Optional[dict]:
     return backups.get("wallets", {}).get(public_key)
 
 
-def recover_from_mnemonic(mnemonic: str, password: Optional[str] = None) -> dict:
+def recover_from_mnemonic(
+    mnemonic: str,
+    password: Optional[str] = None,
+    passphrase: str = "",
+    derivation_path: Optional[str] = None,
+) -> dict:
     """Recover a wallet from a mnemonic phrase."""
     if password:
         try:
@@ -192,23 +228,32 @@ def recover_from_mnemonic(mnemonic: str, password: Optional[str] = None) -> dict
     if not validate_mnemonic(mnemonic):
         raise ValueError("Invalid mnemonic phrase")
     
-    kp_data = mnemonic_to_keypair(mnemonic)
+    kp_data = mnemonic_to_keypair(mnemonic, passphrase=passphrase, derivation_path=derivation_path)
     kp_data["recovered_ts"] = int(time.time())
     return kp_data
 
 
-def create_wallet_with_mnemonic(backup_mode: str = "manual", backup_password: Optional[str] = None) -> dict:
+def create_wallet_with_mnemonic(
+    word_count: int = 12,
+    backup_mode: str = "manual",
+    backup_password: Optional[str] = None,
+    passphrase: str = "",
+    derivation_path: Optional[str] = None,
+) -> dict:
     """Full wallet creation with BIP39 mnemonic."""
     _check_dependencies()
     
-    mnemonic = generate_mnemonic()
-    kp_data = mnemonic_to_keypair(mnemonic)
+    mnemonic = generate_mnemonic(word_count=word_count)
+    kp_data = mnemonic_to_keypair(mnemonic, passphrase=passphrase, derivation_path=derivation_path)
     public_key = kp_data["public_key"]
     
     result = {
         "mnemonic": mnemonic,
         "public_key": public_key,
         "private_key_base58": kp_data["private_key_base58"],
+        "path": kp_data["path"],
+        "word_count": word_count,
+        "has_bip39_passphrase": bool(passphrase),
         "backup_mode": backup_mode,
         "backup_saved": False,
         "recovery_code": hashlib.sha256(mnemonic.encode()).hexdigest()[:8].upper(),
@@ -223,8 +268,10 @@ def create_wallet_with_mnemonic(backup_mode: str = "manual", backup_password: Op
     return result
 
 
-def get_wallet_backup_status(public_key: str) -> dict:
+def get_wallet_backup_status(public_key: Optional[str] = None) -> dict:
     """Check if wallet has a backup."""
+    if not public_key:
+        return {"has_backup": False, "backup_type": None, "created_ts": None}
     backup = get_saved_backup(public_key)
     if not backup:
         return {"has_backup": False, "backup_type": None, "created_ts": None}

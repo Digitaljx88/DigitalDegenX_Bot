@@ -1,53 +1,74 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
 @import "tailwindcss";
 
 :root {
-  --background: #081018;
-  --foreground: #f1efe9;
-  --panel: rgba(12, 19, 28, 0.78);
-  --muted-foreground: rgba(217, 214, 207, 0.72);
+  --background: #090b0f;
+  --bg1: #0e1117;
+  --bg2: #141820;
+  --bg3: #1a2030;
+  --bg4: #212840;
+  --border: rgba(255,255,255,0.06);
+  --border2: rgba(255,255,255,0.10);
+  --foreground: #f0f2f8;
+  --text2: #8b90a8;
+  --text3: #555c78;
+  --panel: rgba(14,17,23,0.95);
+  --muted-foreground: #8b90a8;
   --accent: #f97316;
+  --accent2: #fb923c;
   --accent-foreground: #fff8f2;
-  --green: #22c55e;
-  --red: #ef4444;
+  --green: #22d3a0;
+  --red: #f43f5e;
+  --blue: #60a5fa;
+  --purple: #a78bfa;
+  --yellow: #fbbf24;
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-panel: var(--panel);
-  --font-sans: "Avenir Next", "Segoe UI", sans-serif;
-  --font-mono: "SFMono-Regular", "Menlo", "Monaco", monospace;
+  --font-sans: 'Space Grotesk', 'Segoe UI', sans-serif;
+  --font-mono: 'JetBrains Mono', 'SFMono-Regular', monospace;
 }
 
+*, *::before, *::after { box-sizing: border-box; }
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  font-family: 'Space Grotesk', 'Segoe UI', sans-serif;
+  min-height: 100vh;
+  overflow-x: hidden;
+}
+
+/* ── Scrollbar ─────────────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.10); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.18); }
+
+/* ── Transitions ───────────────────────────────────────── */
 * {
   transition-property: color, background-color, border-color, opacity, box-shadow;
   transition-duration: 150ms;
   transition-timing-function: ease;
 }
 
-::-webkit-scrollbar { width: 6px; height: 6px; }
-::-webkit-scrollbar-track { background: transparent; }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 3px; }
-::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
-
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.3; }
+/* ── Live dot pulse ────────────────────────────────────── */
+@keyframes live-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(34,211,160,0.45); }
+  50%       { box-shadow: 0 0 0 6px rgba(34,211,160,0); }
 }
-.live-dot { animation: pulse-dot 2s ease-in-out infinite; }
+.live-dot { animation: live-pulse 2s ease-in-out infinite; }
 
+/* ── Ticker ────────────────────────────────────────────── */
 @keyframes ticker-scroll {
   0%   { transform: translateX(0); }
   100% { transform: translateX(-50%); }
 }
 .ticker-scroll {
-  animation: ticker-scroll 50s linear infinite;
+  animation: ticker-scroll 28s linear infinite;
   will-change: transform;
 }
 .ticker-scroll:hover { animation-play-state: paused; }
-
-body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: "Avenir Next", "Segoe UI", sans-serif;
-}

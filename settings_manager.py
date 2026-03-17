@@ -57,6 +57,9 @@ HEAT_SCORE_V2_DEFAULTS = {
     "alert_hot_threshold": 70,
     "alert_warm_threshold": 55,
     "alert_scouted_threshold": 35,
+    # ─── Scanner MCap Filters (per-user)
+    "scanner_mcap_min": 5_000,
+    "scanner_mcap_max": 10_000_000,
 }
 
 SCOUT_PRESETS = {
@@ -320,8 +323,6 @@ def validate_setting(setting_key: str, value: Any) -> bool:
         "alert_hot_threshold": (0, 100),
         "alert_warm_threshold": (0, 100),
         "alert_scouted_threshold": (0, 100),
-        "speed_factor": (0, 100),
-        "filter_sensitivity": (0, 100),
         # Scanner MCap range (USD) — per-user filters applied on top of global MCAP_MIN/MAX
         "scanner_mcap_min": (0, 999_999_999),
         "scanner_mcap_max": (0, 999_999_999),
@@ -501,6 +502,9 @@ def get_setting_description(setting_key: str) -> str:
         "alert_hot_threshold": "🟠 Hot Alert: Score threshold for HOT alerts (0-100)",
         "alert_warm_threshold": "🟡 Warm Alert: Score threshold for WARM alerts (0-100)",
         "alert_scouted_threshold": "⚪ Scouted Watchlist: Score threshold for watchlist adds (0-100)",
+        # Scanner MCap
+        "scanner_mcap_min": "📊 MCap Min Filter: Minimum token market cap (USD) shown in your alerts",
+        "scanner_mcap_max": "📊 MCap Max Filter: Maximum token market cap (USD) shown in your alerts",
     }
     
     return descriptions.get(setting_key, f"Setting: {setting_key}")

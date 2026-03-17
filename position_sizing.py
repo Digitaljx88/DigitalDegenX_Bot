@@ -148,7 +148,7 @@ def resolve_position_size(cfg: dict, result: dict, exposure: dict | None = None)
     strategy_profile = strategy_profiles.resolve_strategy_profile(result)
     confidence, breakdown = compute_entry_confidence(result)
 
-    min_confidence = float(cfg.get("min_confidence", 0.35) or 0.35)
+    min_confidence = float(cfg.get("min_confidence", 0.42) or 0.42)
     if confidence < min_confidence:
         return SizingDecision(
             confidence=confidence,

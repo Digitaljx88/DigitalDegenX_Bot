@@ -35,6 +35,7 @@ GRAD_MAX_AGE_H = 4           # only fetch tokens graduated within last 4 hours
 
 # Injected by bot.py at startup to avoid circular import
 _grad_autobuy_fn = None
+_snipe_fn = None  # called with (mint, symbol, name, creator_wallet) for each new token
 
 
 def _build_scanner_token(token: dict, meta: dict, sol_usd: float, dex: str = "") -> dict:
@@ -178,6 +179,12 @@ def _record_lifecycle_from_feed(token: dict, meta: dict, sol_usd: float, heat: d
 def set_grad_autobuy_fn(fn):
     global _grad_autobuy_fn
     _grad_autobuy_fn = fn
+
+
+def set_snipe_fn(fn):
+    """Register the sniper callback: fn(mint, symbol, name, creator_wallet)."""
+    global _snipe_fn
+    _snipe_fn = fn
 
 
 DEFAULT_FILTERS = {
@@ -1594,6 +1601,18 @@ async def run_pumpfeed(bot: Bot):
                         continue
                     tx_type = data.get("txType") or data.get("type") or ""
                     if tx_type == "create":
+                        # Sniper fast-path: fire immediately for lowest latency
+                        if _snipe_fn:
+                            try:
+                                _snipe_fn(
+                                    data.get("mint", ""),
+                                    data.get("symbol", ""),
+                                    data.get("name", ""),
+                                    data.get("traderPublicKey", ""),
+                                    data,
+                                )
+                            except Exception as _se:
+                                logger.debug(f"[PUMPFEED] snipe callback error: {_se}")
                         s = load_state()  # reads from cache, no disk I/O
                         has_subs    = any(cfg.get("active") for cfg in s.get("subscribers", {}).values())
                         has_channel = bool(s.get("pumplive_channel"))

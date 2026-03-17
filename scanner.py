@@ -74,10 +74,10 @@ _narrative_alert_history: dict[str, list[float]] = defaultdict(list)
 QUALITY_HISTORY_SECS = 1800
 NARRATIVE_CLUSTER_WINDOW_SECS = 900
 MAX_HISTORY = 2000  # max keys in _quality_history / _narrative_alert_history before eviction
-NARRATIVE_CLUSTER_LIMIT = 3
+NARRATIVE_CLUSTER_LIMIT = 5
 WEAK_DISCOVERY_SOURCES = {"dex_search", "dex_profiles", "dex_boosts"}
 PRIMARY_DISCOVERY_SOURCES = {"pumpfun_newest", "pumpfun_hot", "dex_pairs", "dex_lookup"}
-STRICT_AUTOBUY_MAX_AGE_MINS = 20
+STRICT_AUTOBUY_MAX_AGE_MINS = 35
 CHANNEL_ALERT_MIN_INTERVAL_SECS = 2.0
 CHANNEL_ALERT_COOLDOWN_SECS = 20.0
 _last_channel_alert_ts = 0.0
@@ -169,7 +169,7 @@ def mark_channel_alert_sent(now_ts: float | None = None):
 
 # ─── Data fetching ────────────────────────────────────────────────────────────
 
-MAX_TOKEN_AGE_HOURS  = 4     # ignore tokens older than this
+MAX_TOKEN_AGE_HOURS  = 1     # ignore tokens older than this (memes avg ~5min lifespan)
 
 SOURCE_RANKS = {
     "pumpfun_newest": 100,
@@ -814,7 +814,7 @@ def build_entry_quality(token: dict, rc: dict, result: dict, narrative: str) -> 
     return quality
 
 
-def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum_alive: bool) -> dict:
+def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum_alive: bool, user_entry_overrides: dict | None = None) -> dict:
     reasons: list[str] = []
     force_scouted: list[str] = []
     autobuy_only: list[str] = []
@@ -843,7 +843,12 @@ def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum
     if age_now > 60 and wallet_signal < 5:
         reasons.append("outside fresh launch window")
     elif age_now > STRICT_AUTOBUY_MAX_AGE_MINS and wallet_signal < 5:
-        autobuy_only.append("outside first-20m auto-buy window")
+        autobuy_only.append("outside first-35m auto-buy window")
+
+    # Post-pump dump detector: token already peaked and is now bleeding
+    _price_h1 = float(quality.get("price_h1", 0) or 0)
+    if _price_h1 < -25 and age_now > 5 and wallet_signal < 5:
+        reasons.append("post-pump dump detected")
 
     if txns_5m >= 8 and buy_ratio_5m < 0.52:
         reasons.append("buy ratio fading")
@@ -864,7 +869,7 @@ def apply_entry_quality_rules(quality: dict, *, effective_score: float, momentum
     if not momentum_alive and effective_score < 85:
         force_scouted.append("momentum no longer alive")
 
-    strategy_flags = strategy_profiles.evaluate_strategy_rules(quality)
+    strategy_flags = strategy_profiles.evaluate_strategy_rules(quality, user_entry_overrides)
     reasons.extend(strategy_flags["strategy_reasons"])
     # strategy_autobuy_only_reasons are source/timing *preferences* (e.g. "launch_snipe
     # wants direct pump.fun discovery", "migration continuation wants Raydium flow").
@@ -939,7 +944,7 @@ def select_newest_alerts(
             if uid in selected_users:
                 continue
             user_cfg = user_settings_map.get(uid, {})
-            user_mcap_min = user_cfg.get("scanner_mcap_min", 15_000)
+            user_mcap_min = user_cfg.get("scanner_mcap_min", 5_000)
             user_mcap_max = user_cfg.get("scanner_mcap_max", 10_000_000)
             if not (user_mcap_min <= mcap <= user_mcap_max):
                 continue
@@ -1012,7 +1017,7 @@ async def select_autobuy_candidates(
             if uid in selected:
                 continue
             user_cfg = user_settings_map.get(uid, {})
-            user_mcap_min = user_cfg.get("scanner_mcap_min", 15_000)
+            user_mcap_min = user_cfg.get("scanner_mcap_min", 5_000)
             user_mcap_max = user_cfg.get("scanner_mcap_max", 10_000_000)
             if not (user_mcap_min <= mcap <= user_mcap_max):
                 continue
@@ -1287,6 +1292,19 @@ async def run_scan(bot, chat_ids: list[int], on_alert=None):
             "alerted":   False,
             "dq":        result.get("disqualified"),
         })
+
+        # Push fresh market data into the lifecycle store so all API endpoints
+        # serve up-to-date mcap/price/liquidity without waiting for Helius events.
+        try:
+            lifecycle_store.upsert_enrichment(mint, dex={
+                "marketCap": mcap,
+                "fdv":       mcap,
+                "priceUsd":  str(result.get("price_usd", token.get("price_usd", 0))),
+                "liquidity": {"usd": result.get("liquidity", token.get("liquidity", 0))},
+                "volume":    {"h1": result.get("volume_h1", token.get("volume_h1", 0))},
+            })
+        except Exception:
+            pass
 
         # Mark as seen right after scoring so we don't re-score on every 15s cycle.
         # TTL matches alert cooldown (1h) so tokens become eligible again once cooldown expires.
